@@ -63,3 +63,4 @@ screenshots/
 # --- Logs / transcripts ---
 *.log
 *.jsonl
+CLAUDE.md
