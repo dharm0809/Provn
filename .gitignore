@@ -22,6 +22,9 @@ build/
 venv/
 env/
 
+# --- Node / Dashboard ---
+node_modules/
+
 # --- Pytest / type checkers ---
 .pytest_cache/
 .mypy_cache/
@@ -41,6 +44,9 @@ walacor-wal*/
 # --- Excalidraw ---
 excalidraw.log
 
+# --- Obsidian ---
+.obsidian/
+
 # --- Claude Code ---
 .claude/
 
@@ -57,8 +63,16 @@ Thumbs.db
 # --- Test artifacts ---
 screenshots/
 
-# --- Playwright MCP temp screenshots (root-level PNGs from browser automation) ---
-/page-*.png
+# --- Root-level screenshots / marketing assets ---
+*.png
+*.pdf
+*.excalidraw.md
+
+# --- Archives / non-source dirs ---
+/UI/
+
+# --- Root-level generated HTML docs ---
+/Walacor Gateway*.html
 
 # --- Logs / transcripts ---
 *.log

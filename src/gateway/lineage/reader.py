@@ -47,17 +47,43 @@ class LineageReader:
         cur = conn.execute(
             """
             SELECT
-                json_extract(record_json, '$.session_id') AS session_id,
-                COUNT(*) AS record_count,
-                MAX(json_extract(record_json, '$.timestamp')) AS last_activity,
-                COALESCE(json_extract(record_json, '$.model_id'),
-                         json_extract(record_json, '$.model_attestation_id')) AS model,
-                json_extract(record_json, '$.user') AS user
-            FROM wal_records
-            WHERE json_extract(record_json, '$.session_id') IS NOT NULL
-              AND json_extract(record_json, '$.event_type') IS NULL
-            GROUP BY session_id
-            ORDER BY last_activity DESC
+                s.session_id,
+                s.record_count,
+                s.last_activity,
+                s.model,
+                s.user,
+                COALESCE(t.tool_names, '') AS tool_names,
+                COALESCE(t.tool_details, '') AS tool_details
+            FROM (
+                SELECT
+                    json_extract(record_json, '$.session_id') AS session_id,
+                    COUNT(*) AS record_count,
+                    MAX(json_extract(record_json, '$.timestamp')) AS last_activity,
+                    COALESCE(json_extract(record_json, '$.model_id'),
+                             json_extract(record_json, '$.model_attestation_id')) AS model,
+                    json_extract(record_json, '$.user') AS user
+                FROM wal_records
+                WHERE json_extract(record_json, '$.session_id') IS NOT NULL
+                  AND json_extract(record_json, '$.event_type') IS NULL
+                GROUP BY session_id
+            ) s
+            LEFT JOIN (
+                SELECT
+                    json_extract(r.record_json, '$.session_id') AS session_id,
+                    GROUP_CONCAT(DISTINCT json_extract(te.record_json, '$.tool_name')) AS tool_names,
+                    GROUP_CONCAT(DISTINCT
+                        json_extract(te.record_json, '$.tool_name') || ':' ||
+                        COALESCE(json_extract(te.record_json, '$.source'), 'unknown')
+                    ) AS tool_details
+                FROM wal_records r
+                JOIN wal_records te
+                  ON json_extract(te.record_json, '$.execution_id') = r.execution_id
+                 AND json_extract(te.record_json, '$.event_type') = 'tool_call'
+                WHERE json_extract(r.record_json, '$.session_id') IS NOT NULL
+                  AND json_extract(r.record_json, '$.event_type') IS NULL
+                GROUP BY json_extract(r.record_json, '$.session_id')
+            ) t ON t.session_id = s.session_id
+            ORDER BY s.last_activity DESC
             LIMIT ? OFFSET ?
             """,
             (limit, offset),
@@ -160,8 +186,8 @@ class LineageReader:
             SELECT
                 strftime('{fmt}', timestamp) AS t,
                 COUNT(*) AS total,
-                SUM(CASE WHEN disposition = 'forwarded' THEN 1 ELSE 0 END) AS allowed,
-                SUM(CASE WHEN disposition != 'forwarded' THEN 1 ELSE 0 END) AS blocked
+                SUM(CASE WHEN disposition IN ('forwarded', 'allowed') THEN 1 ELSE 0 END) AS allowed,
+                SUM(CASE WHEN disposition NOT IN ('forwarded', 'allowed') THEN 1 ELSE 0 END) AS blocked
             FROM gateway_attempts
             WHERE timestamp >= datetime('now', '{lookback}')
             GROUP BY t

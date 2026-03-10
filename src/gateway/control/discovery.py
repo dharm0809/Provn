@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 _DISCOVERY_TIMEOUT = 5.0
 
+# Models used internally (e.g. content safety analyzers) — excluded from discovery
+_INTERNAL_MODEL_PREFIXES = ("llama-guard", "llama_guard")
+
 
 async def discover_provider_models(
     settings: Any,
@@ -50,7 +53,7 @@ async def _discover_ollama(base_url: str, http_client: Any) -> list[dict]:
         result = []
         for m in data.get("models", []):
             name = m.get("name", "")
-            if name:
+            if name and not name.lower().startswith(_INTERNAL_MODEL_PREFIXES):
                 result.append({"model_id": name, "provider": "ollama", "source": "ollama_tags"})
         logger.info("Ollama discovery: found %d models", len(result))
         return result

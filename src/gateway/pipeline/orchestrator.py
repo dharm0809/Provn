@@ -767,6 +767,12 @@ async def _attestation_check(
         if is_audit_only:
             logger.warning("AUDIT_ONLY: Would have blocked (attestation) provider=%s model=%s", provider, model)
             return att_id, att_ctx, True, "attestation", None
+        # When embedded control plane is active, override the error with a clearer message
+        if ctx.control_store is not None and err.status_code == 503:
+            err = JSONResponse(
+                {"error": f"Model '{call.model_id}' is not registered in the control plane. Register it via the Control > Models tab before use."},
+                status_code=403,
+            )
         _set_disposition(request, "denied_attestation")
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_attestation")
         return att_id, att_ctx, False, None, err

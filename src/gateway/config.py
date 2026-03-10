@@ -75,7 +75,7 @@ class Settings(BaseSettings):
 
     # Phase 17: Llama Guard safety classifier
     llama_guard_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable Llama Guard 3 content analyzer (requires ollama pull llama-guard3).",
     )
     llama_guard_model: str = Field(
