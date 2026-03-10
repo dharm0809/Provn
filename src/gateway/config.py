@@ -221,6 +221,14 @@ class Settings(BaseSettings):
             "E.g. redis://redis-svc:6379/0. When empty, in-memory trackers are used."
         ),
     )
+    model_groups_json: str = Field(
+        default="",
+        description=(
+            "JSON object or file path for model groups with weighted endpoints. "
+            "Format: {\"gpt-4\": [{\"url\": \"https://...\", \"key\": \"sk-1\", \"weight\": 7}, ...]}. "
+            "Enables load balancing, failover, and circuit-breaking across multiple endpoints per model."
+        ),
+    )
     model_routing_json: str = Field(
         default="",
         description=(
