@@ -238,6 +238,106 @@ class LineageReader:
             })
         return {"buckets": buckets, "range": range_key}
 
+    # ── Compliance query methods (Phase 24) ────────────────────────────────
+
+    def get_compliance_summary(self, start: str, end: str) -> dict:
+        """Aggregate stats for compliance report: total requests, pass/fail rates,
+        model usage, content analysis summary, chain integrity."""
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN disposition IN ('forwarded', 'allowed') THEN 1 ELSE 0 END) AS allowed,
+                SUM(CASE WHEN disposition NOT IN ('forwarded', 'allowed') THEN 1 ELSE 0 END) AS denied
+            FROM gateway_attempts
+            WHERE timestamp >= ? AND timestamp < ?
+            """,
+            (start, end),
+        )
+        row = cur.fetchone()
+        total = row["total"] or 0
+        allowed = row["allowed"] or 0
+        denied = row["denied"] or 0
+
+        # Models used in period
+        cur2 = conn.execute(
+            """
+            SELECT DISTINCT json_extract(record_json, '$.model_id') AS model_id
+            FROM wal_records
+            WHERE json_extract(record_json, '$.timestamp') >= ?
+              AND json_extract(record_json, '$.timestamp') < ?
+              AND json_extract(record_json, '$.event_type') IS NULL
+              AND json_extract(record_json, '$.model_id') IS NOT NULL
+            """,
+            (start, end),
+        )
+        models_used = [r["model_id"] for r in cur2.fetchall()]
+
+        return {
+            "total_requests": total,
+            "allowed": allowed,
+            "denied": denied,
+            "models_used": models_used,
+        }
+
+    def get_execution_export(self, start: str, end: str, limit: int = 10000) -> list[dict]:
+        """Full execution records for date range (JSON/CSV export)."""
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """
+            SELECT record_json
+            FROM wal_records
+            WHERE json_extract(record_json, '$.timestamp') >= ?
+              AND json_extract(record_json, '$.timestamp') < ?
+              AND json_extract(record_json, '$.event_type') IS NULL
+            ORDER BY json_extract(record_json, '$.timestamp') ASC
+            LIMIT ?
+            """,
+            (start, end, limit),
+        )
+        return [json.loads(row["record_json"]) for row in cur.fetchall()]
+
+    def get_attestation_summary(self, start: str, end: str) -> list[dict]:
+        """Model attestation inventory with usage counts in period."""
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """
+            SELECT
+                json_extract(record_json, '$.model_id') AS model_id,
+                json_extract(record_json, '$.provider') AS provider,
+                json_extract(record_json, '$.model_attestation_id') AS attestation_id,
+                COUNT(*) AS request_count,
+                SUM(COALESCE(json_extract(record_json, '$.total_tokens'), 0)) AS total_tokens
+            FROM wal_records
+            WHERE json_extract(record_json, '$.timestamp') >= ?
+              AND json_extract(record_json, '$.timestamp') < ?
+              AND json_extract(record_json, '$.event_type') IS NULL
+              AND json_extract(record_json, '$.model_id') IS NOT NULL
+            GROUP BY model_id, provider
+            ORDER BY request_count DESC
+            """,
+            (start, end),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_chain_verification_report(self, start: str, end: str) -> list[dict]:
+        """Run verify_chain for all sessions active in period, return results."""
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """
+            SELECT DISTINCT json_extract(record_json, '$.session_id') AS session_id
+            FROM wal_records
+            WHERE json_extract(record_json, '$.timestamp') >= ?
+              AND json_extract(record_json, '$.timestamp') < ?
+              AND json_extract(record_json, '$.session_id') IS NOT NULL
+              AND json_extract(record_json, '$.event_type') IS NULL
+            """,
+            (start, end),
+        )
+        session_ids = [row["session_id"] for row in cur.fetchall()]
+        return [self.verify_chain(sid) for sid in session_ids]
+
     def verify_chain(self, session_id: str) -> dict:
         """Verify Merkle chain integrity for a session.
 
