@@ -1111,6 +1111,36 @@ The check uses pre-compiled regex patterns — sub-millisecond for 10KB+ text. P
 
 ---
 
+## Playground and weighted routing (Phase 29)
+
+### Prompt playground
+
+The dashboard includes a **Playground** tab for interactive prompt testing. Every request routes through the gateway itself, generating real audit records.
+
+- **Model selector** — populated from health endpoint's `model_capabilities`
+- **System prompt** — optional textarea
+- **User prompt** — required, with Ctrl+Enter to send
+- **Parameters** — temperature slider (0–2), max_tokens input
+- **Governance readout** — execution ID, attestation, policy result, chain sequence, latency, tokens, cache status, content analysis verdicts
+
+### Side-by-side comparison
+
+Toggle **Compare Mode** to send the same prompt to two models simultaneously. Both responses and governance metadata display in parallel panes for direct comparison.
+
+### Weighted routing variant tracking
+
+When model groups have multiple endpoints (configured via `WALACOR_MODEL_GROUPS_JSON`), each execution record includes a `variant_id` field in the format `{model_id}@{endpoint_url}`. This enables:
+
+- A/B testing across provider endpoints
+- Performance comparison by variant
+- Traffic distribution analysis from audit records
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `variant_id` | `string \| null` | `{model_id}@{endpoint_url}` when multi-endpoint, null for single-endpoint |
+
+---
+
 ## Roadmap
 
 The following capabilities are planned for V2. None of these change the core guarantees — they extend them.
