@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { getExecution } from '../api';
+import { getExecution, getTrace } from '../api';
 import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass } from '../utils';
+import TraceWaterfall from '../components/TraceWaterfall';
 
 function DetailRow({ label, value, className = '' }) {
   return (
@@ -14,6 +15,7 @@ function DetailRow({ label, value, className = '' }) {
 export default function Execution({ navigate, executionId, sessionId }) {
   const [record, setRecord] = useState(null);
   const [toolEvents, setToolEvents] = useState([]);
+  const [trace, setTrace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showMeta, setShowMeta] = useState(false);
@@ -21,9 +23,13 @@ export default function Execution({ navigate, executionId, sessionId }) {
   useEffect(() => {
     (async () => {
       try {
-        const data = await getExecution(executionId);
+        const [data, traceData] = await Promise.all([
+          getExecution(executionId),
+          getTrace(executionId).catch(() => null),
+        ]);
         setRecord(data.record);
         setToolEvents(data.tool_events || []);
+        setTrace(traceData);
       } catch (e) { setError(e.message); }
       finally { setLoading(false); }
     })();
@@ -85,6 +91,19 @@ export default function Execution({ navigate, executionId, sessionId }) {
           </div>
         </div>
       </div>
+
+      {/* Governance Waterfall Trace */}
+      {trace?.timings && Object.keys(trace.timings).length > 0 && (
+        <div className="card">
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
+            ◆ Pipeline Trace
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--gold)', marginLeft: 8 }}>
+              {trace.timings.total_ms?.toFixed(0) || '—'}ms total
+            </span>
+          </div>
+          <TraceWaterfall timings={trace.timings} toolEvents={trace.tool_events || []} />
+        </div>
+      )}
 
       {/* Prompt */}
       <div className="card">

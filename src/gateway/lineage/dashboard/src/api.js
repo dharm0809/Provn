@@ -52,6 +52,10 @@ export async function getThroughputHistory(range) {
   return data;
 }
 
+export async function getTrace(executionId) {
+  return fetchJSON(`${API}/trace/${executionId}`);
+}
+
 export async function verifySession(sessionId) {
   return fetchJSON(`${API}/verify/${sessionId}`);
 }

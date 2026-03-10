@@ -797,3 +797,17 @@ html[data-theme="light"] .form-select {
   .compliance-controls { flex-direction: column; align-items: stretch; }
   .compliance-stats { grid-template-columns: 1fr 1fr; }
 }
+
+/* ── Trace Waterfall (Phase 27) ── */
+.trace-waterfall-wrap {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  overflow-x: auto;
+}
+.trace-waterfall {
+  display: block;
+  width: 100%;
+  min-height: 100px;
+}
