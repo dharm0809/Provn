@@ -17,6 +17,21 @@ from gateway.metrics.prometheus import forward_duration
 logger = logging.getLogger(__name__)
 
 
+def build_governance_sse_event(execution_id=None, attestation_id=None, chain_seq=None, policy_result=None):
+    """Build an SSE event with governance metadata, sent after data: [DONE]."""
+    import json as _json
+    payload = {}
+    if execution_id:
+        payload["execution_id"] = execution_id
+    if attestation_id:
+        payload["attestation_id"] = attestation_id
+    if chain_seq is not None:
+        payload["chain_seq"] = chain_seq
+    if policy_result:
+        payload["policy_result"] = policy_result
+    return f"event: governance\ndata: {_json.dumps(payload)}\n\n".encode()
+
+
 def _http_client() -> httpx.AsyncClient:
     """Shared client when governance on; otherwise a one-off client."""
     ctx = get_pipeline_context()
@@ -61,12 +76,17 @@ async def stream_with_tee(
     request: Request,
     buffer: list[bytes] | None = None,
     background_task: BackgroundTask | None = None,
+    governance_meta: dict | None = None,
 ) -> tuple[StreamingResponse, list[bytes]]:
     """Stream response to caller while buffering chunks (capped by max_stream_buffer_bytes). Returns (response, buffer).
 
     The upstream connection is opened eagerly before building StreamingResponse so
     the actual HTTP status_code (e.g. 400/401/429/500) is propagated to the caller
     instead of the previously hard-coded 200 (Finding 6).
+
+    governance_meta: mutable dict pre-populated with attestation_id/policy_result by
+    the orchestrator. The background task adds execution_id and chain_seq after write.
+    After the background task completes, a governance SSE event is yielded.
     """
     upstream_req = await adapter.build_forward_request(call, request)
     prompt_id = call.metadata.get("prompt_id")
@@ -136,6 +156,14 @@ async def stream_with_tee(
                         "Stream background task failed: provider=%s",
                         adapter.get_provider_name(), exc_info=True,
                     )
+
+        # Phase 23: yield governance SSE event after stream + background task complete.
+        # governance_meta is populated by the background task with execution_id/chain_seq.
+        if governance_meta is not None:
+            try:
+                yield build_governance_sse_event(**governance_meta)
+            except Exception:
+                logger.debug("Failed to yield governance SSE event", exc_info=True)
 
     return StreamingResponse(
         generate(),

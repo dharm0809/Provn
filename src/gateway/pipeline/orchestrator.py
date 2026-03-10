@@ -626,6 +626,7 @@ async def _after_stream_record(
     audit_metadata: dict,
     budget_estimated: int = 0,
     pipeline_start: float | None = None,
+    governance_meta: dict | None = None,
 ) -> None:
     """Background task: after stream ends, evaluate response, build chain, write record (no hashing — Walcor hashes).
 
@@ -696,6 +697,10 @@ async def _after_stream_record(
         await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
         if session_id and ctx.session_chain and record_hash_val is not None:
             await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
+        # Phase 23: populate governance_meta for SSE event injection
+        if governance_meta is not None:
+            governance_meta["execution_id"] = record.get("execution_id")
+            governance_meta["chain_seq"] = record.get("sequence_number")
     except Exception as e:
         logger.error(
             "After-stream execution record write failed: execution_id=%s prompt_id=%s session_id=%s error=%s",
@@ -1250,12 +1255,16 @@ async def handle_request(request: Request) -> Response:
             call = _strip_tools_from_call(call)
         _set_disposition(request, "allowed")
         buf: list[bytes] = []
+        governance_meta: dict = {"attestation_id": pre.att_id, "policy_result": pre.pr}
         task = BackgroundTask(
             _after_stream_record, buf, call, adapter,
             pre.att_id, pre.pv, pre.pr, pre.audit_metadata,
-            pre.budget_estimated, t0,
+            pre.budget_estimated, t0, governance_meta,
         )
-        resp, _ = await stream_with_tee(adapter, call, request, buffer=buf, background_task=task)
+        resp, _ = await stream_with_tee(
+            adapter, call, request, buffer=buf, background_task=task,
+            governance_meta=governance_meta,
+        )
         pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
         outcome = "audit_only_allowed" if (is_audit_only and pre.whb) else "allowed"
         _inc_request(provider, model, outcome)
