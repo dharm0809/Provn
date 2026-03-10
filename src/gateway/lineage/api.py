@@ -111,6 +111,22 @@ async def lineage_token_latency_history(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+async def lineage_trace(request: Request) -> JSONResponse:
+    """GET /v1/lineage/trace/{execution_id} — execution trace with timings for waterfall view."""
+    reader = _reader_or_503()
+    if reader is None:
+        return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
+    execution_id = request.path_params["execution_id"]
+    try:
+        trace = reader.get_execution_trace(execution_id)
+        if trace is None:
+            return JSONResponse({"error": "Execution not found", "execution_id": execution_id}, status_code=404)
+        return JSONResponse(trace)
+    except Exception as e:
+        logger.error("lineage_trace error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 async def lineage_verify(request: Request) -> JSONResponse:
     """GET /v1/lineage/verify/{session_id} — server-side chain verification."""
     reader = _reader_or_503()

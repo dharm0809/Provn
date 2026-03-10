@@ -138,6 +138,18 @@ class LineageReader:
         )
         return [json.loads(row["record_json"]) for row in cur.fetchall()]
 
+    def get_execution_trace(self, execution_id: str) -> dict[str, Any] | None:
+        """Return execution + tool events + timings for waterfall trace view."""
+        execution = self.get_execution(execution_id)
+        if not execution:
+            return None
+        tool_events = self.get_tool_events(execution_id)
+        return {
+            "execution": execution,
+            "tool_events": tool_events,
+            "timings": execution.get("timings") or {},
+        }
+
     def get_attempts(self, limit: int = 100, offset: int = 0) -> dict:
         """Return recent attempt records and disposition stats."""
         conn = self._ensure_conn()

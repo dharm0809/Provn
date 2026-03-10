@@ -29,6 +29,7 @@ from gateway.lineage.api import (
     lineage_attempts,
     lineage_metrics_history,
     lineage_token_latency_history,
+    lineage_trace,
     lineage_verify,
 )
 from gateway.control.api import (
@@ -737,6 +738,7 @@ def create_app() -> Starlette:
         Route("/v1/lineage/attempts", lineage_attempts, methods=["GET"]),
         Route("/v1/lineage/metrics", lineage_metrics_history, methods=["GET"]),
         Route("/v1/lineage/token-latency", lineage_token_latency_history, methods=["GET"]),
+        Route("/v1/lineage/trace/{execution_id:path}", lineage_trace, methods=["GET"]),
         Route("/v1/lineage/verify/{session_id:path}", lineage_verify, methods=["GET"]),
         # Control plane CRUD
         Route("/v1/control/attestations", control_list_attestations, methods=["GET"]),
