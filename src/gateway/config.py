@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     token_budget_period: str = Field(default="monthly", description="Budget period: 'daily' or 'monthly'")
     token_budget_max_tokens: int = Field(default=0, description="Max tokens per period per tenant (0 = unlimited)")
 
+    # Phase 26: Rate limiting
+    rate_limit_enabled: bool = Field(default=False, description="Enable request rate limiting")
+    rate_limit_rpm: int = Field(default=60, description="Requests per minute limit")
+    rate_limit_per_model: bool = Field(default=True, description="Rate limit per user+model (vs per user only)")
+
     # Phase 13: Session chain integrity
     session_chain_enabled: bool = Field(default=True, description="Enable Merkle chain for session records (G5)")
     session_chain_max_sessions: int = Field(default=10000, description="Max concurrent sessions tracked in memory")
