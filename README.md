@@ -453,6 +453,7 @@ Requires the `opentelemetry-sdk`, `opentelemetry-exporter-otlp`, and `openteleme
 | `/v1/control/budgets/{id}` | DELETE | Remove budget |
 | `/v1/control/status` | GET | Comprehensive gateway control status |
 | `/v1/control/discover` | GET | Scan configured providers for available models |
+| `/v1/compliance/export` | GET | Compliance export (JSON, CSV, PDF) with framework mappings |
 | `/v1/attestation-proofs` | GET | Attestation proofs (SyncClient format) |
 | `/v1/policies` | GET | Active policies (SyncClient format) |
 
@@ -909,6 +910,56 @@ For streaming responses, an `event: governance` SSE event is emitted after `data
 ### SSE keepalives
 
 The streaming forwarder includes an `sse_keepalive_generator` that yields `: keepalive\n\n` SSE comment lines at 15-second intervals. This prevents proxy/load-balancer idle timeouts during long-running model inferences.
+
+---
+
+## Compliance export API (Phase 24)
+
+The gateway provides regulatory compliance export capabilities via `GET /v1/compliance/export`, supporting four major frameworks and three output formats.
+
+### Supported frameworks
+
+| Framework | ID | Coverage |
+|---|---|---|
+| **EU AI Act** | `eu_ai_act` | Articles 12 (Record-Keeping), 14 (Human Oversight) |
+| **NIST AI RMF** | `nist` | Govern, Map, Measure, Manage functions |
+| **SOC 2 Type II** | `soc2` | CC7.2, CC7.3, CC8.1 trust criteria |
+| **ISO 42001** | `iso42001` | Clauses 6.1, 8.4, 9.1, 10.1 |
+
+### Query parameters
+
+| Parameter | Required | Description |
+|---|---|---|
+| `start` | Yes | Start date (YYYY-MM-DD) |
+| `end` | Yes | End date (YYYY-MM-DD) |
+| `framework` | No | Framework ID (default: `eu_ai_act`) |
+| `format` | No | Output format: `json` (default), `csv`, `pdf` |
+
+### Example
+
+```bash
+# JSON compliance report for EU AI Act
+curl "http://localhost:8080/v1/compliance/export?start=2026-03-01&end=2026-03-10&framework=eu_ai_act"
+
+# CSV export for SOC 2
+curl "http://localhost:8080/v1/compliance/export?start=2026-03-01&end=2026-03-10&framework=soc2&format=csv"
+
+# PDF report (requires WeasyPrint)
+curl -o report.pdf "http://localhost:8080/v1/compliance/export?start=2026-03-01&end=2026-03-10&format=pdf"
+```
+
+### Report contents
+
+Each export includes:
+- **Executive summary** — total requests, allowed/denied counts, models used
+- **Model attestation inventory** — per-model request counts and token usage
+- **Chain verification results** — session integrity status via Merkle chain verification
+- **Framework compliance mapping** — requirement-level status (compliant/partial/non_compliant) with evidence references
+- **Sample execution records** — up to 10 recent execution records (full data in JSON/CSV)
+
+### Dashboard
+
+The Lineage dashboard includes a **Compliance** tab with date range pickers, framework selector, preview panel with summary statistics, and download buttons for JSON/CSV/PDF exports.
 
 ---
 
