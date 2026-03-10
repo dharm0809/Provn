@@ -37,10 +37,14 @@ class BudgetTracker:
     Period resets are lazy (checked on each call).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, alert_bus=None, alert_thresholds: list[int] | None = None) -> None:
         self._lock = asyncio.Lock()
         # key: (tenant_id, user | "") -> BudgetState
         self._states: dict[tuple[str, str], BudgetState] = {}
+        self._alert_bus = alert_bus
+        self._alert_thresholds = sorted(alert_thresholds or [])
+        # Track which thresholds have been crossed per key to avoid duplicates
+        self._alerted: dict[tuple[str, str], set[int]] = {}
 
     def configure(
         self,
@@ -98,6 +102,8 @@ class BudgetTracker:
             if remaining <= 0 or estimated_tokens > remaining:
                 return False, max(0, remaining)
             state.tokens_used += estimated_tokens  # reserve immediately
+            # Phase 26: Check budget thresholds after reservation
+            await self._check_thresholds(key, state, tenant_id, user)
             return True, state.max_tokens - state.tokens_used
 
     async def record_usage(
@@ -127,6 +133,25 @@ class BudgetTracker:
                 state.tokens_used = 0
                 state.period_start = _period_start(state.period, now)
             state.tokens_used = max(0, state.tokens_used + delta)
+            await self._check_thresholds(key, state, tenant_id, user)
+
+    async def _check_thresholds(self, key, state, tenant_id, user):
+        """Emit alerts for any newly crossed budget thresholds."""
+        if not self._alert_bus or not self._alert_thresholds or state.max_tokens <= 0:
+            return
+        usage_pct = (state.tokens_used / state.max_tokens) * 100
+        alerted = self._alerted.setdefault(key, set())
+        for threshold in self._alert_thresholds:
+            if usage_pct >= threshold and threshold not in alerted:
+                alerted.add(threshold)
+                from gateway.alerts.bus import AlertEvent
+                severity = "critical" if threshold >= 100 else "warning" if threshold >= 90 else "info"
+                await self._alert_bus.emit(AlertEvent(
+                    type="budget_threshold",
+                    severity=severity,
+                    message=f"Budget {threshold}% threshold crossed: {state.tokens_used}/{state.max_tokens} tokens ({usage_pct:.0f}%)",
+                    metadata={"tenant_id": tenant_id, "user": user, "threshold": threshold, "usage_pct": round(usage_pct, 1)},
+                ))
 
     async def get_snapshot(self, tenant_id: str, user: str | None = None) -> dict | None:
         """Return current usage snapshot for health/metrics. None if no budget configured."""
