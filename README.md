@@ -963,6 +963,53 @@ The Lineage dashboard includes a **Compliance** tab with date range pickers, fra
 
 ---
 
+## Resilience layer (Phase 25)
+
+The gateway includes a resilience layer for fault tolerance across multiple provider endpoints.
+
+### Model groups
+
+Configure multiple endpoints per model with weighted load balancing via `WALACOR_MODEL_GROUPS_JSON`:
+
+```bash
+export WALACOR_MODEL_GROUPS_JSON='{
+  "gpt-*": [
+    {"url": "https://api1.openai.com", "key": "sk-1", "weight": 7},
+    {"url": "https://api2.openai.com", "key": "sk-2", "weight": 3}
+  ],
+  "claude-*": [
+    {"url": "https://api.anthropic.com", "key": "sk-ant-1", "weight": 1}
+  ]
+}'
+```
+
+Endpoints are selected via weighted random — weight 7 vs 3 gives ~70/30 traffic split. Unhealthy endpoints enter a cooldown period and are automatically re-enabled when it expires.
+
+### Circuit breakers
+
+Each model ID has an independent circuit breaker. After 5 consecutive failures, the circuit opens and requests are routed to fallback endpoints. After a configurable reset timeout, the circuit enters half-open state — a single success closes it.
+
+### Retry with backoff
+
+Transient errors (503, 429, 500, 502, 504, network errors) are retried with exponential backoff via tenacity. Non-retryable errors (400, 401, 403) fail immediately. Default: 2 attempts.
+
+### Error-specific fallback
+
+Provider errors are classified and routed accordingly:
+
+| Error class | Action |
+|---|---|
+| `rate_limited` (429) | Retry with backoff, then fallback to next endpoint |
+| `server_error` (5xx) | Retry with backoff, then fallback to next endpoint |
+| `context_overflow` | Fallback to next endpoint (potentially larger context model) |
+| `content_policy` | No retry — return error to client |
+
+### Execution record tracking
+
+Retry attempts are linked via the `retry_of` field in execution records, enabling audit trail reconstruction across retry chains.
+
+---
+
 ## Roadmap
 
 The following capabilities are planned for V2. None of these change the core guarantees — they extend them.
