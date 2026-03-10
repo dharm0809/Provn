@@ -27,6 +27,7 @@ def build_execution_record(
     provider: str | None = None,
     latency_ms: float | None = None,
     retry_of: str | None = None,
+    timings: dict | None = None,
 ) -> dict:
     """Build execution record as dict (no prompt_hash/response_hash — backend hashes from content)."""
     usage = model_response.usage or {}
@@ -53,4 +54,5 @@ def build_execution_record(
         "completion_tokens": usage.get("completion_tokens") or 0,
         "total_tokens": usage.get("total_tokens") or 0,
         "retry_of": retry_of,
+        "timings": timings,
     }

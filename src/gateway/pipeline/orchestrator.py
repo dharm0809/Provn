@@ -297,6 +297,7 @@ class _AuditParams:
     rp_decisions: list
     provider: str = ""
     latency_ms: float | None = None
+    timings: dict | None = None
 
 
 @dataclasses.dataclass
@@ -314,6 +315,7 @@ class _PreCheckResult:
     tool_strategy: str = "disabled"
     whb: bool = False
     reason: str | None = None
+    timings: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -1005,14 +1007,18 @@ async def _run_pre_checks(
     ctx, settings, is_audit_only: bool, provider: str, model: str,
 ) -> _PreCheckResult:
     """Steps 1–2.7: attestation, policy, WAL backpressure, budget, tool inject."""
+    step_timings: dict[str, float] = {}
+
     if not ctx.attestation_cache:
         _set_disposition(request, "error_config")
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Attestation cache not configured"}, status_code=503))
 
+    t_step = time.perf_counter()
     att_id, att_ctx, whb, reason, err = await _attestation_check(
         request, adapter, call, ctx, settings, is_audit_only, provider, model
     )
+    step_timings["attestation_ms"] = round((time.perf_counter() - t_step) * 1000, 1)
     if err is not None:
         return _PreCheckResult(error=err)
 
@@ -1021,9 +1027,11 @@ async def _run_pre_checks(
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Policy cache not configured"}, status_code=503))
 
+    t_step = time.perf_counter()
     pv, pr, whb, reason, err = _pre_policy_check(
         request, call, ctx, is_audit_only, att_id, att_ctx, whb, reason, provider, model
     )
+    step_timings["policy_ms"] = round((time.perf_counter() - t_step) * 1000, 1)
     if err is not None:
         return _PreCheckResult(error=err)
 
@@ -1032,9 +1040,11 @@ async def _run_pre_checks(
         if wal_err is not None:
             return _PreCheckResult(error=wal_err)
 
+    t_step = time.perf_counter()
     budget_rem, budget_est, whb, reason, err = await _budget_check(
         request, ctx, settings, is_audit_only, call, whb, reason, provider, model
     )
+    step_timings["budget_ms"] = round((time.perf_counter() - t_step) * 1000, 1)
     if err is not None:
         return _PreCheckResult(error=err)
 
@@ -1066,6 +1076,7 @@ async def _run_pre_checks(
         budget_remaining=budget_rem, budget_estimated=budget_est,
         call=call, audit_metadata=audit_metadata,
         tool_strategy=tool_strategy, whb=whb, reason=reason,
+        timings=step_timings,
     )
 
 
@@ -1239,8 +1250,12 @@ async def _build_and_write_record(
         },
         model_id=call.model_id, provider=params.provider,
         latency_ms=params.latency_ms,
+        timings=params.timings,
     )
+    t_chain = time.perf_counter()
     record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
+    if params.timings is not None:
+        params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
     await _store_execution(record, request, ctx)
     # Expose governance metadata for response headers (Phase 23)
     request.state.walacor_chain_seq = record.get("sequence_number")
@@ -1353,7 +1368,9 @@ async def handle_request(request: Request) -> Response:
         return await _handle_skip_governance(request, adapter, call, ctx, settings, t0, provider, model)
 
     # ── Steps 1–2.7: governance pre-checks ───────────────────────────────────
+    t_pre = time.perf_counter()
     pre = await _run_pre_checks(request, adapter, call, ctx, settings, is_audit_only, provider, model)
+    timings: dict[str, float] = {**pre.timings, "pre_checks_ms": round((time.perf_counter() - t_pre) * 1000, 1)}
     if pre.error is not None:
         return pre.error
 
@@ -1404,6 +1421,7 @@ async def handle_request(request: Request) -> Response:
         _inc_request(provider, model, outcome)
         return resp
 
+    t_fwd = time.perf_counter()
     http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
 
     # ── Tool-unsupported retry: if the model rejects tools, strip and retry ──
@@ -1421,6 +1439,7 @@ async def handle_request(request: Request) -> Response:
         _record_model_capability(call.model_id, supports_tools=True)
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
+    timings["forward_ms"] = round((time.perf_counter() - t_fwd) * 1000, 1)
 
     if http_response.status_code >= 500:
         _set_disposition(request, "error_provider")
@@ -1470,9 +1489,11 @@ async def handle_request(request: Request) -> Response:
         http_response = tool_result.http_response
 
     # ── Step 4: Post-inference policy (G4) ───────────────────────────────────
+    t_rp = time.perf_counter()
     rp_version, rp_result, rp_decisions, whb, _, resp_err = await _run_response_policy(
         request, ctx, settings, is_audit_only, model_response, pre.audit_metadata, provider, model, t0
     )
+    timings["content_analysis_ms"] = round((time.perf_counter() - t_rp) * 1000, 1)
     if resp_err is not None:
         await _record_token_usage(
             model_response, settings.gateway_tenant_id, provider,
@@ -1496,6 +1517,8 @@ async def handle_request(request: Request) -> Response:
     )
 
     # ── Steps 6-8: Hash, session chain, write ────────────────────────────────
+    t_write = time.perf_counter()
+    timings["total_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     audit_params = _AuditParams(
         attestation_id=pre.att_id,
         policy_version=pre.pv, policy_result=pre.pr,
@@ -1504,8 +1527,10 @@ async def handle_request(request: Request) -> Response:
         tool_iterations=tool_result.iterations,
         rp_version=rp_version, rp_result=rp_result, rp_decisions=rp_decisions, provider=provider,
         latency_ms=round((time.perf_counter() - t0) * 1000, 1),
+        timings=timings,
     )
     await _build_and_write_record(request, call, model_response, audit_params, ctx, settings)
+    timings["write_ms"] = round((time.perf_counter() - t_write) * 1000, 1)
 
     _set_disposition(request, "allowed")
     pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
