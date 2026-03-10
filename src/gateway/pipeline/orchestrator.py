@@ -68,6 +68,88 @@ def _record_model_capability(model_id: str, supports_tools: bool) -> None:
     logger.info("Model capability cached: %s supports_tools=%s", model_id, supports_tools)
 
 
+# ── Resilience layer (Phase 25) ──────────────────────────────────────────────
+
+async def _forward_with_resilience(adapter, call, request):
+    """Forward with retry, circuit breaker, and fallback.
+
+    Returns (http_response, model_response, used_fallback: bool).
+    Falls back to plain forward() when no load balancer is configured.
+    """
+    ctx = get_pipeline_context()
+    cb_reg = ctx.circuit_breakers
+    lb = ctx.load_balancer
+
+    # No resilience layer configured — plain forward
+    if not lb:
+        resp, mr = await forward(adapter, call, request)
+        if cb_reg and resp.status_code < 400:
+            cb_reg.record_success(call.model_id)
+        elif cb_reg and resp.status_code >= 500:
+            cb_reg.record_failure(call.model_id)
+        return resp, mr, False
+
+    # Check circuit breaker
+    if cb_reg and cb_reg.is_open(call.model_id):
+        logger.warning("Circuit open for %s — trying fallback", call.model_id)
+        from gateway.routing.fallback import select_fallback
+        fb = select_fallback("server_error", call.model_id, lb)
+        if fb is None:
+            return JSONResponse(
+                {"error": {"message": "Service unavailable (circuit open, no fallback)", "type": "server_error"}},
+                status_code=503,
+            ), ModelResponse(content="", provider_request_id="", model_hash=""), True
+        # TODO: route to fallback endpoint (requires adapter URL override)
+        logger.info("Circuit open fallback available: %s", fb.url)
+
+    # Try primary forward with retry
+    from gateway.routing.retry import forward_with_retry, is_retryable
+
+    try:
+        async def _do_forward():
+            resp, mr = await forward(adapter, call, request)
+            if resp.status_code >= 500:
+                raise _ProviderHTTPError(resp.status_code, bytes(resp.body).decode("utf-8", errors="replace"))
+            return resp, mr
+
+        result = await forward_with_retry(_do_forward, max_attempts=2)
+        if cb_reg:
+            cb_reg.record_success(call.model_id)
+        return result[0], result[1], False
+    except _ProviderHTTPError as e:
+        if cb_reg:
+            cb_reg.record_failure(call.model_id)
+        # Try fallback
+        from gateway.routing.fallback import classify_error, select_fallback
+        error_class = classify_error(e.status_code, e.body)
+        fb = select_fallback(error_class, call.model_id, lb)
+        if fb is not None:
+            logger.info("Falling back to %s after %s error", fb.url, error_class)
+            # For now, retry with same adapter (future: route to fallback URL)
+            try:
+                resp, mr = await forward(adapter, call, request)
+                return resp, mr, True
+            except Exception:
+                pass
+        # Return error response
+        return JSONResponse(
+            {"error": {"message": f"Provider error: {e.body}", "type": "server_error"}},
+            status_code=e.status_code,
+        ), ModelResponse(content="", provider_request_id="", model_hash=""), False
+    except Exception:
+        if cb_reg:
+            cb_reg.record_failure(call.model_id)
+        raise
+
+
+class _ProviderHTTPError(Exception):
+    """Raised when provider returns 5xx to trigger retry logic."""
+    def __init__(self, status_code: int, body: str):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"HTTP {status_code}: {body}")
+
+
 # ── Basic helpers ─────────────────────────────────────────────────────────────
 
 def _set_disposition(request: Request, value: str) -> None:
@@ -1270,7 +1352,7 @@ async def handle_request(request: Request) -> Response:
         _inc_request(provider, model, outcome)
         return resp
 
-    http_response, model_response = await forward(adapter, call, request)
+    http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
 
     # ── Tool-unsupported retry: if the model rejects tools, strip and retry ──
     if _is_tool_unsupported_error(http_response.status_code, bytes(http_response.body)):
@@ -1281,7 +1363,7 @@ async def handle_request(request: Request) -> Response:
         )
         call = _strip_tools_from_call(call)
         pre = dataclasses.replace(pre, tool_strategy="none")
-        http_response, model_response = await forward(adapter, call, request)
+        http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
     elif pre.tool_strategy == "active" and http_response.status_code < 400:
         # Model accepted tools successfully — cache this
         _record_model_capability(call.model_id, supports_tools=True)

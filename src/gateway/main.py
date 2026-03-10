@@ -450,6 +450,38 @@ def _init_control_plane(settings, ctx) -> None:
     logger.info("Embedded control plane ready: %s", db_path)
 
 
+def _init_load_balancer(settings, ctx) -> None:
+    """Phase 25: Initialize load balancer and circuit breakers from model_groups_json."""
+    from gateway.routing.balancer import Endpoint, LoadBalancer, ModelGroup
+    from gateway.routing.circuit import CircuitBreakerRegistry
+
+    raw = settings.model_groups_json.strip()
+    if not raw:
+        ctx.circuit_breakers = CircuitBreakerRegistry()
+        return
+
+    import json as _json
+    if not raw.startswith("{"):
+        raw = Path(raw).read_text()
+    groups_dict = _json.loads(raw)
+
+    groups = []
+    for pattern, endpoints_list in groups_dict.items():
+        endpoints = [
+            Endpoint(
+                url=ep["url"],
+                api_key=ep.get("key", ""),
+                weight=ep.get("weight", 1.0),
+            )
+            for ep in endpoints_list
+        ]
+        groups.append(ModelGroup(pattern=pattern, endpoints=endpoints))
+
+    ctx.load_balancer = LoadBalancer(groups)
+    ctx.circuit_breakers = CircuitBreakerRegistry()
+    logger.info("Load balancer initialized with %d model groups", len(groups))
+
+
 def _next_backoff(current: float, cap: float) -> float:
     """Exponential backoff: 5 s initial, doubles each step, capped at cap."""
     step = current * 2 + 5.0 if current else 5.0
@@ -525,6 +557,7 @@ async def on_startup() -> None:
             _init_otel(settings, ctx)
         if settings.control_plane_enabled:
             _init_control_plane(settings, ctx)
+        _init_load_balancer(settings, ctx)
         # Warn if control plane is active but no API keys are configured
         if settings.control_plane_enabled and not settings.api_keys_list:
             logger.warning(

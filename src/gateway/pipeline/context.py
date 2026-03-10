@@ -51,6 +51,9 @@ class PipelineContext:
         self.control_store: Any | None = None
         # Phase 20: Local sync loop task
         self.local_sync_task: Any | None = None
+        # Phase 25: Resilience layer
+        self.load_balancer: Any | None = None
+        self.circuit_breakers: Any | None = None
 
 
 _ctx = PipelineContext()
