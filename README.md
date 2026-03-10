@@ -1082,6 +1082,35 @@ Every non-streaming request captures per-step timing data in the execution recor
 
 ---
 
+## Provider caching and streaming governance (Phase 28)
+
+### Prompt caching
+
+The gateway auto-injects Anthropic `cache_control` breakpoints on system messages when `WALACOR_PROMPT_CACHING_ENABLED=true` (default). This enables [Anthropic prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) without any client-side changes.
+
+| Config | Default | Description |
+|--------|---------|-------------|
+| `WALACOR_PROMPT_CACHING_ENABLED` | `true` | Auto-inject `cache_control: {type: "ephemeral"}` on system messages |
+
+Cache hit detection works for both providers:
+- **Anthropic**: `cache_read_input_tokens` and `cache_creation_input_tokens` from usage
+- **OpenAI**: `prompt_tokens_details.cached_tokens` (prefix caching, automatic)
+
+Cache fields are recorded in every execution record: `cache_hit`, `cached_tokens`, `cache_creation_tokens`.
+
+### Mid-stream S4 safety abort
+
+During SSE streaming, the gateway accumulates response text and runs a compiled regex check for S4 (child safety) patterns on every chunk. If triggered, the stream is immediately terminated with an `event: error` SSE event:
+
+```
+event: error
+data: {"error": "content_safety", "message": "Response blocked by safety filter (S4)"}
+```
+
+The check uses pre-compiled regex patterns — sub-millisecond for 10KB+ text. Programming terminology ("kill process", "child thread") is not flagged.
+
+---
+
 ## Roadmap
 
 The following capabilities are planned for V2. None of these change the core guarantees — they extend them.
