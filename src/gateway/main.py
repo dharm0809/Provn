@@ -49,6 +49,7 @@ from gateway.control.sync_api import (
     sync_attestation_proofs,
     sync_policies,
 )
+from gateway.models_api import list_models
 
 from gateway.util.json_logger import configure_json_logging
 configure_json_logging(os.environ.get("WALACOR_LOG_LEVEL", "INFO"))
@@ -106,7 +107,7 @@ async def api_key_middleware(request: Request, call_next):
 
     Supports auth_mode: 'api_key' (default), 'jwt', or 'both'.
     """
-    if request.url.path in ("/", "/health", "/metrics") or request.url.path.startswith(("/lineage", "/v1/lineage")):
+    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage", "/v1/lineage")):
         return await call_next(request)
     settings = get_settings()
     mode = settings.auth_mode
@@ -666,6 +667,8 @@ def create_app() -> Starlette:
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),
+        # Models API (OpenAI-compatible)
+        Route("/v1/models", list_models, methods=["GET"]),
         # Proxy routes
         Route("/v1/chat/completions", catch_all_post, methods=["POST"]),
         Route("/v1/chat/completions/", catch_all_post, methods=["POST"]),

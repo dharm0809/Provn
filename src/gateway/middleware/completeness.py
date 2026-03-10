@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 async def completeness_middleware(request: Request, call_next) -> Response:
     """Run first: set request_id and default disposition. In finally: write one gateway_attempts row."""
     # Skip completeness tracking for non-proxy routes (health, metrics, lineage dashboard).
-    if request.url.path in ("/", "/health", "/metrics") or request.url.path.startswith(("/lineage", "/v1/lineage", "/v1/control", "/v1/attestation-proofs", "/v1/policies")):
+    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage", "/v1/lineage", "/v1/control", "/v1/attestation-proofs", "/v1/policies")):
         return await call_next(request)
     rid = new_request_id()
     response: Response | None = None  # set only on success; None if call_next raises
