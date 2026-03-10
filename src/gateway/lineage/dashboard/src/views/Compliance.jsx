@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { fetchAuthJSON } from '../api';
 
 const COMPLIANCE_API = '/v1/compliance';
 const FRAMEWORKS = [
@@ -7,6 +8,8 @@ const FRAMEWORKS = [
   { id: 'soc2', label: 'SOC 2 Type II' },
   { id: 'iso42001', label: 'ISO 42001' },
 ];
+
+const FORMAT_MIME = { json: 'application/json', csv: 'text/csv', pdf: 'application/pdf' };
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -23,20 +26,17 @@ export default function Compliance() {
   const [framework, setFramework] = useState('eu_ai_act');
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(null);
   const [error, setError] = useState(null);
 
   const fetchPreview = async () => {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch(
+      const data = await fetchAuthJSON(
         `${COMPLIANCE_API}/export?format=json&framework=${framework}&start=${start}&end=${end}`
       );
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${resp.status}`);
-      }
-      setPreview(await resp.json());
+      setPreview(data);
     } catch (e) {
       setError(e.message);
       setPreview(null);
@@ -45,8 +45,33 @@ export default function Compliance() {
     }
   };
 
-  const downloadUrl = (fmt) =>
-    `${COMPLIANCE_API}/export?format=${fmt}&framework=${framework}&start=${start}&end=${end}`;
+  const handleDownload = async (fmt) => {
+    setDownloading(fmt);
+    setError(null);
+    try {
+      const key = sessionStorage.getItem('cp_api_key') || '';
+      const url = `${COMPLIANCE_API}/export?format=${fmt}&framework=${framework}&start=${start}&end=${end}`;
+      const resp = await fetch(url, {
+        headers: key ? { 'X-API-Key': key } : {},
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `compliance-${framework}-${start}-${end}.${fmt}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setError(`Download failed: ${e.message}`);
+    } finally {
+      setDownloading(null);
+    }
+  };
 
   return (
     <div className="compliance-view">
@@ -114,9 +139,16 @@ export default function Compliance() {
 
           <h3>Download</h3>
           <div className="compliance-downloads">
-            <a href={downloadUrl('json')} download className="btn-download">JSON</a>
-            <a href={downloadUrl('csv')} download className="btn-download">CSV</a>
-            <a href={downloadUrl('pdf')} download className="btn-download">PDF</a>
+            {['json', 'csv', 'pdf'].map(fmt => (
+              <button
+                key={fmt}
+                className="btn-download"
+                onClick={() => handleDownload(fmt)}
+                disabled={downloading === fmt}
+              >
+                {downloading === fmt ? 'Downloading...' : fmt.toUpperCase()}
+              </button>
+            ))}
           </div>
         </div>
       )}

@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How Companies Run AI Internally — And Where Walacor Gateway Adds Value</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    color: #ffffff;
+    margin-bottom: 6px;
+    text-align: center;
+  }
+  .subtitle {
+    color: #868e96;
+    font-size: 14px;
+    text-align: center;
+    margin-bottom: 12px;
+    max-width: 700px;
+    line-height: 1.5;
+  }
+  .subtitle-emphasis {
+    color: #f59f00;
+    font-size: 14px;
+    text-align: center;
+    margin-bottom: 36px;
+  }
+
+  .arch-container {
+    width: 100%;
+    max-width: 1200px;
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 24px;
+  }
+
+  .main-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .layer {
+    border-radius: 10px;
+    padding: 16px 20px;
+    position: relative;
+  }
+
+  /* Explainer banner */
+  .explainer {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+  }
+  .explainer h3 {
+    font-size: 14px;
+    color: #c9d1d9;
+    margin-bottom: 6px;
+  }
+  .explainer p {
+    font-size: 12px;
+    color: #868e96;
+    line-height: 1.6;
+  }
+
+  /* Users layer */
+  .layer-users {
+    background: linear-gradient(135deg, #1a2744, #253d6b);
+    border: 1.5px solid #4c6ef5;
+    text-align: center;
+    padding: 14px;
+  }
+  .layer-users h3 { font-size: 17px; color: #fff; }
+  .layer-users p { font-size: 11px; color: #868e96; margin-top: 4px; }
+
+  /* GATEWAY */
+  .layer-gateway {
+    background: linear-gradient(135deg, #1a2b0e, #243d12);
+    border: 2.5px solid #f59f00;
+    padding: 20px;
+    box-shadow: 0 0 30px rgba(245, 159, 0, 0.15);
+  }
+  .layer-gateway .layer-title {
+    font-size: 17px;
+    color: #f59f00;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .layer-gateway .layer-explain {
+    font-size: 11px;
+    color: #adb5bd;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+  .pipeline-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .pipeline-step {
+    border-radius: 8px;
+    padding: 10px 8px;
+    text-align: center;
+  }
+  .pipeline-step .step-icon { font-size: 18px; display: block; margin-bottom: 4px; }
+  .pipeline-step .step-name { font-size: 12px; font-weight: 600; color: #fff; }
+  .pipeline-step .step-desc { font-size: 9px; color: #adb5bd; margin-top: 2px; }
+
+  .ps-auth { background: #1864ab; border: 1px solid #4dabf7; }
+  .ps-attest { background: #5c2d91; border: 1px solid #9775fa; }
+  .ps-policy { background: #862e9c; border: 1px solid #da77f2; }
+  .ps-budget { background: #5f3dc4; border: 1px solid #9775fa; }
+  .ps-content { background: #862e9c; border: 1px solid #e599f7; }
+  .ps-tools { background: #5c3d0e; border: 1px solid #f59f00; }
+  .ps-chain { background: #0b4a2e; border: 1px solid #51cf66; }
+  .ps-lineage { background: #1864ab; border: 1px solid #4dabf7; }
+
+  .gateway-footer {
+    padding-top: 10px;
+    border-top: 1px solid rgba(245, 159, 0, 0.2);
+    font-size: 12px;
+    color: #f59f00;
+    text-align: center;
+  }
+
+  .arrow-down {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2px 0;
+    color: #495057;
+    font-size: 18px;
+  }
+  .arrow-label {
+    font-size: 10px;
+    color: #495057;
+    margin-top: 2px;
+  }
+
+  .section-label {
+    font-size: 12px;
+    color: #868e96;
+    text-align: center;
+    padding: 4px 0 2px;
+  }
+
+  /* Infra layers */
+  .infra-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .infra-box {
+    background: #1e3a5f;
+    border: 1px solid #4dabf7;
+    border-radius: 8px;
+    padding: 12px;
+    text-align: center;
+  }
+  .infra-box .ib-icon { font-size: 22px; }
+  .infra-box .ib-title { font-size: 13px; font-weight: 600; color: #fff; margin: 4px 0 2px; }
+  .infra-box .ib-desc { font-size: 10px; color: #868e96; }
+
+  .data-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .data-box {
+    background: #21262d;
+    border: 1px solid #495057;
+    border-radius: 8px;
+    padding: 12px;
+    text-align: center;
+  }
+  .data-box .db-title { font-size: 13px; font-weight: 600; color: #fff; }
+  .data-box .db-desc { font-size: 10px; color: #868e96; margin-top: 2px; }
+
+  .layer-infra-bottom {
+    background: #111827;
+    border: 1px solid #4c6ef5;
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+  }
+  .layer-infra-bottom .ib-text {
+    font-size: 12px;
+    color: #748ffc;
+  }
+
+  /* Right side panels */
+  .side-panels {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* Without Gateway panel */
+  .panel-without {
+    background: linear-gradient(135deg, #2d1515, #3b1a1a);
+    border: 2px solid #ff6b6b;
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .panel-without h3 {
+    font-size: 16px;
+    color: #ff6b6b;
+    margin-bottom: 6px;
+  }
+  .panel-without .panel-sub {
+    font-size: 11px;
+    color: #868e96;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+  .gap-item {
+    margin-bottom: 10px;
+  }
+  .gap-item .gap-x {
+    color: #ff8787;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .gap-item .gap-detail {
+    color: #868e96;
+    font-size: 10px;
+    margin-left: 16px;
+    line-height: 1.4;
+  }
+
+  /* With Gateway panel */
+  .panel-with {
+    background: linear-gradient(135deg, #0b2e1f, #0b3a2e);
+    border: 2px solid #51cf66;
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .panel-with h3 {
+    font-size: 16px;
+    color: #51cf66;
+    margin-bottom: 6px;
+  }
+  .panel-with .panel-sub {
+    font-size: 11px;
+    color: #868e96;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+  .sol-item {
+    margin-bottom: 8px;
+  }
+  .sol-item .sol-check {
+    color: #69db7c;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .sol-item .sol-detail {
+    color: #868e96;
+    font-size: 10px;
+    margin-left: 16px;
+    line-height: 1.4;
+  }
+
+  .panel-note {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(81, 207, 102, 0.2);
+    font-size: 10px;
+    color: #868e96;
+    line-height: 1.5;
+  }
+
+  @media (max-width: 900px) {
+    .arch-container {
+      grid-template-columns: 1fr;
+    }
+    .pipeline-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .infra-row {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+</head>
+<body>
+
+<h1>How Companies Run AI Internally</h1>
+<p class="subtitle">
+  Many organizations want to run LLMs on their own infrastructure &mdash; keep data private,
+  avoid sending anything to the cloud. But running models is only half the problem.
+</p>
+<p class="subtitle-emphasis">Walacor Gateway is the governance layer that sits between your apps and your models.</p>
+
+<div class="arch-container">
+  <!-- LEFT: Main Stack -->
+  <div class="main-stack">
+
+    <!-- Explainer -->
+    <div class="explainer">
+      <h3>What does a typical internal AI stack look like?</h3>
+      <p>
+        Apps and users talk to models (like Ollama, vLLM) running on company servers.
+        Those models can also connect to RAG pipelines, search engines, and internal tools.
+        The entire stack runs on-premise &mdash; no data leaves the building.
+      </p>
+    </div>
+
+    <!-- Users -->
+    <div class="layer layer-users">
+      <h3>Your Apps, Users, and Teams</h3>
+      <p>Internal apps, chatbots, developer tools, support agents</p>
+    </div>
+
+    <div class="arrow-down">
+      &#x25BC;
+      <span class="arrow-label">every request passes through</span>
+    </div>
+
+    <!-- WALACOR GATEWAY -->
+    <div class="layer layer-gateway">
+      <div class="layer-title">WALACOR GATEWAY</div>
+      <div class="layer-explain">
+        Sits between your apps and your models. Every AI request flows through it.
+        It doesn't change what the model does &mdash; it adds governance, security, and a tamper-proof audit trail.
+      </div>
+      <div class="pipeline-grid">
+        <div class="pipeline-step ps-auth">
+          <span class="step-icon">&#x1F510;</span>
+          <div class="step-name">Authentication</div>
+          <div class="step-desc">Who is asking?</div>
+        </div>
+        <div class="pipeline-step ps-attest">
+          <span class="step-icon">&#x1F6E1;&#xFE0F;</span>
+          <div class="step-name">Model Check</div>
+          <div class="step-desc">Is this model approved?</div>
+        </div>
+        <div class="pipeline-step ps-policy">
+          <span class="step-icon">&#x1F4CB;</span>
+          <div class="step-name">Policy Rules</div>
+          <div class="step-desc">Should we allow this?</div>
+        </div>
+        <div class="pipeline-step ps-budget">
+          <span class="step-icon">&#x1F4B0;</span>
+          <div class="step-name">Usage Limits</div>
+          <div class="step-desc">Over budget?</div>
+        </div>
+        <div class="pipeline-step ps-content">
+          <span class="step-icon">&#x1F50D;</span>
+          <div class="step-name">Content Scan</div>
+          <div class="step-desc">PII? Toxic? Unsafe?</div>
+        </div>
+        <div class="pipeline-step ps-tools">
+          <span class="step-icon">&#x2699;&#xFE0F;</span>
+          <div class="step-name">Tool Tracking</div>
+          <div class="step-desc">What tools were used?</div>
+        </div>
+        <div class="pipeline-step ps-chain">
+          <span class="step-icon">&#x1F517;</span>
+          <div class="step-name">Audit Chain</div>
+          <div class="step-desc">Tamper-proof record</div>
+        </div>
+        <div class="pipeline-step ps-lineage">
+          <span class="step-icon">&#x1F4CA;</span>
+          <div class="step-name">Dashboard</div>
+          <div class="step-desc">See everything live</div>
+        </div>
+      </div>
+      <div class="gateway-footer">
+        Open Source &middot; Single Port (8000) &middot; Drop-in &mdash; no code changes needed
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      &#x25BC;
+      <span class="arrow-label">forwards to your models</span>
+    </div>
+
+    <!-- Your AI Infrastructure -->
+    <p class="section-label">Your existing AI infrastructure (unchanged)</p>
+
+    <div class="infra-row">
+      <div class="infra-box">
+        <div class="ib-icon">&#x1F916;</div>
+        <div class="ib-title">Your Models</div>
+        <div class="ib-desc">Ollama, vLLM, or any OpenAI-compatible endpoint</div>
+      </div>
+      <div class="infra-box">
+        <div class="ib-icon">&#x1F4DA;</div>
+        <div class="ib-title">RAG / Search</div>
+        <div class="ib-desc">Your documents, knowledge bases, internal data</div>
+      </div>
+      <div class="infra-box">
+        <div class="ib-icon">&#x1F527;</div>
+        <div class="ib-title">Internal Tools</div>
+        <div class="ib-desc">MCP servers, APIs, databases</div>
+      </div>
+    </div>
+
+    <div class="arrow-down">&#x25BC;</div>
+
+    <div class="data-row">
+      <div class="data-box">
+        <div class="db-title">&#x1F5C4; Vector DB</div>
+        <div class="db-desc">Embeddings for RAG retrieval</div>
+      </div>
+      <div class="data-box">
+        <div class="db-title">&#x1F50C; Data Sources</div>
+        <div class="db-desc">OneDrive, SharePoint, Git, S3</div>
+      </div>
+    </div>
+
+    <div class="arrow-down">&#x25BC;</div>
+
+    <div class="layer-infra-bottom">
+      <div class="ib-text">On-Premise: Kubernetes / Docker &middot; GPU Servers &middot; Private Network</div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT: Side Panels -->
+  <div class="side-panels">
+
+    <!-- WITHOUT GATEWAY -->
+    <div class="panel-without">
+      <h3>Without Gateway</h3>
+      <div class="panel-sub">
+        Most companies run models internally but have no governance layer.
+        The models work fine &mdash; but there's no visibility or control.
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-x">&#x2717; No audit trail</div>
+        <div class="gap-detail">Nobody knows who asked what, or which model answered. If something goes wrong, there's no record.</div>
+      </div>
+      <div class="gap-item">
+        <div class="gap-x">&#x2717; No content safety</div>
+        <div class="gap-detail">Models can return PII (credit cards, SSNs) or toxic content. Nothing catches it.</div>
+      </div>
+      <div class="gap-item">
+        <div class="gap-x">&#x2717; No model verification</div>
+        <div class="gap-detail">Can't prove which model version produced an answer. Was it the approved model or something else?</div>
+      </div>
+      <div class="gap-item">
+        <div class="gap-x">&#x2717; No tamper detection</div>
+        <div class="gap-detail">Conversations could be altered after the fact. No way to verify integrity.</div>
+      </div>
+      <div class="gap-item">
+        <div class="gap-x">&#x2717; No usage controls</div>
+        <div class="gap-detail">No per-team or per-user limits. No way to track who's consuming resources.</div>
+      </div>
+      <div class="gap-item">
+        <div class="gap-x">&#x2717; No compliance evidence</div>
+        <div class="gap-detail">When auditors ask "how do you govern your AI?" &mdash; there's nothing to show.</div>
+      </div>
+    </div>
+
+    <!-- WITH GATEWAY -->
+    <div class="panel-with">
+      <h3>With Walacor Gateway</h3>
+      <div class="panel-sub">
+        Drop it in front of your models. Same models, same apps &mdash;
+        now with full governance.
+      </div>
+
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; Every request recorded</div>
+        <div class="sol-detail">Who asked, what model answered, full prompt and response logged</div>
+      </div>
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; PII and safety scanning</div>
+        <div class="sol-detail">Auto-detects credit cards, SSNs, API keys. Llama Guard checks 14 safety categories.</div>
+      </div>
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; Model attestation</div>
+        <div class="sol-detail">Cryptographic proof of which model version produced each answer</div>
+      </div>
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; Tamper-proof chain</div>
+        <div class="sol-detail">SHA3-512 Merkle chain &mdash; if anyone changes a record, the chain breaks</div>
+      </div>
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; Usage limits per team</div>
+        <div class="sol-detail">Token budgets by user, team, or time period</div>
+      </div>
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; Live dashboard</div>
+        <div class="sol-detail">See all sessions, chains, tool calls, and throughput in real time</div>
+      </div>
+      <div class="sol-item">
+        <div class="sol-check">&#x2713; Compliance-ready</div>
+        <div class="sol-detail">EU AI Act, SOC 2, NIST AI RMF &mdash; evidence built in</div>
+      </div>
+
+      <div class="panel-note">
+        Gateway is a transparent proxy &mdash; your apps don't need to change.
+        Just point them to Gateway instead of directly to the model.
+        Everything else stays the same.
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

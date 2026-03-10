@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How AI Tool Calls Actually Work</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    min-height: 100vh;
+    padding: 40px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  h1 { font-size: 26px; color: #fff; margin-bottom: 6px; text-align: center; }
+  .subtitle { font-size: 14px; color: #868e96; text-align: center; margin-bottom: 40px; max-width: 650px; line-height: 1.6; }
+
+  .sections { width: 100%; max-width: 1100px; display: flex; flex-direction: column; gap: 40px; }
+
+  /* ── Section titles ── */
+  .section-title {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 16px;
+  }
+  .section-num {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; flex-shrink: 0;
+  }
+  .section-title h2 { font-size: 18px; }
+
+  /* ── Misconception ── */
+  .misconception {
+    background: linear-gradient(135deg, #2d1515, #3b1a1a);
+    border: 2px solid #ff6b6b;
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .misconception .section-num { background: #ff6b6b; color: #1a0505; }
+  .misconception h2 { color: #ff6b6b; }
+
+  .wrong-flow {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0; margin: 20px 0 16px; flex-wrap: wrap;
+  }
+  .wf-box {
+    background: #462020;
+    border: 1px solid #ff6b6b;
+    border-radius: 8px;
+    padding: 12px 18px;
+    text-align: center;
+    min-width: 130px;
+  }
+  .wf-box .wf-icon { font-size: 24px; }
+  .wf-box .wf-label { font-size: 12px; color: #ff8787; margin-top: 4px; font-weight: 600; }
+  .wf-box .wf-desc { font-size: 10px; color: #868e96; margin-top: 2px; }
+  .wf-arrow { font-size: 22px; color: #ff6b6b; padding: 0 10px; }
+
+  .wrong-label {
+    text-align: center;
+    font-size: 13px;
+    color: #ff8787;
+    margin-top: 8px;
+  }
+  .wrong-explain {
+    text-align: center;
+    font-size: 11px;
+    color: #868e96;
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  /* ── Reality ── */
+  .reality {
+    background: linear-gradient(135deg, #11192a, #161b22);
+    border: 2px solid #4dabf7;
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .reality .section-num { background: #4dabf7; color: #0d1117; }
+  .reality h2 { color: #4dabf7; }
+
+  .reality-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 20px 0 0;
+  }
+  .rf-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid #21262d;
+  }
+  .rf-step:last-child { border-bottom: none; }
+  .rf-num {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #1864ab; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .rf-content { flex: 1; }
+  .rf-who {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+  .rf-who-model { color: #4dabf7; }
+  .rf-who-gap { color: #ff6b6b; }
+  .rf-who-host { color: #f59f00; }
+  .rf-text { font-size: 13px; color: #e6edf3; line-height: 1.5; }
+  .rf-code {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: #7ee787;
+    line-height: 1.5;
+    overflow-x: auto;
+  }
+  .rf-code .dim { color: #484f58; }
+  .rf-highlight {
+    background: #1a1505;
+    border: 1px solid #f59f00;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: #f59f00;
+    text-align: center;
+  }
+
+  /* ── Three scenarios ── */
+  .scenarios {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  .scenario {
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+  }
+  .scenario h3 {
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+  .scenario .sc-sub {
+    font-size: 11px;
+    color: #868e96;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+
+  .sc-chatgpt {
+    background: linear-gradient(135deg, #1a2744, #1e3050);
+    border: 1.5px solid #4c6ef5;
+  }
+  .sc-chatgpt h3 { color: #4c6ef5; }
+
+  .sc-local {
+    background: linear-gradient(135deg, #2d1515, #351a1a);
+    border: 1.5px solid #ff6b6b;
+  }
+  .sc-local h3 { color: #ff6b6b; }
+
+  .sc-gateway {
+    background: linear-gradient(135deg, #1a2b0e, #1e3512);
+    border: 2px solid #f59f00;
+    box-shadow: 0 0 20px rgba(245, 159, 0, 0.1);
+  }
+  .sc-gateway h3 { color: #f59f00; }
+
+  .sc-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+    flex: 1;
+  }
+  .sc-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    padding: 6px 10px;
+    border-radius: 6px;
+  }
+  .sc-step-icon { font-size: 14px; flex-shrink: 0; }
+  .sc-step-text { color: #c9d1d9; }
+
+  .sc-step-blue { background: #1a2744; }
+  .sc-step-red { background: #2d1010; }
+  .sc-step-green { background: #1a2b0e; }
+  .sc-step-gold { background: #2a2008; border: 1px solid rgba(245,159,0,0.3); }
+  .sc-step-gray { background: #21262d; }
+
+  .sc-verdict {
+    padding: 10px;
+    border-radius: 8px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: auto;
+  }
+  .verdict-blue {
+    background: #1a2744;
+    color: #748ffc;
+    border: 1px solid #4c6ef5;
+  }
+  .verdict-red {
+    background: #2d1010;
+    color: #ff8787;
+    border: 1px solid #ff6b6b;
+  }
+  .verdict-green {
+    background: #0b3a2e;
+    color: #69db7c;
+    border: 1px solid #51cf66;
+  }
+
+  /* ── One liner ── */
+  .one-liner {
+    background: linear-gradient(135deg, #1a2b0e, #243d12);
+    border: 2px solid #f59f00;
+    border-radius: 12px;
+    padding: 24px;
+    text-align: center;
+  }
+  .one-liner .ol-label {
+    font-size: 11px;
+    color: #868e96;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 10px;
+  }
+  .one-liner .ol-text {
+    font-size: 16px;
+    color: #f59f00;
+    line-height: 1.6;
+    max-width: 750px;
+    margin: 0 auto;
+  }
+  .one-liner .ol-text em {
+    color: #ff6b6b;
+    font-style: normal;
+    font-weight: 700;
+  }
+  .one-liner .ol-text strong {
+    color: #51cf66;
+  }
+
+  @media (max-width: 850px) {
+    .scenarios { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>How AI Tool Calls Actually Work</h1>
+<p class="subtitle">
+  People assume models can search the web, call APIs, and use tools on their own.
+  They can't. Here's what really happens &mdash; and why it matters.
+</p>
+
+<div class="sections">
+
+  <!-- ── 1. THE MISCONCEPTION ── -->
+  <div class="misconception">
+    <div class="section-title">
+      <div class="section-num">1</div>
+      <h2>What People Think Happens</h2>
+    </div>
+
+    <div class="wrong-flow">
+      <div class="wf-box">
+        <div class="wf-icon">&#x1F464;</div>
+        <div class="wf-label">User</div>
+        <div class="wf-desc">"Search for X"</div>
+      </div>
+      <div class="wf-arrow">&#x27A1;</div>
+      <div class="wf-box">
+        <div class="wf-icon">&#x1F916;</div>
+        <div class="wf-label">Model</div>
+        <div class="wf-desc">Searches the web</div>
+      </div>
+      <div class="wf-arrow">&#x27A1;</div>
+      <div class="wf-box">
+        <div class="wf-icon">&#x2705;</div>
+        <div class="wf-label">Result</div>
+        <div class="wf-desc">Answer with sources</div>
+      </div>
+    </div>
+
+    <div class="wrong-label">&#x274C; This is wrong.</div>
+    <div class="wrong-explain">
+      Models are text generators. They can't open a browser, call an API, or execute code.<br>
+      They can only output text &mdash; including text that <em>looks like</em> a tool call.
+    </div>
+  </div>
+
+  <!-- ── 2. WHAT ACTUALLY HAPPENS ── -->
+  <div class="reality">
+    <div class="section-title">
+      <div class="section-num">2</div>
+      <h2>What Actually Happens (step by step)</h2>
+    </div>
+
+    <div class="reality-flow">
+      <div class="rf-step">
+        <div class="rf-num">1</div>
+        <div class="rf-content">
+          <div class="rf-who rf-who-model">&#x1F916; THE MODEL</div>
+          <div class="rf-text">
+            User asks a question. The model <strong>doesn't search anything</strong>.
+            It outputs JSON saying "I <em>want</em> to call a tool":
+          </div>
+          <div class="rf-code">
+            <span class="dim">{</span><br>
+            &nbsp;&nbsp;"tool_calls": [<span class="dim">{</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;"function": <span class="dim">{</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"name": <span style="color:#ffa657">"web_search"</span>,<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"arguments": <span class="dim">{</span> "query": "latest news" <span class="dim">}</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="dim">}</span><br>
+            &nbsp;&nbsp;<span class="dim">}]</span><br>
+            <span class="dim">}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="rf-step">
+        <div class="rf-num">2</div>
+        <div class="rf-content">
+          <div class="rf-who rf-who-gap">&#x2753; THE GAP</div>
+          <div class="rf-text">
+            The model stops here. It's done. It output some JSON and is now <strong>waiting</strong>.<br>
+            It cannot execute that tool call. It has no internet access, no API keys, no runtime.
+          </div>
+          <div class="rf-highlight">
+            Something else has to read that JSON, actually run the tool, and send results back.
+          </div>
+        </div>
+      </div>
+
+      <div class="rf-step">
+        <div class="rf-num">3</div>
+        <div class="rf-content">
+          <div class="rf-who rf-who-host">&#x2699;&#xFE0F; THE HOST (whoever runs the model)</div>
+          <div class="rf-text">
+            The host application reads the JSON, executes the actual search/API call,
+            and sends the results back to the model as a new message. Then the model generates its final answer.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 3. THREE SCENARIOS ── -->
+  <div>
+    <div class="section-title" style="margin-bottom: 20px;">
+      <div class="section-num" style="background: #f59f00; color: #0d1117;">3</div>
+      <h2 style="color: #f59f00;">Who fills "The Gap" in each scenario?</h2>
+    </div>
+
+    <div class="scenarios">
+
+      <!-- ChatGPT / Cloud -->
+      <div class="scenario sc-chatgpt">
+        <h3>ChatGPT / Claude (Cloud)</h3>
+        <p class="sc-sub">When you use ChatGPT or Claude's website, OpenAI/Anthropic fills the gap for you.</p>
+        <div class="sc-flow">
+          <div class="sc-step sc-step-blue">
+            <span class="sc-step-icon">&#x1F464;</span>
+            <span class="sc-step-text">You ask a question</span>
+          </div>
+          <div class="sc-step sc-step-blue">
+            <span class="sc-step-icon">&#x1F916;</span>
+            <span class="sc-step-text">Model outputs tool_call JSON</span>
+          </div>
+          <div class="sc-step sc-step-blue">
+            <span class="sc-step-icon">&#x1F3E2;</span>
+            <span class="sc-step-text">OpenAI's servers execute the tool</span>
+          </div>
+          <div class="sc-step sc-step-blue">
+            <span class="sc-step-icon">&#x1F4E8;</span>
+            <span class="sc-step-text">Results sent back to model</span>
+          </div>
+          <div class="sc-step sc-step-blue">
+            <span class="sc-step-icon">&#x2705;</span>
+            <span class="sc-step-text">Model gives final answer</span>
+          </div>
+        </div>
+        <div class="sc-verdict verdict-blue">
+          Works, but your data goes to their cloud.
+        </div>
+      </div>
+
+      <!-- Local / Private (no gateway) -->
+      <div class="scenario sc-local">
+        <h3>Private Models (No Gateway)</h3>
+        <p class="sc-sub">Running Ollama/vLLM on your own servers. No one fills the gap.</p>
+        <div class="sc-flow">
+          <div class="sc-step sc-step-gray">
+            <span class="sc-step-icon">&#x1F464;</span>
+            <span class="sc-step-text">You ask a question</span>
+          </div>
+          <div class="sc-step sc-step-gray">
+            <span class="sc-step-icon">&#x1F916;</span>
+            <span class="sc-step-text">Model outputs tool_call JSON</span>
+          </div>
+          <div class="sc-step sc-step-red">
+            <span class="sc-step-icon">&#x1F6D1;</span>
+            <span class="sc-step-text">Nobody executes the tool call</span>
+          </div>
+          <div class="sc-step sc-step-red">
+            <span class="sc-step-icon">&#x274C;</span>
+            <span class="sc-step-text">Raw JSON returned to user</span>
+          </div>
+          <div class="sc-step sc-step-red">
+            <span class="sc-step-icon">&#x1F6AB;</span>
+            <span class="sc-step-text">No audit, no safety, no controls</span>
+          </div>
+        </div>
+        <div class="sc-verdict verdict-red">
+          Data stays private, but tools don't work.<br>No governance at all.
+        </div>
+      </div>
+
+      <!-- With Gateway -->
+      <div class="scenario sc-gateway">
+        <h3>Private Models + Gateway</h3>
+        <p class="sc-sub">Gateway sits between your apps and models. It fills the gap.</p>
+        <div class="sc-flow">
+          <div class="sc-step sc-step-green">
+            <span class="sc-step-icon">&#x1F464;</span>
+            <span class="sc-step-text">You ask a question</span>
+          </div>
+          <div class="sc-step sc-step-gold">
+            <span class="sc-step-icon">&#x1F510;</span>
+            <span class="sc-step-text">Gateway: auth + policy check</span>
+          </div>
+          <div class="sc-step sc-step-green">
+            <span class="sc-step-icon">&#x1F916;</span>
+            <span class="sc-step-text">Model outputs tool_call JSON</span>
+          </div>
+          <div class="sc-step sc-step-gold">
+            <span class="sc-step-icon">&#x2699;&#xFE0F;</span>
+            <span class="sc-step-text">Gateway executes the tool</span>
+          </div>
+          <div class="sc-step sc-step-gold">
+            <span class="sc-step-icon">&#x1F50D;</span>
+            <span class="sc-step-text">Gateway scans results for PII/safety</span>
+          </div>
+          <div class="sc-step sc-step-green">
+            <span class="sc-step-icon">&#x1F916;</span>
+            <span class="sc-step-text">Model gives final answer</span>
+          </div>
+          <div class="sc-step sc-step-gold">
+            <span class="sc-step-icon">&#x1F517;</span>
+            <span class="sc-step-text">Gateway records everything in audit chain</span>
+          </div>
+        </div>
+        <div class="sc-verdict verdict-green">
+          Data stays private. Tools work.<br>Full governance and audit trail.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── BOTTOM LINE ── -->
+  <div class="one-liner">
+    <div class="ol-label">The bottom line</div>
+    <div class="ol-text">
+      Models can <em>ask</em> for tools &mdash; but they can't <em>use</em> them.<br>
+      On ChatGPT, OpenAI executes them (on their cloud).<br>
+      On your private models, <strong>Gateway executes them</strong> &mdash; on your network, with full governance.
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

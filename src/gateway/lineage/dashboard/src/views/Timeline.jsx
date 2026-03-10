@@ -133,7 +133,7 @@ export default function Timeline({ navigate, sessionId }) {
           {records.map((r, i) => {
             const seq = r.sequence_number ?? '?';
             const prompt = (r.prompt_text || '').substring(0, 100);
-            const response = (r.response_content || '').substring(0, 80);
+            const response = (r.response_content || r.thinking_content || '').substring(0, 80);
             const tokens = getTokenCount(r);
             const isLast = i === records.length - 1;
             const verified = i < nodeResults.length ? (nodeResults[i] ? 'pass' : 'fail') : null;

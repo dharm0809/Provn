@@ -8,7 +8,35 @@ From the repo root:
 pip install -e ./Gateway
 ```
 
-## 2. Run as transparent proxy (no governance)
+Optional dependencies:
+
+```bash
+pip install ddgs                          # DuckDuckGo web search (ddgs library)
+pip install 'walacor-gateway[redis]'      # Redis session/budget backends
+pip install 'walacor-gateway[auth]'       # JWT/SSO authentication
+pip install 'walacor-gateway[telemetry]'  # OpenTelemetry export
+pip install 'walacor-gateway[compliance]' # PDF compliance report export (WeasyPrint)
+```
+
+> **macOS (Apple Silicon) note for compliance/PDF export:** WeasyPrint requires
+> pango and cairo. After `brew install pango`, set the library path before
+> running the gateway:
+>
+> ```bash
+> export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib
+> ```
+
+## 2. Environment file
+
+Copy `.env.example` to `.env.gateway` (preferred) or `.env` and fill in the values
+for your deployment. The gateway loads `.env.gateway` first, falling back to `.env`.
+
+```bash
+cp .env.example .env.gateway
+# edit .env.gateway with your settings
+```
+
+## 3. Run as transparent proxy (no governance)
 
 Skip attestation/policy/WAL for a quick test:
 
@@ -27,7 +55,7 @@ curl -X POST http://localhost:8002/v1/chat/completions \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
-## 3. Run with full governance (embedded control plane)
+## 4. Run with full governance (embedded control plane)
 
 No external control plane needed — the gateway manages attestations and policies locally:
 
@@ -42,7 +70,7 @@ uvicorn gateway.main:app --host 0.0.0.0 --port 8002
 
 Models are auto-attested on first use. Manage attestations, policies, and budgets via the Control tab in the lineage dashboard or the `/v1/control/*` API.
 
-## 4. Run with remote control plane (fleet mode)
+## 5. Run with remote control plane (fleet mode)
 
 For multi-gateway fleets, point secondary gateways at a primary:
 
@@ -54,13 +82,31 @@ export WALACOR_CONTROL_PLANE_API_KEY=shared-key
 uvicorn gateway.main:app --host 0.0.0.0 --port 8002
 ```
 
-## 5. Health, metrics, and dashboard
+## 6. Health, metrics, and dashboard
 
 - `GET http://localhost:8002/health` — JSON health (cache, WAL, chain status)
 - `GET http://localhost:8002/metrics` — Prometheus metrics
-- `http://localhost:8002/lineage/` — Lineage dashboard (sessions, chains, tool events, control plane)
+- `http://localhost:8002/lineage/` — Lineage dashboard with the following tabs:
+  - **Overview** — live throughput chart, session list, chain verification
+  - **Control** — manage model attestations, policies, and budgets
+  - **Playground** — interactive prompt testing against attested models
+  - **Compliance** — export EU AI Act / NIST AI RMF compliance reports (PDF)
+  - **Pipeline Trace** — governance timing waterfall for each request stage
 
-## 6. Docker
+## 7. Web search
+
+Enable built-in web search so tool-aware models can query the web:
+
+```bash
+export WALACOR_WEB_SEARCH_ENABLED=true
+export WALACOR_WEB_SEARCH_PROVIDER=duckduckgo   # or brave / serpapi
+```
+
+The DuckDuckGo provider uses the `ddgs` library (`pip install ddgs`) for full
+web search results — not limited to encyclopedia/Instant Answers lookups.
+Brave and SerpAPI providers require `WALACOR_WEB_SEARCH_API_KEY`.
+
+## 8. Docker
 
 From repo root:
 

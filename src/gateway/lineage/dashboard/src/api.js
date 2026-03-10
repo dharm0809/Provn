@@ -78,6 +78,7 @@ export function hasControlKey() {
   return !!getControlKey();
 }
 
+export { fetchControlJSON as fetchAuthJSON };
 async function fetchControlJSON(url) {
   const key = getControlKey();
   const resp = await fetch(url, {

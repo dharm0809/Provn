@@ -134,7 +134,33 @@ class WebSearchTool:
         ]
 
     async def _search_duckduckgo(self, query: str, n: int, timeout: float) -> list[dict]:
-        """DDG Instant Answers API — no API key required. Returns best-effort results."""
+        """DuckDuckGo web search via ddgs library (full results)."""
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            try:
+                from duckduckgo_search import DDGS
+            except ImportError:
+                return await self._search_duckduckgo_instant(query, n, timeout)
+
+        def _sync_search() -> list[dict]:
+            raw = DDGS().text(query, max_results=n)
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "snippet": r.get("body", ""),
+                }
+                for r in raw
+            ]
+
+        return await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _sync_search),
+            timeout=timeout,
+        )
+
+    async def _search_duckduckgo_instant(self, query: str, n: int, timeout: float) -> list[dict]:
+        """Fallback: DDG Instant Answers API (limited, encyclopedia-style answers only)."""
         resp = await self._http.get(
             "https://api.duckduckgo.com/",
             params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},

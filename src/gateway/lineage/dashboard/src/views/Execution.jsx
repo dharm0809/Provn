@@ -114,7 +114,7 @@ export default function Execution({ navigate, executionId, sessionId }) {
       {/* Response */}
       <div className="card">
         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Response</div>
-        <div className="text-block">{r.response_content || '(empty)'}</div>
+        <div className="text-block">{r.response_content || (r.thinking_content ? '(see reasoning below)' : '(empty)')}</div>
       </div>
 
       {/* Thinking */}

@@ -157,6 +157,33 @@ When all three credentials are set, records go to Walacor backend AND local WAL 
 | `WALACOR_CONTROL_PLANE_ENABLED` | true | Enable embedded control plane (CRUD + dashboard tab) |
 | `WALACOR_CONTROL_PLANE_DB_PATH` | (empty) | SQLite path for control plane state (default: alongside WAL db) |
 
+## JWT / SSO authentication (Phase 21)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WALACOR_AUTH_MODE` | api_key | Authentication mode: `api_key`, `jwt`, or `both` |
+| `WALACOR_JWT_SECRET` | (empty) | Shared secret for HS256 JWT validation |
+| `WALACOR_JWT_JWKS_URL` | (empty) | JWKS endpoint for RS256/ES256 JWT validation |
+| `WALACOR_JWT_ISSUER` | (empty) | Expected JWT issuer (iss claim) |
+| `WALACOR_JWT_AUDIENCE` | (empty) | Expected JWT audience (aud claim) |
+| `WALACOR_JWT_ALGORITHMS` | HS256 | Comma-separated algorithms (HS256, RS256, ES256) |
+| `WALACOR_JWT_USER_CLAIM` | sub | JWT claim for user ID |
+| `WALACOR_JWT_EMAIL_CLAIM` | email | JWT claim for email |
+| `WALACOR_JWT_ROLES_CLAIM` | roles | JWT claim for roles |
+| `WALACOR_JWT_TEAM_CLAIM` | team | JWT claim for team |
+
+## Compliance export (Phase 22)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| (no env vars) | — | Compliance export is always available at `/v1/compliance/export` when lineage is enabled. Supports `format=json|csv|pdf`, `framework=eu_ai_act|nist|soc2|iso42001`, `start=YYYY-MM-DD`, `end=YYYY-MM-DD`. PDF generation requires WeasyPrint + system pango/cairo libraries. |
+
+## Prompt caching (Phase 28)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WALACOR_PROMPT_CACHING_ENABLED` | true | Auto-inject cache_control on Anthropic system messages; detect cache hits from Anthropic and OpenAI |
+
 ## Observability
 
 | Variable | Default | Description |

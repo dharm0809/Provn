@@ -92,6 +92,10 @@ Step 7: Post-Inference Content Analysis (G4)
   │  Scan response through PII, toxicity, Llama Guard
   │  ✗ Credit card/SSN/child safety → 403 BLOCK
   │  ⚠ Email/phone/violence → WARN (logged, not blocked)
+  │  NOTE: For streaming responses, S4 child-safety patterns
+  │  are also monitored mid-stream via compiled regex. If
+  │  detected, the SSE stream is immediately terminated —
+  │  providing defense-in-depth beyond post-inference analysis.
   │
 Step 8: Audit Record + Session Chain (G5)
   │  Build execution record with all metadata
@@ -169,7 +173,8 @@ Step B: Model responds with a tool call (not a final answer)
 Step C: Gateway intercepts and executes the tool
         - Validates arguments against the tool's schema
         - Calls registry.execute_tool("web_search", {"query": "python"})
-        - Registry dispatches to WebSearchTool → DuckDuckGo API → results
+        - Registry dispatches to WebSearchTool → ddgs library (full web search results),
+          falling back to DDG Instant Answers API if the library is unavailable → results
 
 Step D: Gateway scans tool output for safety
         - Runs PII, toxicity, and Llama Guard on the tool output
@@ -311,6 +316,9 @@ Every LLM interaction produces an execution record:
     {"analyzer": "llama_guard", "verdict": "pass", "category": "safe"}
   ],
   "token_usage": {"prompt_tokens": 186, "completion_tokens": 120, "total_tokens": 306},
+  "cache_hit": false,
+  "cached_tokens": 0,
+  "variant_id": null,
   "latency_ms": 8500,
   "user": "dharmpratap",
   "team": "engineering",
@@ -389,6 +397,9 @@ A full web dashboard at `/lineage/` for real-time visibility into all AI activit
 | **Chain Verification** | Client-side SHA3-512 recomputation (no server trust needed) |
 | **Control** | Manage models, policies, budgets (requires API key) |
 | **Attempts** | Completeness invariant — every request tracked |
+| **Playground** | Interactive prompt testing with governance readout, compare mode for side-by-side model testing |
+| **Compliance** | Export compliance reports (JSON/CSV/PDF) for EU AI Act, NIST AI RMF, SOC 2, ISO 42001 |
+| **Pipeline Trace** | Visual waterfall chart showing time in each pipeline step (attestation, policy, budget, LLM forward, content analysis, chain, audit write) with hover descriptions |
 
 Source: `src/gateway/lineage/` (reader.py, api.py, static/)
 
@@ -456,6 +467,38 @@ src/gateway/
 | **SOC 2** — Confidentiality | PII detection, API key/credential scanning |
 
 Detailed mapping: `docs/EU-AI-ACT-COMPLIANCE.md`
+
+---
+
+## Prompt Caching
+
+The gateway supports automatic prompt caching for Anthropic and OpenAI providers.
+
+**Anthropic**: System messages automatically get `cache_control: {"type": "ephemeral"}` injected into their content blocks. This enables Anthropic's prompt caching — subsequent requests with the same system prompt use cached tokens at reduced cost.
+
+**OpenAI**: The gateway detects OpenAI's automatic prefix caching from `prompt_tokens_details.cached_tokens` in the usage response.
+
+Cache metadata (`cache_hit`, `cached_tokens`, `cache_creation_tokens`) is included in every execution record and visible in the lineage dashboard. Controlled by `WALACOR_PROMPT_CACHING_ENABLED` (default: true).
+
+Source: `src/gateway/adapters/caching.py`
+
+---
+
+## Compliance Export
+
+The gateway can generate compliance reports covering any date range, mapped to regulatory frameworks.
+
+| Format | Endpoint | Description |
+|---|---|---|
+| JSON | `GET /v1/compliance/export?format=json` | Machine-readable full report |
+| CSV | `GET /v1/compliance/export?format=csv` | Spreadsheet-compatible execution log |
+| PDF | `GET /v1/compliance/export?format=pdf` | Print-ready report with executive summary |
+
+Parameters: `framework` (eu_ai_act, nist, soc2, iso42001), `start` (YYYY-MM-DD), `end` (YYYY-MM-DD).
+
+Reports include: executive summary, model attestation inventory, execution log, session chain integrity verification, and framework-specific compliance mapping.
+
+Source: `src/gateway/compliance/` (api.py, pdf_report.py)
 
 ---
 

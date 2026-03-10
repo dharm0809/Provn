@@ -28,6 +28,7 @@ telemetry = [
   "opentelemetry-sdk>=1.30",
   "opentelemetry-exporter-otlp-proto-grpc>=1.30",
 ]
+search = ["ddgs>=7.0"]
 compliance = ["weasyprint>=62.0", "jinja2>=3.1"]
 dev = [
   "pytest>=8",
