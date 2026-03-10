@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = Field(default=60, description="Requests per minute limit")
     rate_limit_per_model: bool = Field(default=True, description="Rate limit per user+model (vs per user only)")
 
+    # Phase 26: Alerting
+    webhook_urls: str = Field(default="", description="Comma-separated webhook URLs for alerts")
+    pagerduty_routing_key: str = Field(default="", description="PagerDuty Events API v2 routing key")
+    alert_budget_thresholds: str = Field(default="70,90,100", description="Comma-separated budget usage % thresholds for alerts")
+
     # Phase 13: Session chain integrity
     session_chain_enabled: bool = Field(default=True, description="Enable Merkle chain for session records (G5)")
     session_chain_max_sessions: int = Field(default=10000, description="Max concurrent sessions tracked in memory")
