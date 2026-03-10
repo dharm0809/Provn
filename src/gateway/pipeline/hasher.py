@@ -28,6 +28,7 @@ def build_execution_record(
     latency_ms: float | None = None,
     retry_of: str | None = None,
     timings: dict | None = None,
+    variant_id: str | None = None,
 ) -> dict:
     """Build execution record as dict (no prompt_hash/response_hash — backend hashes from content)."""
     usage = model_response.usage or {}
@@ -58,4 +59,5 @@ def build_execution_record(
         "cache_hit": usage.get("cache_hit", False),
         "cached_tokens": usage.get("cached_tokens", 0),
         "cache_creation_tokens": usage.get("cache_creation_tokens", 0),
+        "variant_id": variant_id,
     }

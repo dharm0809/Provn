@@ -298,6 +298,7 @@ class _AuditParams:
     provider: str = ""
     latency_ms: float | None = None
     timings: dict | None = None
+    variant_id: str | None = None
 
 
 @dataclasses.dataclass
@@ -1251,6 +1252,7 @@ async def _build_and_write_record(
         model_id=call.model_id, provider=params.provider,
         latency_ms=params.latency_ms,
         timings=params.timings,
+        variant_id=params.variant_id,
     )
     t_chain = time.perf_counter()
     record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
@@ -1519,6 +1521,15 @@ async def handle_request(request: Request) -> Response:
     # ── Steps 6-8: Hash, session chain, write ────────────────────────────────
     t_write = time.perf_counter()
     timings["total_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    # Compute variant_id for A/B tracking when model groups have >1 endpoint
+    _variant_id = None
+    if ctx.load_balancer and hasattr(adapter, '_base_url'):
+        for _mg in ctx.load_balancer._groups:
+            from fnmatch import fnmatch as _fn
+            if _fn(call.model_id.lower(), _mg.pattern.lower()) and len(_mg.endpoints) > 1:
+                _variant_id = f"{call.model_id}@{adapter._base_url}"
+                break
+
     audit_params = _AuditParams(
         attestation_id=pre.att_id,
         policy_version=pre.pv, policy_result=pre.pr,
@@ -1528,6 +1539,7 @@ async def handle_request(request: Request) -> Response:
         rp_version=rp_version, rp_result=rp_result, rp_decisions=rp_decisions, provider=provider,
         latency_ms=round((time.perf_counter() - t0) * 1000, 1),
         timings=timings,
+        variant_id=_variant_id,
     )
     await _build_and_write_record(request, call, model_response, audit_params, ctx, settings)
     timings["write_ms"] = round((time.perf_counter() - t_write) * 1000, 1)
