@@ -440,6 +440,7 @@ Requires the `opentelemetry-sdk`, `opentelemetry-exporter-otlp`, and `openteleme
 | `/v1/lineage/sessions/{session_id}` | GET | Session execution timeline |
 | `/v1/lineage/executions/{execution_id}` | GET | Full execution record + tool events |
 | `/v1/lineage/attempts` | GET | Recent attempts with disposition stats |
+| `/v1/lineage/trace/{execution_id}` | GET | Execution trace with pipeline timings for waterfall view |
 | `/v1/lineage/verify/{session_id}` | GET | Server-side chain verification |
 | `/v1/control/attestations` | GET | List model attestations |
 | `/v1/control/attestations` | POST | Create/update attestation |
@@ -1058,6 +1059,26 @@ New metrics for monitoring rate limiting and content analysis:
 | `walacor_gateway_rate_limit_hits_total` | Counter | `model` | Rate limit 429 responses |
 | `walacor_gateway_content_blocks_total` | Counter | `analyzer` | Content analysis blocks |
 | `walacor_gateway_budget_utilization_ratio` | Gauge | `tenant_id` | Budget utilization 0-1 |
+
+## Governance waterfall trace view (Phase 27)
+
+Every non-streaming request captures per-step timing data in the execution record:
+
+| Field | Description |
+|---|---|
+| `attestation_ms` | Model attestation lookup time |
+| `policy_ms` | Pre-inference policy evaluation |
+| `budget_ms` | Token budget check time |
+| `pre_checks_ms` | Total pre-check overhead (all above combined) |
+| `forward_ms` | Provider forward + response parse |
+| `content_analysis_ms` | Post-inference content analyzers (PII, toxicity, Llama Guard) |
+| `chain_ms` | Merkle session chain update |
+| `write_ms` | Audit record write (Walacor + WAL) |
+| `total_ms` | Total pipeline duration |
+
+**Trace API:** `GET /v1/lineage/trace/{execution_id}` returns the execution record, tool events, and timings in a single response for the dashboard's waterfall view.
+
+**Dashboard:** The Execution detail view renders a canvas-based waterfall chart showing each pipeline step as a color-coded horizontal bar proportional to its duration. Tool calls appear as nested gold bars under the forward step.
 
 ---
 
