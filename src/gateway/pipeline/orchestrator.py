@@ -959,6 +959,40 @@ async def _budget_check(
     return budget_rem, estimated, whb, reason, None
 
 
+async def _rate_limit_check(request, ctx, settings, call, provider, model) -> Response | None:
+    """Step 2.8: Rate limit check. Returns 429 response or None."""
+    user = call.metadata.get("user", "anonymous")
+    key = f"{user}:{call.model_id}" if settings.rate_limit_per_model else user
+    allowed, remaining = await ctx.rate_limiter.check(key, settings.rate_limit_rpm, window_seconds=60)
+    # Store rate limit info for response headers
+    request.state.walacor_ratelimit_limit = settings.rate_limit_rpm
+    request.state.walacor_ratelimit_remaining = remaining
+    request.state.walacor_ratelimit_reset = int(ctx.rate_limiter.reset_time(key, 60))
+    if not allowed:
+        _set_disposition(request, "denied_rate_limit")
+        _inc_request(provider, model, "error")
+        retry_after = max(1, request.state.walacor_ratelimit_reset - int(time.time()))
+        resp = JSONResponse(
+            {"error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}},
+            status_code=429,
+        )
+        resp.headers["Retry-After"] = str(retry_after)
+        resp.headers["X-RateLimit-Limit"] = str(settings.rate_limit_rpm)
+        resp.headers["X-RateLimit-Remaining"] = "0"
+        resp.headers["X-RateLimit-Reset"] = str(request.state.walacor_ratelimit_reset)
+        return resp
+    return None
+
+
+def _add_rate_limit_headers(response, request):
+    """Add X-RateLimit-* headers to response if rate limit data is available."""
+    limit = getattr(request.state, "walacor_ratelimit_limit", None)
+    if limit is not None:
+        response.headers["X-RateLimit-Limit"] = str(limit)
+        response.headers["X-RateLimit-Remaining"] = str(getattr(request.state, "walacor_ratelimit_remaining", 0))
+        response.headers["X-RateLimit-Reset"] = str(getattr(request.state, "walacor_ratelimit_reset", 0))
+
+
 # ── Pre-check orchestration (Steps 1–2.7) ────────────────────────────────────
 
 async def _run_pre_checks(
@@ -998,6 +1032,12 @@ async def _run_pre_checks(
     )
     if err is not None:
         return _PreCheckResult(error=err)
+
+    # Phase 26: Rate limit check
+    if settings.rate_limit_enabled and ctx.rate_limiter:
+        rl_err = await _rate_limit_check(request, ctx, settings, call, provider, model)
+        if rl_err is not None:
+            return _PreCheckResult(error=rl_err)
 
     tool_strategy = _select_tool_strategy(adapter, settings)
     if tool_strategy == "active" and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
@@ -1468,4 +1508,5 @@ async def handle_request(request: Request) -> Response:
         chain_seq=getattr(request.state, "walacor_chain_seq", None),
         policy_result=pre.pr,
     )
+    _add_rate_limit_headers(http_response, request)
     return http_response

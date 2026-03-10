@@ -54,6 +54,9 @@ class PipelineContext:
         # Phase 25: Resilience layer
         self.load_balancer: Any | None = None
         self.circuit_breakers: Any | None = None
+        # Phase 26: Rate limiting + alerting
+        self.rate_limiter: Any | None = None
+        self.alert_bus: Any | None = None
 
 
 _ctx = PipelineContext()
