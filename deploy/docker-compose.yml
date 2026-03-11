@@ -104,6 +104,37 @@ services:
       - DEMO_MODEL=${DEMO_MODEL:-qwen3:4b}
       - OLLAMA_URL=http://ollama:11434
 
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    profiles: [openwebui]
+    ports:
+      - "3000:8080"
+    volumes:
+      - webui-data:/app/backend/data
+    environment:
+      # Route ALL chat traffic through Gateway (governed)
+      - OPENAI_API_BASE_URL=http://gateway:8000/v1
+      - OPENAI_API_KEY=${WALACOR_GATEWAY_API_KEYS:-dev-key}
+      # Disable direct Ollama access — all traffic must go through Gateway
+      - ENABLE_OLLAMA_API=false
+      # Forward OpenWebUI user identity (name, id, email, role) to Gateway
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
+      # Disable user-level direct API connections (prevents governance bypass)
+      - ENABLE_DIRECT_CONNECTIONS=false
+      # Branding
+      - WEBUI_NAME=${WEBUI_NAME:-Walacor Chat}
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
 volumes:
   gateway-wal: {}
   ollama_data: {}
+  webui-data: {}
