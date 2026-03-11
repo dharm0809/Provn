@@ -19,7 +19,11 @@ from gateway.metrics.prometheus import forward_duration
 logger = logging.getLogger(__name__)
 
 
-def build_governance_sse_event(execution_id=None, attestation_id=None, chain_seq=None, policy_result=None):
+def build_governance_sse_event(
+    execution_id=None, attestation_id=None, chain_seq=None,
+    policy_result=None, content_analysis=None, budget_remaining=None,
+    budget_percent=None, model_id=None,
+):
     """Build an SSE event with governance metadata, sent after data: [DONE]."""
     import json as _json
     payload = {}
@@ -31,10 +35,20 @@ def build_governance_sse_event(execution_id=None, attestation_id=None, chain_seq
         payload["chain_seq"] = chain_seq
     if policy_result:
         payload["policy_result"] = policy_result
+    if content_analysis:
+        payload["content_analysis"] = content_analysis
+    if budget_remaining is not None:
+        payload["budget_remaining"] = budget_remaining
+    if budget_percent is not None:
+        payload["budget_percent"] = budget_percent
+    if model_id:
+        payload["model_id"] = model_id
     return f"event: governance\ndata: {_json.dumps(payload)}\n\n".encode()
 
 
-async def sse_keepalive_generator(interval_seconds: float = 15.0):
+async def sse_keepalive_generator(interval_seconds: float | None = None):
+    if interval_seconds is None:
+        interval_seconds = get_settings().sse_keepalive_interval
     """Yield SSE comment keepalives at a regular interval."""
     while True:
         await asyncio.sleep(interval_seconds)
@@ -46,7 +60,8 @@ def _http_client() -> httpx.AsyncClient:
     ctx = get_pipeline_context()
     if ctx.http_client is not None:
         return ctx.http_client
-    return httpx.AsyncClient(timeout=60.0)
+    settings = get_settings()
+    return httpx.AsyncClient(timeout=settings.provider_timeout)
 
 
 async def forward(
@@ -123,7 +138,7 @@ async def stream_with_tee(
         _owned_client: httpx.AsyncClient | None = None
     else:
         # One-off client: keep it alive for the generator's lifetime.
-        _owned_client = httpx.AsyncClient(timeout=60.0)
+        _owned_client = httpx.AsyncClient(timeout=get_settings().provider_timeout)
         upstream_ctx = _owned_client.stream(**stream_kwargs)
 
     # Eagerly open the upstream connection to capture the status_code.

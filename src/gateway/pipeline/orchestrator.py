@@ -113,7 +113,7 @@ async def _forward_with_resilience(adapter, call, request):
                 raise _ProviderHTTPError(resp.status_code, bytes(resp.body).decode("utf-8", errors="replace"))
             return resp, mr
 
-        result = await forward_with_retry(_do_forward, max_attempts=2)
+        result = await forward_with_retry(_do_forward, max_attempts=get_settings().retry_max_attempts)
         if cb_reg:
             cb_reg.record_success(call.model_id)
         return result[0], result[1], False
@@ -166,7 +166,11 @@ def _inc_request(provider: str, model: str, outcome: str) -> None:
         logger.debug("Metric increment failed (requests_total)", exc_info=True)
 
 
-def _add_governance_headers(response, execution_id=None, attestation_id=None, chain_seq=None, policy_result=None):
+def _add_governance_headers(
+    response, execution_id=None, attestation_id=None, chain_seq=None,
+    policy_result=None, content_analysis=None, budget_remaining=None,
+    budget_percent=None, model_id=None,
+):
     """Add X-Walacor-* governance metadata headers to response."""
     if execution_id:
         response.headers["x-walacor-execution-id"] = str(execution_id)
@@ -176,6 +180,49 @@ def _add_governance_headers(response, execution_id=None, attestation_id=None, ch
         response.headers["x-walacor-chain-seq"] = str(chain_seq)
     if policy_result:
         response.headers["x-walacor-policy-result"] = str(policy_result)
+    if content_analysis:
+        response.headers["x-walacor-content-analysis"] = str(content_analysis)
+    if budget_remaining is not None:
+        response.headers["x-walacor-budget-remaining"] = str(budget_remaining)
+    if budget_percent is not None:
+        response.headers["x-walacor-budget-percent"] = str(budget_percent)
+    if model_id:
+        response.headers["x-walacor-model-id"] = str(model_id)
+
+
+def _summarize_content_analysis(decisions: list) -> str:
+    """Summarize content analysis decisions into a single header value."""
+    if not decisions:
+        return "clean"
+    for d in decisions:
+        if d.get("action") == "block":
+            return "blocked"
+    verdicts = [d.get("verdict", "") for d in decisions]
+    if any("pii" in v for v in verdicts):
+        return "pii_warn"
+    if any("toxic" in v or "warn" in v for v in verdicts):
+        return "toxicity_warn"
+    return "clean"
+
+
+def _compute_budget_percent(budget_remaining, settings) -> int | None:
+    """Compute budget usage percent. Returns None if budget not configured."""
+    if budget_remaining is None:
+        return None
+    if budget_remaining < 0:  # unlimited sentinel
+        return None
+    max_tokens = settings.token_budget_max_tokens
+    if max_tokens <= 0:
+        return None
+    used = max_tokens - budget_remaining
+    return min(100, max(0, round(used / max_tokens * 100)))
+
+
+def _inject_caller_role(att_ctx: dict, request) -> None:
+    """Inject caller_role into attestation context for policy evaluation."""
+    caller_identity = getattr(request.state, "caller_identity", None)
+    if caller_identity is not None and caller_identity.roles:
+        att_ctx["caller_role"] = caller_identity.roles[0]
 
 
 async def _peek_model_id(request: Request) -> str:
@@ -787,6 +834,7 @@ async def _after_stream_record(
         if governance_meta is not None:
             governance_meta["execution_id"] = record.get("execution_id")
             governance_meta["chain_seq"] = record.get("sequence_number")
+            governance_meta["content_analysis"] = _summarize_content_analysis(rp_decisions)
     except Exception as e:
         logger.error(
             "After-stream execution record write failed: execution_id=%s prompt_id=%s session_id=%s error=%s",
@@ -866,9 +914,11 @@ async def _attestation_check(
             att_id = auto_att.attestation_id
             att_ctx = {"model_id": call.model_id, "provider": adapter.get_provider_name(), "status": "active", "verification_level": "self_attested", "tenant_id": settings.gateway_tenant_id}
             logger.info("Auto-attested model: provider=%s model=%s (no control plane)", adapter.get_provider_name(), call.model_id)
+            _inject_caller_role(att_ctx, request)
             return att_id, att_ctx, False, None, None
         if is_audit_only:
             logger.warning("AUDIT_ONLY: Would have blocked (attestation) provider=%s model=%s", provider, model)
+            _inject_caller_role(att_ctx, request)
             return att_id, att_ctx, True, "attestation", None
         # When embedded control plane is active, override the error with a clearer message
         if ctx.control_store is not None and err.status_code == 503:
@@ -878,6 +928,7 @@ async def _attestation_check(
             )
         _set_disposition(request, "denied_attestation")
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_attestation")
+        _inject_caller_role(att_ctx, request)
         return att_id, att_ctx, False, None, err
 
     att_id = attestation.attestation_id
@@ -888,6 +939,7 @@ async def _attestation_check(
         "verification_level": getattr(attestation, "verification_level", "self_reported"),
         "tenant_id": attestation.tenant_id or settings.gateway_tenant_id,
     }
+    _inject_caller_role(att_ctx, request)
     return att_id, att_ctx, False, None, None
 
 
@@ -1408,7 +1460,12 @@ async def handle_request(request: Request) -> Response:
             call = _strip_tools_from_call(call)
         _set_disposition(request, "allowed")
         buf: list[bytes] = []
-        governance_meta: dict = {"attestation_id": pre.att_id, "policy_result": pre.pr}
+        governance_meta: dict = {
+            "attestation_id": pre.att_id, "policy_result": pre.pr,
+            "model_id": call.model_id,
+            "budget_remaining": pre.budget_remaining,
+            "budget_percent": _compute_budget_percent(pre.budget_remaining, settings),
+        }
         task = BackgroundTask(
             _after_stream_record, buf, call, adapter,
             pre.att_id, pre.pv, pre.pr, pre.audit_metadata,
@@ -1550,12 +1607,17 @@ async def handle_request(request: Request) -> Response:
     _inc_request(provider, model, outcome)
 
     # Phase 23: governance response headers (non-streaming)
+    _content_verdict = _summarize_content_analysis(rp_decisions)
     _add_governance_headers(
         http_response,
         execution_id=getattr(request.state, "walacor_execution_id", None),
         attestation_id=pre.att_id,
         chain_seq=getattr(request.state, "walacor_chain_seq", None),
         policy_result=pre.pr,
+        content_analysis=_content_verdict,
+        budget_remaining=pre.budget_remaining,
+        budget_percent=_compute_budget_percent(pre.budget_remaining, settings),
+        model_id=call.model_id,
     )
     _add_rate_limit_headers(http_response, request)
     return http_response
