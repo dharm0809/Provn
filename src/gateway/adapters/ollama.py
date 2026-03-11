@@ -27,6 +27,8 @@ from starlette.requests import Request
 
 from gateway.adapters.base import ModelCall, ModelResponse, ProviderAdapter, ToolInteraction
 from gateway.adapters.thinking import strip_thinking_tokens
+from gateway.config import get_settings
+from gateway.util.session_id import resolve_session_id
 from gateway.adapters.openai import (
     _build_interactions_from_map,
     _detect_multimodal,
@@ -125,7 +127,7 @@ class OllamaAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = request.headers.get("x-session-id") or str(uuid.uuid4())
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
 
         # OpenAI-standard inference params
         params = _extract_inference_params(data)

@@ -117,6 +117,17 @@ class Settings(BaseSettings):
     session_chain_max_sessions: int = Field(default=10000, description="Max concurrent sessions tracked in memory")
     session_chain_ttl: int = Field(default=3600, description="Session state TTL seconds (evict inactive sessions)")
 
+    # Phase 23 (OpenWebUI integration): configurable session header names
+    session_header_names: str = Field(
+        default="X-Session-ID,X-OpenWebUI-Chat-Id,X-Chat-Id",
+        description=(
+            "Comma-separated list of request header names to check for session ID, "
+            "in priority order. First non-empty match wins. Falls back to UUID. "
+            "Allows OpenWebUI (X-OpenWebUI-Chat-Id), LibreChat, and custom UIs to "
+            "share the same session chain semantics."
+        ),
+    )
+
     # Mode
     enforcement_mode: Literal["enforced", "audit_only"] = Field(default="enforced")
     skip_governance: bool = Field(default=False, description="If True, run as transparent proxy (Phase 1 only)")
@@ -312,6 +323,11 @@ class Settings(BaseSettings):
     @property
     def jwt_algorithms_list(self) -> list[str]:
         return [a.strip() for a in self.jwt_algorithms.split(",") if a.strip()]
+
+    @property
+    def session_header_names_list(self) -> list[str]:
+        """Parsed session header names in priority order."""
+        return [h.strip() for h in self.session_header_names.split(",") if h.strip()]
 
     @model_validator(mode="after")
     def _parse_and_cache_model_routes(self) -> "Settings":

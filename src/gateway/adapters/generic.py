@@ -28,6 +28,8 @@ from gateway.adapters.openai import (
     _parse_chat_completions_choice,
     _process_sse_line,
 )
+from gateway.config import get_settings
+from gateway.util.session_id import resolve_session_id
 
 
 def _json_path(obj: Any, path: str) -> Any:
@@ -116,7 +118,7 @@ class GenericAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = request.headers.get("x-session-id") or str(uuid.uuid4())
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
 
         fmt = _detect_request_format(data) if self._auto_detect else "unknown"
 

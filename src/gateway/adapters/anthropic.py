@@ -20,6 +20,8 @@ from starlette.requests import Request
 
 from gateway.adapters.base import ModelCall, ModelResponse, ProviderAdapter, ToolInteraction
 from gateway.adapters.caching import detect_cache_hit, inject_cache_control
+from gateway.config import get_settings
+from gateway.util.session_id import resolve_session_id
 
 
 def _concat_messages_anthropic(messages: list[dict]) -> str:
@@ -153,7 +155,7 @@ class AnthropicAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = request.headers.get("x-session-id") or str(uuid.uuid4())
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
         # System prompt (top-level Anthropic field, not in messages array)
         system_raw = data.get("system", "")
         if isinstance(system_raw, list):

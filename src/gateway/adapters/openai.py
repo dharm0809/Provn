@@ -19,6 +19,8 @@ from starlette.requests import Request
 
 from gateway.adapters.base import ModelCall, ModelResponse, ProviderAdapter, ToolInteraction
 from gateway.adapters.caching import detect_cache_hit
+from gateway.config import get_settings
+from gateway.util.session_id import resolve_session_id
 
 
 def _concat_messages(messages: list[dict]) -> str:
@@ -282,7 +284,7 @@ class OpenAIAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = request.headers.get("x-session-id") or str(uuid.uuid4())
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
         params = _extract_inference_params(data)
         if params:
             metadata["inference_params"] = params
