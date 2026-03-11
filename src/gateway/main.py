@@ -52,6 +52,7 @@ from gateway.control.sync_api import (
 )
 from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
+from gateway.openwebui.status_api import openwebui_status
 
 from gateway.util.json_logger import configure_json_logging
 configure_json_logging(os.environ.get("WALACOR_LOG_LEVEL", "INFO"))
@@ -772,6 +773,8 @@ def create_app() -> Starlette:
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),
+        # OpenWebUI integration
+        Route("/v1/openwebui/status", openwebui_status, methods=["GET"]),
         # Models API (OpenAI-compatible)
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
