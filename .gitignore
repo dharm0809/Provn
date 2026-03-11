@@ -78,3 +78,4 @@ screenshots/
 *.log
 *.jsonl
 CLAUDE.md
+.worktrees/
