@@ -148,7 +148,17 @@ async def api_key_middleware(request: Request, call_next):
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
+    "Access-Control-Allow-Headers": (
+        "Content-Type, Authorization, X-API-Key, "
+        "X-Session-ID, X-User-Id, X-User-Email, X-User-Roles, X-Team-Id"
+    ),
+    "Access-Control-Expose-Headers": (
+        "x-walacor-execution-id, x-walacor-attestation-id, "
+        "x-walacor-chain-seq, x-walacor-policy-result, "
+        "x-walacor-content-analysis, x-walacor-budget-remaining, "
+        "x-walacor-budget-percent, x-walacor-model-id, "
+        "X-Session-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset"
+    ),
     "Access-Control-Max-Age": "86400",
 }
 
@@ -496,7 +506,10 @@ def _init_load_balancer(settings, ctx) -> None:
 
     raw = settings.model_groups_json.strip()
     if not raw:
-        ctx.circuit_breakers = CircuitBreakerRegistry()
+        ctx.circuit_breakers = CircuitBreakerRegistry(
+            fail_max=settings.circuit_breaker_fail_max,
+            reset_timeout=settings.circuit_breaker_reset_timeout,
+        )
         return
 
     import json as _json
@@ -517,7 +530,10 @@ def _init_load_balancer(settings, ctx) -> None:
         groups.append(ModelGroup(pattern=pattern, endpoints=endpoints))
 
     ctx.load_balancer = LoadBalancer(groups)
-    ctx.circuit_breakers = CircuitBreakerRegistry()
+    ctx.circuit_breakers = CircuitBreakerRegistry(
+        fail_max=settings.circuit_breaker_fail_max,
+        reset_timeout=settings.circuit_breaker_reset_timeout,
+    )
     logger.info("Load balancer initialized with %d model groups", len(groups))
 
 
@@ -563,8 +579,8 @@ async def on_startup() -> None:
         # Shared HTTP client for all modes. Without this, skip_governance would create
         # a new one-off httpx.AsyncClient per request (Finding 7).
         ctx.http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0, connect=10.0),
-            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+            timeout=httpx.Timeout(settings.provider_timeout, connect=settings.provider_connect_timeout),
+            limits=httpx.Limits(max_connections=settings.provider_max_connections, max_keepalive_connections=settings.provider_max_keepalive),
             http2=True,
         )
 
