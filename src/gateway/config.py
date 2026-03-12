@@ -277,6 +277,20 @@ class Settings(BaseSettings):
         """True when all three Walacor credentials are set."""
         return bool(self.walacor_server and self.walacor_username and self.walacor_password)
 
+    # Network tuning
+    provider_timeout: float = Field(default=60.0, description="Provider HTTP request timeout in seconds")
+    provider_connect_timeout: float = Field(default=10.0, description="Provider connection timeout in seconds")
+    provider_max_connections: int = Field(default=200, description="Max concurrent provider connections")
+    provider_max_keepalive: int = Field(default=50, description="Max keepalive provider connections")
+    sse_keepalive_interval: float = Field(default=15.0, description="SSE keepalive ping interval in seconds")
+
+    # Resilience tuning
+    delivery_batch_size: int = Field(default=50, description="WAL delivery batch size per cycle")
+    circuit_breaker_fail_max: int = Field(default=5, description="Failures before circuit opens")
+    circuit_breaker_reset_timeout: float = Field(default=30.0, description="Seconds before circuit half-open retry")
+    retry_max_attempts: int = Field(default=3, description="Max forward retry attempts on transient errors")
+    disk_degraded_threshold: float = Field(default=0.8, description="WAL disk usage threshold (0-1) for degraded status")
+
     # Server
     gateway_host: str = Field(default="0.0.0.0", description="Bind host for uvicorn")
     gateway_port: int = Field(default=8000, description="Bind port for uvicorn")

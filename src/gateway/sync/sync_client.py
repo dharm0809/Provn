@@ -13,6 +13,9 @@ from gateway.cache.policy_cache import PolicyCache
 
 logger = logging.getLogger(__name__)
 
+_ATTESTATION_FETCH_LIMIT = 1000
+_POLICY_FETCH_LIMIT = 500
+
 
 class SyncClient:
     """Pull attestations and policies from control plane. Fail-closed if startup sync fails."""
@@ -58,7 +61,7 @@ class SyncClient:
         """Pull all attestation proofs for tenant (paginated) and fill attestation cache. Returns True on success."""
         try:
             client = await self._client()
-            limit = 1000
+            limit = _ATTESTATION_FETCH_LIMIT
             all_proofs: list[dict] = []
             offset = 0
             while True:
@@ -90,7 +93,7 @@ class SyncClient:
             client = await self._client()
             r = await client.get(
                 f"{self._base}/v1/policies",
-                params={"tenant_id": self._tenant_id, "limit": 500, "offset": 0},
+                params={"tenant_id": self._tenant_id, "limit": _POLICY_FETCH_LIMIT, "offset": 0},
                 headers=self._headers(),
             )
             r.raise_for_status()

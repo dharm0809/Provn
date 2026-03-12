@@ -11,6 +11,11 @@ from gateway.pipeline.context import get_pipeline_context
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_SESSION_LIMIT = "50"
+_MAX_SESSION_LIMIT = 200
+_DEFAULT_ATTEMPT_LIMIT = "100"
+_MAX_ATTEMPT_LIMIT = 500
+
 
 def _reader_or_503():
     """Return lineage reader or raise 503 JSONResponse."""
@@ -25,7 +30,7 @@ async def lineage_sessions(request: Request) -> JSONResponse:
     reader = _reader_or_503()
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
-    limit = min(int(request.query_params.get("limit", "50")), 200)
+    limit = min(int(request.query_params.get("limit", _DEFAULT_SESSION_LIMIT)), _MAX_SESSION_LIMIT)
     offset = int(request.query_params.get("offset", "0"))
     try:
         sessions = reader.list_sessions(limit=limit, offset=offset)
@@ -73,7 +78,7 @@ async def lineage_attempts(request: Request) -> JSONResponse:
     reader = _reader_or_503()
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
-    limit = min(int(request.query_params.get("limit", "100")), 500)
+    limit = min(int(request.query_params.get("limit", _DEFAULT_ATTEMPT_LIMIT)), _MAX_ATTEMPT_LIMIT)
     offset = int(request.query_params.get("offset", "0"))
     try:
         data = reader.get_attempts(limit=limit, offset=offset)

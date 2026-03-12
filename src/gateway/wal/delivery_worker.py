@@ -20,14 +20,29 @@ logger = logging.getLogger(__name__)
 class DeliveryWorker:
     """Async task: poll WAL for undelivered records, POST to /v1/gateway/executions, mark delivered."""
 
+    _DELIVERY_PATH = "/v1/gateway/executions"
+    _PURGE_CYCLE = 60
+    _INITIAL_BACKOFF = 1.0
+    _MAX_BACKOFF = 60.0
+    _DEFAULT_BATCH_SIZE = 50
+
+    @staticmethod
+    def _resolve_batch_size() -> int:
+        try:
+            s = get_settings()
+            v = s.delivery_batch_size
+            return v if isinstance(v, int) else DeliveryWorker._DEFAULT_BATCH_SIZE
+        except Exception:
+            return DeliveryWorker._DEFAULT_BATCH_SIZE
+
     def __init__(self, wal: WALWriter) -> None:
         self._wal = wal
         self._running = False
         self._task: asyncio.Task | None = None
         self._interval = 1.0
-        self._batch_size = 50
-        self._backoff = 1.0
-        self._max_backoff = 60.0
+        self._batch_size = self._resolve_batch_size()
+        self._backoff = self._INITIAL_BACKOFF
+        self._max_backoff = self._MAX_BACKOFF
         self._cycles = 0
         self._client: httpx.AsyncClient | None = None
 
@@ -59,9 +74,9 @@ class DeliveryWorker:
         while self._running:
             try:
                 await self._deliver_batch()
-                self._backoff = 1.0
+                self._backoff = self._INITIAL_BACKOFF
                 self._cycles += 1
-                if self._cycles % 60 == 0:
+                if self._cycles % self._PURGE_CYCLE == 0:
                     settings = get_settings()
                     deleted = self._wal.purge_delivered(settings.wal_max_age_hours)
                     if deleted:
@@ -94,13 +109,14 @@ class DeliveryWorker:
         settings = get_settings()
         base = settings.control_plane_url.rstrip("/")
         headers = self._control_plane_headers()
-        rows = self._wal.get_undelivered(limit=self._batch_size)
+        batch_size = self._batch_size
+        rows = self._wal.get_undelivered(limit=batch_size)
         client = await self._get_client()
         for execution_id, record_json, _ in rows:
             try:
                 body = json.loads(record_json)
                 r = await client.post(
-                    f"{base}/v1/gateway/executions",
+                    f"{base}{self._DELIVERY_PATH}",
                     json=body,
                     headers=headers,
                 )

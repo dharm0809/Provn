@@ -9,6 +9,10 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
+_REDIS_PREFIX = "gateway:budget:"
+_UNLIMITED_SENTINEL = -1
+_TTL_BUFFER_SECONDS = 3600
+
 
 @dataclass
 class BudgetState:
@@ -92,12 +96,12 @@ class BudgetTracker:
             state = self._states.get(key)
             if state is None:
                 # No budget configured — allow
-                return True, -1  # -1 = unlimited
+                return True, _UNLIMITED_SENTINEL  # unlimited
             if _period_expired(state, now):
                 state.tokens_used = 0
                 state.period_start = _period_start(state.period, now)
             if state.max_tokens == 0:
-                return True, -1
+                return True, _UNLIMITED_SENTINEL
             remaining = state.max_tokens - state.tokens_used
             if remaining <= 0 or estimated_tokens > remaining:
                 return False, max(0, remaining)
@@ -243,7 +247,7 @@ class RedisBudgetTracker:
             tomorrow = (now + timedelta(days=1)).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
-            ttl = int((tomorrow - now).total_seconds()) + 3600  # +1h buffer
+            ttl = int((tomorrow - now).total_seconds()) + _TTL_BUFFER_SECONDS
         else:  # monthly
             period_str = now.strftime("%Y%m")
             if now.month == 12:
@@ -256,8 +260,8 @@ class RedisBudgetTracker:
                     month=now.month + 1, day=1,
                     hour=0, minute=0, second=0, microsecond=0,
                 )
-            ttl = int((next_month - now).total_seconds()) + 3600
-        key = f"gateway:budget:{tenant_id}:{user or ''}:{period_str}"
+            ttl = int((next_month - now).total_seconds()) + _TTL_BUFFER_SECONDS
+        key = f"{_REDIS_PREFIX}{tenant_id}:{user or ''}:{period_str}"
         return key, ttl
 
     def configure(self, tenant_id: str, user: str | None, period: str, max_tokens: int) -> None:
@@ -290,7 +294,7 @@ class RedisBudgetTracker:
                 "Redis budget check_and_reserve failed: tenant_id=%s estimated=%d — failing open",
                 tenant_id, estimated, exc_info=True,
             )
-            return True, -1  # fail-open: allow request, unlimited sentinel
+            return True, _UNLIMITED_SENTINEL  # fail-open: allow request
 
     async def record_usage(
         self, tenant_id: str, user: str | None, actual_tokens: int, estimated: int = 0

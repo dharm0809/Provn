@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react';
-import { getHealth, getExecution } from '../api';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { getExecution } from '../api';
 import { displayModel, verdictBadgeClass } from '../utils';
 
-const DEFAULT_MODELS = ['gpt-4', 'gpt-4o', 'gpt-3.5-turbo', 'claude-3-opus-20240229', 'claude-sonnet-4-20250514'];
+
+function getApiKey() {
+  return sessionStorage.getItem('cp_api_key') || '';
+}
 
 function GovernanceReadout({ meta, record, loading }) {
   if (loading) return <div className="skeleton-block" style={{ height: 100 }} />;
@@ -43,22 +46,43 @@ function GovernanceReadout({ meta, record, loading }) {
   );
 }
 
-function ResponsePane({ label, response, loading, error, governanceMeta, governanceRecord, govLoading }) {
+function ConversationHistory({ messages }) {
+  const endRef = useRef(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  if (messages.length === 0) return null;
+  return (
+    <div className="pg-conversation">
+      {messages.map((msg, i) => (
+        <div key={i} className={`pg-msg pg-msg-${msg.role}`}>
+          <span className="pg-msg-role">{msg.role === 'user' ? '▸ You' : '◂ Assistant'}</span>
+          <div className="pg-msg-content">{msg.content}</div>
+        </div>
+      ))}
+      <div ref={endRef} />
+    </div>
+  );
+}
+
+function ResponsePane({ label, response, streaming, loading, error, governanceMeta, governanceRecord, govLoading, conversation }) {
   return (
     <div className="pg-response-pane">
       {label && <div className="pg-pane-label">{label}</div>}
+      {conversation && conversation.length > 0 && <ConversationHistory messages={conversation} />}
       <div className="pg-response-body">
-        {loading && (
+        {loading && !streaming && (
           <div className="pg-response-loading">
             <div className="pg-loading-bar" />
-            <span>Awaiting provider response...</span>
+            <span>Connecting to provider...</span>
           </div>
         )}
         {error && <div className="error-card" style={{ margin: 0 }}>{error}</div>}
-        {!loading && !error && response && (
-          <div className="pg-response-text">{response}</div>
+        {(streaming || (!loading && !error && response)) && (
+          <div className="pg-response-text">
+            {response}
+            {streaming && <span className="pg-cursor">▌</span>}
+          </div>
         )}
-        {!loading && !error && !response && (
+        {!loading && !streaming && !error && !response && (!conversation || conversation.length === 0) && (
           <div className="pg-response-empty">
             <div className="pg-response-empty-icon">◇</div>
             <div>Every request here generates a real audit record.</div>
@@ -71,37 +95,65 @@ function ResponsePane({ label, response, loading, error, governanceMeta, governa
   );
 }
 
+/** Parse one SSE data line into a content delta string (or null). */
+function parseSseDelta(line) {
+  if (!line.startsWith('data: ')) return null;
+  const payload = line.slice(6).trim();
+  if (payload === '[DONE]') return null;
+  try {
+    const obj = JSON.parse(payload);
+    return obj?.choices?.[0]?.delta?.content || null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Playground({ navigate }) {
-  const [models, setModels] = useState(DEFAULT_MODELS);
+  const [models, setModels] = useState([]);
   const [compare, setCompare] = useState(false);
   const [modelA, setModelA] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [userPrompt, setUserPrompt] = useState('');
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(1024);
+  const [userId, setUserId] = useState('playground-user');
 
-  const [responseA, setResponseA] = useState(null);
+  // Session ID — new UUID on mount and on clear
+  const [sessionIdA, setSessionIdA] = useState(() => crypto.randomUUID());
+  const [sessionIdB, setSessionIdB] = useState(() => crypto.randomUUID());
+
+  // Model A state
+  const [responseA, setResponseA] = useState('');
+  const [streamingA, setStreamingA] = useState(false);
   const [loadingA, setLoadingA] = useState(false);
   const [errorA, setErrorA] = useState(null);
   const [govMetaA, setGovMetaA] = useState(null);
   const [govRecordA, setGovRecordA] = useState(null);
   const [govLoadingA, setGovLoadingA] = useState(false);
+  const [conversationA, setConversationA] = useState([]);
 
+  // Model B state
   const [modelB, setModelB] = useState('');
-  const [responseB, setResponseB] = useState(null);
+  const [responseB, setResponseB] = useState('');
+  const [streamingB, setStreamingB] = useState(false);
   const [loadingB, setLoadingB] = useState(false);
   const [errorB, setErrorB] = useState(null);
   const [govMetaB, setGovMetaB] = useState(null);
   const [govRecordB, setGovRecordB] = useState(null);
   const [govLoadingB, setGovLoadingB] = useState(false);
+  const [conversationB, setConversationB] = useState([]);
+
+  // Abort controller ref for cancelling in-flight streams
+  const abortRef = useRef(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const h = await getHealth();
-        const caps = h?.model_capabilities;
-        if (caps && Object.keys(caps).length > 0) {
-          setModels(prev => [...new Set([...Object.keys(caps), ...prev])]);
+        const resp = await fetch('/v1/models');
+        if (resp.ok) {
+          const data = await resp.json();
+          const ids = (data?.data || []).map(m => m.id).filter(Boolean);
+          if (ids.length > 0) setModels(ids);
         }
       } catch {}
     })();
@@ -112,30 +164,64 @@ export default function Playground({ navigate }) {
     if (!modelB && models.length > 1) setModelB(models[1]);
   }, [models]);
 
-  const sendRequest = async (model, setResponse, setLoading, setError, setGovMeta, setGovRecord, setGovLoading) => {
-    if (!userPrompt.trim()) return;
+  const clearConversation = useCallback(() => {
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+    setConversationA([]); setConversationB([]);
+    setResponseA(''); setResponseB('');
+    setErrorA(null); setErrorB(null);
+    setGovMetaA(null); setGovMetaB(null);
+    setGovRecordA(null); setGovRecordB(null);
+    setStreamingA(false); setStreamingB(false);
+    setLoadingA(false); setLoadingB(false);
+    setSessionIdA(crypto.randomUUID());
+    setSessionIdB(crypto.randomUUID());
+  }, []);
+
+  const sendRequest = useCallback(async (
+    model, sessionId, conversation, setConversation,
+    setResponse, setStreaming, setLoading, setError,
+    setGovMeta, setGovRecord, setGovLoading, abortSignal,
+  ) => {
+    const prompt = userPrompt.trim();
+    if (!prompt) return;
+
     setLoading(true);
     setError(null);
-    setResponse(null);
+    setResponse('');
+    setStreaming(false);
     setGovMeta(null);
     setGovRecord(null);
 
+    // Build full message array with history
     const messages = [];
     if (systemPrompt.trim()) messages.push({ role: 'system', content: systemPrompt.trim() });
-    messages.push({ role: 'user', content: userPrompt.trim() });
+    messages.push(...conversation);
+    messages.push({ role: 'user', content: prompt });
+
+    // Add user message to conversation immediately
+    setConversation(prev => [...prev, { role: 'user', content: prompt }]);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (sessionId) headers['X-Session-ID'] = sessionId;
+    if (userId.trim()) headers['X-User-Id'] = userId.trim();
+    const apiKey = getApiKey();
+    if (apiKey) headers['X-API-Key'] = apiKey;
 
     try {
       const resp = await fetch('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           model,
           messages,
           temperature: parseFloat(temperature),
           max_tokens: parseInt(maxTokens, 10),
+          stream: true,
         }),
+        signal: abortSignal,
       });
 
+      // Extract governance headers immediately
       const meta = {
         executionId: resp.headers.get('x-walacor-execution-id'),
         attestationId: resp.headers.get('x-walacor-attestation-id'),
@@ -145,16 +231,59 @@ export default function Playground({ navigate }) {
       setGovMeta(meta);
 
       if (!resp.ok) {
-        setError(`HTTP ${resp.status}: ${await resp.text()}`);
+        const body = await resp.text();
+        setError(`HTTP ${resp.status}: ${body}`);
         setLoading(false);
+        // Remove the user message we optimistically added
+        setConversation(prev => prev.slice(0, -1));
         return;
       }
 
-      const data = await resp.json();
-      const content = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || JSON.stringify(data);
-      setResponse(content);
+      // Stream the response
       setLoading(false);
+      setStreaming(true);
+      let fullContent = '';
 
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete line in buffer
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === 'data: [DONE]') continue;
+          const delta = parseSseDelta(trimmed);
+          if (delta) {
+            fullContent += delta;
+            setResponse(fullContent);
+          }
+        }
+      }
+
+      // Process any remaining buffer
+      if (buffer.trim() && buffer.trim() !== 'data: [DONE]') {
+        const delta = parseSseDelta(buffer.trim());
+        if (delta) {
+          fullContent += delta;
+          setResponse(fullContent);
+        }
+      }
+
+      setStreaming(false);
+
+      // Add assistant response to conversation
+      if (fullContent) {
+        setConversation(prev => [...prev, { role: 'assistant', content: fullContent }]);
+      }
+
+      // Fetch full execution record
       if (meta.executionId) {
         setGovLoading(true);
         try {
@@ -164,17 +293,37 @@ export default function Playground({ navigate }) {
         setGovLoading(false);
       }
     } catch (e) {
+      if (e.name === 'AbortError') return;
       setError(e.message);
       setLoading(false);
+      setStreaming(false);
+      // Remove the user message we optimistically added
+      setConversation(prev => prev.slice(0, -1));
     }
-  };
+  }, [userPrompt, systemPrompt, temperature, maxTokens, userId]);
 
-  const handleSend = () => {
-    sendRequest(modelA, setResponseA, setLoadingA, setErrorA, setGovMetaA, setGovRecordA, setGovLoadingA);
+  const handleSend = useCallback(() => {
+    if (!userPrompt.trim()) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    sendRequest(
+      modelA, sessionIdA, conversationA, setConversationA,
+      setResponseA, setStreamingA, setLoadingA, setErrorA,
+      setGovMetaA, setGovRecordA, setGovLoadingA, controller.signal,
+    );
     if (compare && modelB) {
-      sendRequest(modelB, setResponseB, setLoadingB, setErrorB, setGovMetaB, setGovRecordB, setGovLoadingB);
+      sendRequest(
+        modelB, sessionIdB, conversationB, setConversationB,
+        setResponseB, setStreamingB, setLoadingB, setErrorB,
+        setGovMetaB, setGovRecordB, setGovLoadingB, controller.signal,
+      );
     }
-  };
+
+    setUserPrompt('');
+  }, [userPrompt, modelA, modelB, sessionIdA, sessionIdB, conversationA, conversationB, compare, sendRequest]);
+
+  const busy = loadingA || loadingB || streamingA || streamingB;
 
   return (
     <div className="fade-child">
@@ -182,13 +331,20 @@ export default function Playground({ navigate }) {
       <div className="pg-controls card">
         <div className="pg-controls-header">
           <div className="pg-section-label" style={{ marginBottom: 0 }}>◆ Prompt Playground</div>
-          <button
-            className={`pg-compare-toggle ${compare ? 'active' : ''}`}
-            onClick={() => setCompare(!compare)}
-          >
-            <span className="pg-compare-icon">{compare ? '◆◆' : '◇◇'}</span>
-            {compare ? 'Comparison Active' : 'Compare Models'}
-          </button>
+          <div className="pg-header-actions">
+            {(conversationA.length > 0 || conversationB.length > 0) && (
+              <button className="pg-clear-btn" onClick={clearConversation} disabled={busy}>
+                ✕ Clear
+              </button>
+            )}
+            <button
+              className={`pg-compare-toggle ${compare ? 'active' : ''}`}
+              onClick={() => setCompare(!compare)}
+            >
+              <span className="pg-compare-icon">{compare ? '◆◆' : '◇◇'}</span>
+              {compare ? 'Comparison Active' : 'Compare Models'}
+            </button>
+          </div>
         </div>
 
         {/* Model selectors */}
@@ -209,6 +365,30 @@ export default function Playground({ navigate }) {
           )}
         </div>
 
+        {/* Identity settings */}
+        <div className="pg-identity-row">
+          <div className="pg-field pg-field-inline">
+            <label className="pg-label">User ID</label>
+            <input
+              type="text"
+              value={userId}
+              onChange={e => setUserId(e.target.value)}
+              className="pg-text-input"
+              placeholder="playground-user"
+            />
+          </div>
+          <div className="pg-field pg-field-inline">
+            <label className="pg-label">Session</label>
+            <span className="pg-session-id mono">{sessionIdA.slice(0, 8)}…</span>
+          </div>
+          {getApiKey() && (
+            <div className="pg-field pg-field-inline">
+              <label className="pg-label">Auth</label>
+              <span className="badge badge-pass" style={{ fontSize: 10 }}>API Key ✓</span>
+            </div>
+          )}
+        </div>
+
         {/* System prompt */}
         <div className="pg-field">
           <label className="pg-label">System Prompt <span style={{ opacity: 0.5 }}>(optional)</span></label>
@@ -223,14 +403,14 @@ export default function Playground({ navigate }) {
 
         {/* User prompt */}
         <div className="pg-field">
-          <label className="pg-label">User Prompt</label>
+          <label className="pg-label">{conversationA.length > 0 ? 'Next Message' : 'User Prompt'}</label>
           <textarea
             value={userPrompt}
             onChange={e => setUserPrompt(e.target.value)}
             className="pg-textarea pg-textarea-main"
-            rows={5}
-            placeholder="Type your prompt here..."
-            onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSend(); }}
+            rows={3}
+            placeholder={conversationA.length > 0 ? 'Continue the conversation...' : 'Type your prompt here...'}
+            onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy) handleSend(); }}
           />
         </div>
 
@@ -253,12 +433,12 @@ export default function Playground({ navigate }) {
           </div>
           <button
             onClick={handleSend}
-            disabled={!userPrompt.trim() || loadingA || loadingB}
+            disabled={!userPrompt.trim() || busy}
             className="pg-send-btn"
           >
             <span className="pg-send-icon">▶</span>
-            {loadingA || loadingB ? 'Processing...' : 'Send'}
-            {!loadingA && !loadingB && <span className="pg-send-hint">⌘↵</span>}
+            {busy ? 'Streaming...' : 'Send'}
+            {!busy && <span className="pg-send-hint">⌘↵</span>}
           </button>
         </div>
       </div>
@@ -267,14 +447,16 @@ export default function Playground({ navigate }) {
       <div className={`pg-results ${compare ? 'pg-results-compare' : ''}`}>
         <ResponsePane
           label={compare ? 'Model A' : null}
-          response={responseA} loading={loadingA} error={errorA}
+          response={responseA} streaming={streamingA} loading={loadingA} error={errorA}
           governanceMeta={govMetaA} governanceRecord={govRecordA} govLoading={govLoadingA}
+          conversation={conversationA}
         />
         {compare && (
           <ResponsePane
             label="Model B"
-            response={responseB} loading={loadingB} error={errorB}
+            response={responseB} streaming={streamingB} loading={loadingB} error={errorB}
             governanceMeta={govMetaB} governanceRecord={govRecordB} govLoading={govLoadingB}
+            conversation={conversationB}
           />
         )}
       </div>

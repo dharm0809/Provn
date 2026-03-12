@@ -71,7 +71,7 @@ async def health_response(request: Request) -> JSONResponse:
             payload["status"] = "fail_closed"
         elif disk_pct >= 100 or pending >= high_water:
             payload["status"] = "fail_closed"
-        elif pending > high_water * 0.8 or disk_pct >= 80:
+        elif pending > high_water * settings.disk_degraded_threshold or disk_pct >= settings.disk_degraded_threshold * 100:
             payload["status"] = "degraded"
 
     # Phase 11: token budget snapshot
