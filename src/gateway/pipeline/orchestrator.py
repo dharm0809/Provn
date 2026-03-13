@@ -966,11 +966,32 @@ async def _attestation_check(
     return att_id, att_ctx, False, None, None
 
 
-def _pre_policy_check(
+async def _pre_policy_check(
     request: Request, call: ModelCall, ctx, is_audit_only: bool,
     att_id: str, att_ctx: dict, whb: bool, reason: str | None, provider: str, model: str,
 ) -> tuple[int, str, bool, str | None, Response | None]:
     """Step 2. Returns (policy_version, policy_result, would_block, reason, error_resp)."""
+    settings = get_settings()
+
+    # OPA policy engine path
+    if settings.policy_engine == "opa":
+        from gateway.pipeline.opa_evaluator import query_opa
+        allowed, opa_reason = await query_opa(
+            settings.opa_url, settings.opa_policy_path, att_ctx, ctx.http_client
+        )
+        if not allowed:
+            if is_audit_only:
+                logger.warning("AUDIT_ONLY: Would have blocked (OPA) provider=%s model=%s reason=%s", provider, model, opa_reason)
+                return 0, opa_reason, True, reason or "opa", None
+            _set_disposition(request, "denied_by_opa")
+            _inc_request(provider, model, "blocked_policy")
+            return 0, opa_reason, whb, reason, JSONResponse(
+                {"error": "Blocked by OPA policy", "reason": opa_reason},
+                status_code=403,
+            )
+        return 0, "opa_allow", whb, reason, None
+
+    # Builtin policy engine path
     _, pv, pr, err = evaluate_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
     if err is not None:
         if is_audit_only:
@@ -1098,13 +1119,13 @@ async def _run_pre_checks(
     if err is not None:
         return _PreCheckResult(error=err)
 
-    if not ctx.policy_cache:
+    if not ctx.policy_cache and settings.policy_engine != "opa":
         _set_disposition(request, "error_config")
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Policy cache not configured"}, status_code=503))
 
     t_step = time.perf_counter()
-    pv, pr, whb, reason, err = _pre_policy_check(
+    pv, pr, whb, reason, err = await _pre_policy_check(
         request, call, ctx, is_audit_only, att_id, att_ctx, whb, reason, provider, model
     )
     step_timings["policy_ms"] = round((time.perf_counter() - t_step) * 1000, 1)

@@ -148,6 +148,20 @@ class Settings(BaseSettings):
         description="Enable shadow policy mode (log decisions without enforcing).",
     )
 
+    # Policy engine selection (builtin vs OPA)
+    policy_engine: str = Field(
+        default="builtin",
+        description="Policy engine: 'builtin' or 'opa'.",
+    )
+    opa_url: str = Field(
+        default="http://localhost:8181",
+        description="OPA REST API URL.",
+    )
+    opa_policy_path: str = Field(
+        default="/v1/data/walacor/gateway/allow",
+        description="OPA decision document path.",
+    )
+
     # Mode
     enforcement_mode: Literal["enforced", "audit_only"] = Field(default="enforced")
     skip_governance: bool = Field(default=False, description="If True, run as transparent proxy (Phase 1 only)")
