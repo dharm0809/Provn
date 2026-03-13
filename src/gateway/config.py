@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     session_chain_max_sessions: int = Field(default=10000, description="Max concurrent sessions tracked in memory")
     session_chain_ttl: int = Field(default=3600, description="Session state TTL seconds (evict inactive sessions)")
 
+    # Phase 11: Adaptive concurrency limiting (Gradient2)
+    adaptive_concurrency_enabled: bool = Field(default=False, description="Enable Gradient2 adaptive concurrency limiting")
+    adaptive_concurrency_min: int = Field(default=5, description="Min concurrency limit per provider")
+    adaptive_concurrency_max: int = Field(default=100, description="Max concurrency limit per provider")
+
     # Phase 23 (OpenWebUI integration): configurable session header names
     session_header_names: str = Field(
         default="X-Session-ID,X-OpenWebUI-Chat-Id,X-Chat-Id",

@@ -47,7 +47,31 @@ from gateway.metrics.prometheus import (
 
 logger = logging.getLogger(__name__)
 
+from gateway.routing.concurrency import ConcurrencyLimiter
+
 _AUDIT_ONLY_ATTESTATION_ID = "audit_only_no_attestation"
+
+# ── Adaptive Concurrency Limiters (Gradient2) ─────────────────────────────────
+# Per-provider concurrency limiters, created on first use.  Thread-safe for
+# asyncio (single writer, dict mutation is atomic in CPython).
+_concurrency_limiters: dict[str, ConcurrencyLimiter] = {}
+
+
+def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
+    """Return the per-provider ConcurrencyLimiter, creating one if needed."""
+    lim = _concurrency_limiters.get(provider)
+    if lim is None:
+        settings = get_settings()
+        lim = ConcurrencyLimiter(
+            min_limit=settings.adaptive_concurrency_min,
+            max_limit=settings.adaptive_concurrency_max,
+        )
+        _concurrency_limiters[provider] = lim
+        logger.info(
+            "Created adaptive concurrency limiter for provider=%s min=%d max=%d",
+            provider, settings.adaptive_concurrency_min, settings.adaptive_concurrency_max,
+        )
+    return lim
 
 # ── Model Capability Registry ─────────────────────────────────────────────────
 # Caches per-model capabilities discovered at runtime so the gateway never
@@ -1524,6 +1548,26 @@ async def handle_request(request: Request) -> Response:
                 provider, model, exc_info=True,
             )
 
+    # ── Adaptive concurrency gate ────────────────────────────────────────────
+    _concurrency_acquired = False
+    _concurrency_limiter: ConcurrencyLimiter | None = None
+    if settings.adaptive_concurrency_enabled:
+        limiter = _get_or_create_limiter(provider)
+        _concurrency_limiter = limiter
+        if not limiter.try_acquire():
+            logger.warning(
+                "Adaptive concurrency limit reached for provider=%s limit=%d inflight=%d",
+                provider, limiter.limit, limiter.inflight,
+            )
+            _set_disposition(request, "error_overloaded")
+            _inc_request(provider, model, "overloaded")
+            return JSONResponse(
+                {"error": "Service overloaded", "retry_after": 1},
+                status_code=503,
+                headers={"Retry-After": "1"},
+            )
+        _concurrency_acquired = True
+
     # ── Step 3: Forward ───────────────────────────────────────────────────────
     if call.is_streaming:
         # For streaming, we do a quick non-streaming probe only if tools were
@@ -1551,6 +1595,9 @@ async def handle_request(request: Request) -> Response:
             adapter, call, request, buffer=buf, background_task=task,
             governance_meta=governance_meta,
         )
+        # Release concurrency slot using time-to-first-byte as RTT signal
+        if _concurrency_acquired and _concurrency_limiter is not None:
+            _concurrency_limiter.release(time.perf_counter() - t0)
         pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
         outcome = "audit_only_allowed" if (is_audit_only and pre.whb) else "allowed"
         _inc_request(provider, model, outcome)
@@ -1580,7 +1627,12 @@ async def handle_request(request: Request) -> Response:
             _record_model_capability(call.model_id, supports_tools=True)
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
-    timings["forward_ms"] = round((time.perf_counter() - t_fwd) * 1000, 1)
+    fwd_rtt = time.perf_counter() - t_fwd
+    timings["forward_ms"] = round(fwd_rtt * 1000, 1)
+
+    # Release adaptive concurrency slot with observed forward RTT
+    if _concurrency_acquired and _concurrency_limiter is not None:
+        _concurrency_limiter.release(fwd_rtt)
 
     if http_response.status_code >= 500:
         _set_disposition(request, "error_provider")
