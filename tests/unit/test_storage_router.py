@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from gateway.storage.backend import StorageBackend
 from gateway.storage.router import StorageRouter, WriteResult
+from gateway.storage.wal_backend import WALBackend
 
 
 @pytest.fixture(params=["asyncio"])
@@ -128,3 +129,63 @@ def test_backend_names():
     b2 = FakeBackend("walacor")
     router = StorageRouter([b1, b2])
     assert router.backend_names == ["wal", "walacor"]
+
+
+# ── WALBackend tests ────────────────────────────────────────────────────────
+
+def _make_wal_writer() -> MagicMock:
+    writer = MagicMock()
+    writer.write_and_fsync = MagicMock()
+    writer.write_attempt = MagicMock()
+    writer.write_tool_event = MagicMock()
+    writer.close = MagicMock()
+    return writer
+
+
+@pytest.mark.anyio
+async def test_wal_backend_write_execution_success():
+    writer = _make_wal_writer()
+    backend = WALBackend(writer)
+    assert backend.name == "wal"
+    ok = await backend.write_execution({"execution_id": "e1", "model_id": "qwen3:4b"})
+    assert ok is True
+    writer.write_and_fsync.assert_called_once_with({"execution_id": "e1", "model_id": "qwen3:4b"})
+
+
+@pytest.mark.anyio
+async def test_wal_backend_write_execution_failure():
+    writer = _make_wal_writer()
+    writer.write_and_fsync.side_effect = RuntimeError("disk full")
+    backend = WALBackend(writer)
+    ok = await backend.write_execution({"execution_id": "e2"})
+    assert ok is False
+
+
+@pytest.mark.anyio
+async def test_wal_backend_write_attempt():
+    writer = _make_wal_writer()
+    backend = WALBackend(writer)
+    await backend.write_attempt({
+        "request_id": "r1", "tenant_id": "t1", "path": "/v1/chat/completions",
+        "disposition": "allowed", "status_code": 200,
+    })
+    writer.write_attempt.assert_called_once_with(
+        request_id="r1", tenant_id="t1", path="/v1/chat/completions",
+        disposition="allowed", status_code=200,
+    )
+
+
+@pytest.mark.anyio
+async def test_wal_backend_write_tool_event():
+    writer = _make_wal_writer()
+    backend = WALBackend(writer)
+    await backend.write_tool_event({"event_id": "t1"})
+    writer.write_tool_event.assert_called_once_with({"event_id": "t1"})
+
+
+@pytest.mark.anyio
+async def test_wal_backend_close():
+    writer = _make_wal_writer()
+    backend = WALBackend(writer)
+    await backend.close()
+    writer.close.assert_called_once()
