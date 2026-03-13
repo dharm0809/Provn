@@ -248,6 +248,8 @@ async def control_delete_budget(request: Request) -> JSONResponse:
 
 def _refresh_content_policies() -> None:
     """Reload content policies from store into running analyzers."""
+    from gateway.pipeline.response_evaluator import clear_analysis_cache
+
     ctx = get_pipeline_context()
     store = ctx.control_store
     if not store:
@@ -258,6 +260,7 @@ def _refresh_content_policies() -> None:
         if aid and hasattr(analyzer, "configure"):
             relevant = [p for p in policies if p["analyzer_id"] == aid]
             analyzer.configure(relevant)
+    clear_analysis_cache()
     logger.info("Content policies refreshed: %d rules across %d analyzers",
                 len(policies), len(ctx.content_analyzers))
 

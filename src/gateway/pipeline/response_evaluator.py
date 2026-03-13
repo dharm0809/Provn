@@ -21,6 +21,11 @@ _analysis_cache: dict[str, list] = {}
 _CACHE_MAX = 1000
 
 
+def clear_analysis_cache() -> None:
+    """Clear the content analysis cache (e.g. after policy hot-reload)."""
+    _analysis_cache.clear()
+
+
 async def _run_analyzer(analyzer: ContentAnalyzer, text: str) -> Decision | None:
     """Run a single analyzer under its declared timeout. Returns fail-open Decision on timeout/error."""
     try:

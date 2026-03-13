@@ -328,7 +328,7 @@ class ControlPlaneStore:
             ("*", "walacor.pii.v1", "phone_number", "warn"),
             ("*", "walacor.pii.v1", "ip_address", "warn"),
             # Llama Guard
-            *[("*", "walacor.llama_guard.v1", f"S{i}",
+            *[("*", "walacor.llama_guard.v3", f"S{i}",
                "block" if i == 4 else "warn") for i in range(1, 15)],
             # Toxicity
             ("*", "walacor.toxicity.v1", "child_safety", "block"),
