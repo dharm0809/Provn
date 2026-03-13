@@ -577,17 +577,8 @@ async def _write_tool_events(
             analysis = await analyze_text(output_text, ctx.content_analyzers)
             if analysis:
                 record["content_analysis"] = analysis
-        # Dual-write: Walacor backend AND local WAL (so lineage dashboard always has data)
-        if ctx.walacor_client:
-            try:
-                await ctx.walacor_client.write_tool_event(record)
-            except Exception as exc:
-                logger.error("Walacor write_tool_event FAILED: event_id=%s error=%s", record.get("event_id"), exc)
-        if ctx.wal_writer:
-            try:
-                ctx.wal_writer.write_tool_event(record)
-            except Exception as exc:
-                logger.error("WAL write_tool_event FAILED: event_id=%s error=%s", record.get("event_id"), exc)
+        if ctx.storage:
+            await ctx.storage.write_tool_event(record)
 
 
 def _emit_tool_metrics(interactions: list[ToolInteraction], provider: str, source: str) -> None:
@@ -745,24 +736,13 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
 
 
 async def _store_execution(record, request: Request, ctx) -> None:
-    """Write execution record to Walacor backend and/or local WAL, then tag request state."""
+    """Write execution record via storage router, then tag request state."""
     eid = record["execution_id"]
-    written = False
-    if ctx.walacor_client:
-        try:
-            await ctx.walacor_client.write_execution(record)
-            written = True
-        except Exception as exc:
-            logger.error("Walacor write_execution FAILED — audit record may be lost: execution_id=%s error=%s", eid, exc)
-    if ctx.wal_writer:
-        try:
-            ctx.wal_writer.write_and_fsync(record)
-            written = True
-        except Exception as exc:
-            logger.error("WAL write_and_fsync FAILED: execution_id=%s error=%s", eid, exc)
-    if written:
-        execution_id_var.set(eid)
-        request.state.walacor_execution_id = eid
+    if ctx.storage:
+        result = await ctx.storage.write_execution(record)
+        if result.succeeded:
+            execution_id_var.set(eid)
+            request.state.walacor_execution_id = eid
 
 
 # ── Post-stream background tasks ─────────────────────────────────────────────
@@ -846,21 +826,10 @@ async def _after_stream_record(
         _exec_id = record.get("execution_id", "unknown")
 
         record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
-        written = False
-        if ctx.walacor_client:
-            try:
-                await ctx.walacor_client.write_execution(record)
-                written = True
-            except Exception as exc:
-                logger.error("Walacor write_execution FAILED (stream): execution_id=%s error=%s", _exec_id, exc)
-        if ctx.wal_writer:
-            try:
-                ctx.wal_writer.write_and_fsync(record)
-                written = True
-            except Exception as exc:
-                logger.error("WAL write_and_fsync FAILED (stream): execution_id=%s error=%s", _exec_id, exc)
-        if written:
-            execution_id_var.set(record["execution_id"])
+        if ctx.storage:
+            result = await ctx.storage.write_execution(record)
+            if result.succeeded:
+                execution_id_var.set(record["execution_id"])
         await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
         if session_id and ctx.session_chain and record_hash_val is not None:
             await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
@@ -886,7 +855,7 @@ async def _skip_governance_after_stream(
     """In skip_governance mode: build execution record from stream buffer and write to Walacor/WAL."""
     ctx = get_pipeline_context()
     settings = get_settings()
-    if not ctx.walacor_client and not ctx.wal_writer:
+    if not ctx.storage:
         return
     try:
         model_response = adapter.parse_streamed_response(buffer)
@@ -903,10 +872,8 @@ async def _skip_governance_after_stream(
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - pipeline_start) * 1000, 1) if pipeline_start else None,
         )
-        if ctx.walacor_client:
-            await ctx.walacor_client.write_execution(record)
-        if ctx.wal_writer:
-            ctx.wal_writer.write_and_fsync(record)
+        if ctx.storage:
+            await ctx.storage.write_execution(record)
         execution_id_var.set(record["execution_id"])
     except Exception as e:
         logger.error("Skip-governance after-stream write failed: %s", e, exc_info=True)
@@ -1201,7 +1168,7 @@ async def _handle_skip_governance_non_streaming(
     ctx, settings, t0: float, provider: str, model: str,
 ) -> Response:
     response, model_response = await forward(adapter, call, request)
-    if ctx.walacor_client or ctx.wal_writer:
+    if ctx.storage:
         if isinstance(adapter, OllamaAdapter) and call.model_id and ctx.http_client:
             mh = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
             if mh:
@@ -1215,15 +1182,11 @@ async def _handle_skip_governance_non_streaming(
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - t0) * 1000, 1),
         )
-        try:
-            if ctx.walacor_client:
-                await ctx.walacor_client.write_execution(record)
-            if ctx.wal_writer:
-                ctx.wal_writer.write_and_fsync(record)
-            execution_id_var.set(record["execution_id"])
-            request.state.walacor_execution_id = record["execution_id"]
-        except Exception as exc:
-            logger.error("Skip-governance write_execution failed execution_id=%s: %s", record["execution_id"], exc)
+        if ctx.storage:
+            result = await ctx.storage.write_execution(record)
+            if result.succeeded:
+                execution_id_var.set(record["execution_id"])
+                request.state.walacor_execution_id = record["execution_id"]
     pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
     _inc_request(provider, model, "allowed")
     return response
