@@ -43,6 +43,9 @@ from gateway.control.api import (
     control_list_budgets,
     control_upsert_budget,
     control_delete_budget,
+    control_list_content_policies,
+    control_upsert_content_policy,
+    control_delete_content_policy,
     control_status,
     control_discover_models,
 )
@@ -671,6 +674,9 @@ async def on_startup() -> None:
         if settings.control_plane_enabled:
             _init_control_plane(settings, ctx)
             await _auto_register_models(settings, ctx)
+            # Seed default content policies if control plane is active
+            if ctx.control_store:
+                ctx.control_store.seed_default_content_policies()
         _init_load_balancer(settings, ctx)
         # Warn if control plane is active but no API keys are configured
         if settings.control_plane_enabled and not settings.api_keys_list:
@@ -856,6 +862,9 @@ def create_app() -> Starlette:
         Route("/v1/control/budgets", control_list_budgets, methods=["GET"]),
         Route("/v1/control/budgets", control_upsert_budget, methods=["POST"]),
         Route("/v1/control/budgets/{id:path}", control_delete_budget, methods=["DELETE"]),
+        Route("/v1/control/content-policies", control_list_content_policies, methods=["GET"]),
+        Route("/v1/control/content-policies", control_upsert_content_policy, methods=["POST"]),
+        Route("/v1/control/content-policies/{policy_id:path}", control_delete_content_policy, methods=["DELETE"]),
         Route("/v1/control/status", control_status, methods=["GET"]),
         Route("/v1/control/discover", control_discover_models, methods=["GET"]),
         # Sync-contract endpoints (for fleet sync)

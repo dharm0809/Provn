@@ -244,6 +244,67 @@ async def control_delete_budget(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ── Content Policies ──────────────────────────────────────────────────────────
+
+def _refresh_content_policies() -> None:
+    """Reload content policies from store into running analyzers."""
+    ctx = get_pipeline_context()
+    store = ctx.control_store
+    if not store:
+        return
+    policies = store.list_content_policies()
+    for analyzer in ctx.content_analyzers:
+        aid = getattr(analyzer, "analyzer_id", None)
+        if aid and hasattr(analyzer, "configure"):
+            relevant = [p for p in policies if p["analyzer_id"] == aid]
+            analyzer.configure(relevant)
+    logger.info("Content policies refreshed: %d rules across %d analyzers",
+                len(policies), len(ctx.content_analyzers))
+
+
+async def control_list_content_policies(request: Request) -> JSONResponse:
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    analyzer_id = request.query_params.get("analyzer_id")
+    policies = store.list_content_policies(analyzer_id=analyzer_id)
+    return JSONResponse({"policies": policies, "count": len(policies)})
+
+
+async def control_upsert_content_policy(request: Request) -> JSONResponse:
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    tenant = body.get("tenant_id", _tenant(request))
+    analyzer_id = body.get("analyzer_id")
+    category = body.get("category")
+    action = body.get("action", "warn")
+    if not analyzer_id or not category:
+        return JSONResponse({"error": "analyzer_id and category required"}, status_code=400)
+    if action not in ("block", "warn", "pass"):
+        return JSONResponse({"error": "action must be block, warn, or pass"}, status_code=400)
+    threshold = float(body.get("threshold", 0.5))
+    policy = store.upsert_content_policy(tenant, analyzer_id, category, action, threshold)
+    _refresh_content_policies()
+    return JSONResponse(policy, status_code=201)
+
+
+async def control_delete_content_policy(request: Request) -> JSONResponse:
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    policy_id = request.path_params["policy_id"]
+    deleted = store.delete_content_policy(policy_id)
+    if not deleted:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    _refresh_content_policies()
+    return JSONResponse({"deleted": True})
+
+
 # ── Status endpoint ───────────────────────────────────────────
 
 async def control_status(request: Request) -> JSONResponse:

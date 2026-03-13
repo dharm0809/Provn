@@ -41,6 +41,11 @@ def load_into_caches(store, ctx, settings) -> None:
             )
         logger.info("Control plane: loaded %d budgets into tracker", len(budgets))
 
+    # Load content policies into analyzers
+    if store:
+        from gateway.control.api import _refresh_content_policies
+        _refresh_content_policies()
+
 
 async def _run_local_sync_loop(settings, ctx) -> None:
     """Periodic refresh from local DB. Keeps policy_cache.fetched_at fresh,
