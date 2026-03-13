@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,7 @@ class WALBackend:
 
     async def write_execution(self, record: dict) -> bool:
         try:
-            self._writer.write_and_fsync(record)
+            await asyncio.to_thread(self._writer.write_and_fsync, record)
             return True
         except Exception:
             logger.error(
@@ -33,7 +34,7 @@ class WALBackend:
 
     async def write_attempt(self, record: dict) -> None:
         try:
-            self._writer.write_attempt(**record)
+            await asyncio.to_thread(self._writer.write_attempt, **record)
         except Exception:
             logger.warning(
                 "WAL write_attempt failed request_id=%s",
@@ -43,7 +44,7 @@ class WALBackend:
 
     async def write_tool_event(self, record: dict) -> None:
         try:
-            self._writer.write_tool_event(record)
+            await asyncio.to_thread(self._writer.write_tool_event, record)
         except Exception:
             logger.warning(
                 "WAL write_tool_event failed event_id=%s",
