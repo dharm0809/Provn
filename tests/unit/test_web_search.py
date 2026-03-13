@@ -92,7 +92,28 @@ async def test_call_tool_missing_query():
 
 @pytest.mark.anyio
 async def test_call_tool_duckduckgo_success():
+    """Mock the DDGS library so the test never hits a live API."""
     tool = _make_tool(provider="duckduckgo")
+    fake_ddgs_results = [
+        {"title": "Python", "href": "https://python.org", "body": "Python is a programming language."},
+        {"title": "CPython", "href": "https://cpython.org", "body": "CPython is the reference implementation."},
+    ]
+    mock_ddgs_instance = MagicMock()
+    mock_ddgs_instance.text.return_value = fake_ddgs_results
+    mock_ddgs_cls = MagicMock(return_value=mock_ddgs_instance)
+
+    with patch.dict("sys.modules", {"ddgs": MagicMock(DDGS=mock_ddgs_cls)}):
+        # Force re-import path to pick up the patched module
+        with patch("gateway.tools.web_search.DDGS", mock_ddgs_cls, create=True):
+            # Call the internal method directly to avoid import caching issues
+            results = await tool._search_duckduckgo("python programming", 5, 30.0)
+
+    assert len(results) >= 1
+    assert results[0]["title"] == "Python"
+    assert results[0]["url"] == "https://python.org"
+
+    # Also verify full call_tool path via Instant Answers fallback (no ddgs library)
+    tool2 = _make_tool(provider="duckduckgo")
     ddg_payload = {
         "AbstractText": "Python is a programming language.",
         "Heading": "Python",
@@ -101,9 +122,10 @@ async def test_call_tool_duckduckgo_success():
             {"Text": "CPython is the reference implementation.", "FirstURL": "https://cpython.org"},
         ],
     }
-    tool._http.get = AsyncMock(return_value=_make_http_response(ddg_payload))
+    tool2._http.get = AsyncMock(return_value=_make_http_response(ddg_payload))
 
-    result = await tool.call_tool(_TOOL_NAME, {"query": "python programming"})
+    with patch.dict("sys.modules", {"ddgs": None, "duckduckgo_search": None}):
+        result = await tool2.call_tool(_TOOL_NAME, {"query": "python programming"})
 
     assert result.is_error is False
     data = json.loads(result.content)
