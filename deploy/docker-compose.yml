@@ -19,6 +19,9 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "ollama", "list"]
@@ -57,9 +60,9 @@ services:
       # Phase 15: Redis + model routing
       - WALACOR_REDIS_URL=${WALACOR_REDIS_URL:-}
       - WALACOR_MODEL_ROUTING_JSON=${WALACOR_MODEL_ROUTING_JSON:-}
-      # Phase 16: Web search (disabled by default)
-      - WALACOR_TOOL_AWARE_ENABLED=${WALACOR_TOOL_AWARE_ENABLED:-false}
-      - WALACOR_WEB_SEARCH_ENABLED=${WALACOR_WEB_SEARCH_ENABLED:-false}
+      # Phase 16: Web search + tool awareness
+      - WALACOR_TOOL_AWARE_ENABLED=${WALACOR_TOOL_AWARE_ENABLED:-true}
+      - WALACOR_WEB_SEARCH_ENABLED=${WALACOR_WEB_SEARCH_ENABLED:-true}
       # Phase 17: Thinking strip + Llama Guard + OTel
       - WALACOR_THINKING_STRIP_ENABLED=${WALACOR_THINKING_STRIP_ENABLED:-true}
       - WALACOR_LLAMA_GUARD_ENABLED=${WALACOR_LLAMA_GUARD_ENABLED:-false}
@@ -103,6 +106,16 @@ services:
       - GATEWAY_URL=http://gateway:8000
       - DEMO_MODEL=${DEMO_MODEL:-qwen3:4b}
       - OLLAMA_URL=http://ollama:11434
+
+  model-init:
+    image: ollama/ollama:latest
+    profiles: [openwebui]
+    entrypoint: ["ollama", "pull", "qwen3:1.7b"]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main

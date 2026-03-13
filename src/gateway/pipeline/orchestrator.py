@@ -14,6 +14,7 @@ import dataclasses
 import fnmatch
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -203,6 +204,39 @@ def _summarize_content_analysis(decisions: list) -> str:
     if any("toxic" in v or "warn" in v for v in verdicts):
         return "toxicity_warn"
     return "clean"
+
+
+# ── Request Type Classification ───────────────────────────────────────────────
+# Detects OpenWebUI background tasks (title generation, follow-up suggestions,
+# autocomplete, tag generation) so the lineage dashboard can separate real user
+# messages from system-generated noise.  Detection is prompt-content-based to
+# work with unmodified OpenWebUI installs (no filter plugin required).
+
+_SYSTEM_TASK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("title_generation", re.compile(
+        r"generate a (?:concise|brief|short).*?title", re.IGNORECASE)),
+    ("autocomplete", re.compile(
+        r"### Task:.*?autocompletion system", re.IGNORECASE | re.DOTALL)),
+    ("follow_up", re.compile(
+        r"generate (?:\d+ )?(?:follow[- ]?up|suggested|relevant).*?question", re.IGNORECASE)),
+    ("tag_generation", re.compile(
+        r"generate (?:\d+ )?(?:concise )?tags?\b", re.IGNORECASE)),
+    ("emoji_generation", re.compile(
+        r"generate (?:a single |an? )?emoji", re.IGNORECASE)),
+    ("search_query", re.compile(
+        r"generate (?:a )?search query", re.IGNORECASE)),
+]
+
+
+def _classify_request_type(prompt: str) -> str:
+    """Classify a request as user_message or a specific system_task subtype."""
+    text = prompt[:1000]  # only inspect first 1000 chars for efficiency
+    for task_type, pattern in _SYSTEM_TASK_PATTERNS:
+        if pattern.search(text):
+            return f"system_task:{task_type}"
+    if text.lstrip().startswith("### Task:"):
+        return "system_task"
+    return "user_message"
 
 
 def _compute_budget_percent(budget_remaining, settings) -> int | None:
@@ -1415,13 +1449,12 @@ async def handle_request(request: Request) -> Response:
     if client_context:
         extra["client_context"] = client_context
     # Classify request type: prefer metadata from OpenWebUI filter plugin,
-    # fall back to prompt prefix detection for unmodified OpenWebUI installs.
+    # fall back to prompt content detection for unmodified OpenWebUI installs.
     _meta_rt = call.metadata.get("request_type")
     if _meta_rt:
         extra["request_type"] = _meta_rt
     else:
-        _prompt = call.prompt_text or ""
-        extra["request_type"] = "system_task" if _prompt.lstrip().startswith("### Task:") else "user_message"
+        extra["request_type"] = _classify_request_type(call.prompt_text or "")
     # Propagate OpenWebUI message ID for per-message audit correlation
     msg_id = request.headers.get("x-openwebui-message-id")
     if msg_id:
