@@ -372,6 +372,12 @@ class Settings(BaseSettings):
     disk_monitor_enabled: bool = Field(default=True, description="Monitor WAL disk space")
     disk_min_free_percent: float = Field(default=5.0, description="Minimum free disk % before warning")
     resource_monitor_interval_seconds: int = Field(default=60, description="Resource monitor check interval")
+    # Phase 8: OpenSSF model signing verification
+    model_signing_enabled: bool = Field(
+        default=False,
+        description="Verify OpenSSF model signatures during discovery.",
+    )
+
     # Enterprise extension points (comma-separated Python dotted class paths)
     custom_startup_probes: str = Field(default="", description="Custom StartupProbe classes")
     custom_request_classifiers: str = Field(default="", description="Custom RequestClassifier classes")

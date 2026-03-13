@@ -430,6 +430,17 @@ async def control_discover_models(request: Request) -> JSONResponse:
         for m in discovered:
             m["registered"] = m["model_id"] in registered_ids
 
+        # Optional: verify model signatures (OpenSSF/Sigstore)
+        if settings.model_signing_enabled:
+            from gateway.control.signing import verify_model_signature
+
+            for m in discovered:
+                verified, details = await verify_model_signature(
+                    m["model_id"], m["provider"], ctx.http_client
+                )
+                m["signature_verified"] = verified
+                m["verification_details"] = details
+
         return JSONResponse({"models": discovered, "count": len(discovered)})
     except Exception as e:
         logger.error("control_discover_models error: %s", e, exc_info=True)
