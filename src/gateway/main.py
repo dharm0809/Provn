@@ -43,6 +43,9 @@ from gateway.control.api import (
     control_list_budgets,
     control_upsert_budget,
     control_delete_budget,
+    control_list_content_policies,
+    control_upsert_content_policy,
+    control_delete_content_policy,
     control_status,
     control_discover_models,
 )
@@ -61,13 +64,13 @@ logger = logging.getLogger(__name__)
 
 def _resolve_header_identity_fallback(request: Request) -> None:
     """Set caller_identity from headers if not already set by JWT."""
-    if hasattr(request.state, "caller_identity"):
-        return
     try:
         from gateway.auth.identity import resolve_identity_from_headers
         identity = resolve_identity_from_headers(request)
         if identity is not None:
-            request.state.caller_identity = identity
+            request.state.header_identity = identity
+            if not hasattr(request.state, "caller_identity"):
+                request.state.caller_identity = identity
     except Exception:
         logger.debug("resolve_identity_from_headers failed", exc_info=True)
 
@@ -99,10 +102,25 @@ def _try_jwt_auth(request: Request, settings) -> bool:
         )
         if identity is not None:
             request.state.caller_identity = identity
+            request.state.jwt_identity = identity
             return True
     except Exception as e:
         logger.debug("JWT auth attempt failed: %s", e)
     return False
+
+
+def _cross_validate_identity(request: Request, settings) -> None:
+    """Phase 23: Cross-validate JWT claims against header-claimed identity."""
+    ctx = get_pipeline_context()
+    if not settings.identity_validation_enabled or not ctx.identity_validator:
+        return
+    jwt_id = getattr(request.state, "jwt_identity", None)
+    header_id = getattr(request.state, "header_identity", None)
+    val_result = ctx.identity_validator.validate(jwt_id, header_id, request)
+    if val_result.identity:
+        request.state.caller_identity = val_result.identity
+    if val_result.warnings:
+        request.state.identity_warnings = val_result.warnings
 
 
 async def api_key_middleware(request: Request, call_next):
@@ -119,6 +137,7 @@ async def api_key_middleware(request: Request, call_next):
         # JWT-only: require valid JWT
         if _try_jwt_auth(request, settings):
             _resolve_header_identity_fallback(request)
+            _cross_validate_identity(request, settings)
             return await call_next(request)
         request.state.walacor_disposition = "denied_auth"
         return JSONResponse({"error": "Missing or invalid JWT"}, status_code=401)
@@ -127,6 +146,7 @@ async def api_key_middleware(request: Request, call_next):
         # Try JWT first, fall back to API key
         if _try_jwt_auth(request, settings):
             _resolve_header_identity_fallback(request)
+            _cross_validate_identity(request, settings)
             return await call_next(request)
         # Fall through to API key check
         err = require_api_key_if_configured(request, settings.api_keys_list)
@@ -134,6 +154,7 @@ async def api_key_middleware(request: Request, call_next):
             request.state.walacor_disposition = "denied_auth"
             return err
         _resolve_header_identity_fallback(request)
+        _cross_validate_identity(request, settings)
         return await call_next(request)
 
     # Default: api_key mode (unchanged behavior)
@@ -142,6 +163,7 @@ async def api_key_middleware(request: Request, call_next):
         request.state.walacor_disposition = "denied_auth"
         return err
     _resolve_header_identity_fallback(request)
+    _cross_validate_identity(request, settings)
     return await call_next(request)
 
 
@@ -519,6 +541,17 @@ def _init_alert_bus(settings, ctx) -> None:
     )
 
 
+def _extract_provider_from_url(url: str) -> str:
+    """Infer provider name from a provider URL."""
+    if "ollama" in url or ":11434" in url:
+        return "ollama"
+    if "openai" in url:
+        return "openai"
+    if "anthropic" in url:
+        return "anthropic"
+    return "unknown"
+
+
 def _init_rate_limiter(settings, ctx) -> None:
     """Phase 26: Request rate limiter (in-memory or Redis-backed)."""
     from gateway.pipeline.rate_limiter import SlidingWindowRateLimiter, RedisRateLimiter
@@ -614,10 +647,18 @@ async def on_startup() -> None:
 
         # Shared HTTP client for all modes. Without this, skip_governance would create
         # a new one-off httpx.AsyncClient per request (Finding 7).
+        async def _on_provider_response(response):
+            """Phase 23: Record provider results for resource monitor."""
+            if ctx.resource_monitor:
+                provider = _extract_provider_from_url(str(response.url))
+                ctx.resource_monitor.record_provider_result(
+                    provider, response.status_code < 500)
+
         ctx.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.provider_timeout, connect=settings.provider_connect_timeout),
             limits=httpx.Limits(max_connections=settings.provider_max_connections, max_keepalive_connections=settings.provider_max_keepalive),
             http2=True,
+            event_hooks={"response": [_on_provider_response]},
         )
 
         # Always init WAL when lineage is enabled (lineage reads from local WAL).
@@ -652,6 +693,9 @@ async def on_startup() -> None:
         if settings.control_plane_enabled:
             _init_control_plane(settings, ctx)
             await _auto_register_models(settings, ctx)
+            # Seed default content policies if control plane is active
+            if ctx.control_store:
+                ctx.control_store.seed_default_content_policies()
         _init_load_balancer(settings, ctx)
         # Warn if control plane is active but no API keys are configured
         if settings.control_plane_enabled and not settings.api_keys_list:
@@ -659,7 +703,62 @@ async def on_startup() -> None:
                 "SECURITY: Control plane is enabled but WALACOR_GATEWAY_API_KEYS is empty — "
                 "control plane mutations (attestations, policies, budgets) are accessible without authentication"
             )
+        # Phase 23: Startup probes (provider health, disk, routing)
+        if settings.startup_probes_enabled:
+            from gateway.adaptive.startup_probes import run_startup_probes
+            ctx.startup_probe_results = await run_startup_probes(ctx.http_client, settings)
+            # Apply disk auto-scaling
+            disk_probe = ctx.startup_probe_results.get("disk_space")
+            if disk_probe and disk_probe.detail.get("auto_max_gb") is not None:
+                ctx.effective_wal_max_gb = disk_probe.detail["auto_max_gb"]
+                logger.info("WAL max size auto-scaled to %.2f GB", ctx.effective_wal_max_gb)
+        # Phase 23: Request classifier + identity validator
+        from gateway.adaptive.request_classifier import DefaultRequestClassifier
+        from gateway.adaptive.identity_validator import DefaultIdentityValidator
+        ctx.request_classifier = DefaultRequestClassifier()
+        ctx.identity_validator = DefaultIdentityValidator()
+        # Load custom implementations if configured
+        if settings.custom_request_classifiers:
+            from gateway.adaptive import load_custom_class, parse_custom_paths
+            paths = parse_custom_paths(settings.custom_request_classifiers)
+            if paths:
+                try:
+                    cls = load_custom_class(paths[0])
+                    ctx.request_classifier = cls()
+                except Exception as e:
+                    logger.warning("Failed to load custom classifier %s: %s", paths[0], e)
+        if settings.custom_identity_validators:
+            from gateway.adaptive import load_custom_class, parse_custom_paths
+            paths = parse_custom_paths(settings.custom_identity_validators)
+            if paths:
+                try:
+                    cls = load_custom_class(paths[0])
+                    ctx.identity_validator = cls()
+                except Exception as e:
+                    logger.warning("Failed to load custom validator %s: %s", paths[0], e)
+        # Phase 23: Capability registry + resource monitor
+        from gateway.adaptive.capability_registry import CapabilityRegistry
+        from gateway.adaptive.resource_monitor import DefaultResourceMonitor
+        ctx.capability_registry = CapabilityRegistry(
+            ttl_seconds=settings.capability_probe_ttl_seconds,
+            control_store=ctx.control_store)
+        if settings.disk_monitor_enabled:
+            ctx.resource_monitor = DefaultResourceMonitor(
+                wal_path=settings.wal_path,
+                min_free_pct=settings.disk_min_free_percent)
         await _self_test()
+        # Phase 23: Resource monitor background task
+        if ctx.resource_monitor and settings.disk_monitor_enabled:
+            async def _resource_monitor_loop():
+                while True:
+                    await asyncio.sleep(settings.resource_monitor_interval_seconds)
+                    try:
+                        status = await ctx.resource_monitor.check()
+                        if not status.disk_healthy:
+                            logger.warning("Resource monitor: disk %.1f%% free", status.disk_free_pct)
+                    except Exception as e:
+                        logger.debug("Resource monitor check failed: %s", e)
+            ctx.resource_monitor_task = asyncio.create_task(_resource_monitor_loop())
         # Start alert bus background consumer
         if ctx.alert_bus and ctx.alert_bus._dispatchers:
             ctx.alert_bus_task = asyncio.create_task(ctx.alert_bus.run())
@@ -747,6 +846,15 @@ async def on_shutdown() -> None:
             errors.append(f"lineage_reader.close: {e}")
         ctx.lineage_reader = None
 
+    if ctx.resource_monitor_task and not ctx.resource_monitor_task.done():
+        ctx.resource_monitor_task.cancel()
+        try:
+            await ctx.resource_monitor_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            errors.append(f"resource_monitor_task: {e}")
+
     if ctx.local_sync_task and not ctx.local_sync_task.done():
         ctx.local_sync_task.cancel()
         try:
@@ -804,6 +912,9 @@ def create_app() -> Starlette:
         Route("/v1/control/budgets", control_list_budgets, methods=["GET"]),
         Route("/v1/control/budgets", control_upsert_budget, methods=["POST"]),
         Route("/v1/control/budgets/{id:path}", control_delete_budget, methods=["DELETE"]),
+        Route("/v1/control/content-policies", control_list_content_policies, methods=["GET"]),
+        Route("/v1/control/content-policies", control_upsert_content_policy, methods=["POST"]),
+        Route("/v1/control/content-policies/{policy_id:path}", control_delete_content_policy, methods=["DELETE"]),
         Route("/v1/control/status", control_status, methods=["GET"]),
         Route("/v1/control/discover", control_discover_models, methods=["GET"]),
         # Sync-contract endpoints (for fleet sync)

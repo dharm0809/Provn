@@ -90,11 +90,33 @@ async def health_response(request: Request) -> JSONResponse:
         # Redis tracker returns -1 as a sentinel (SCAN-by-prefix is too expensive)
         payload["session_chain"] = {"active_sessions": count if count >= 0 else "unavailable"}
 
-    # Model capability registry
-    from gateway.pipeline.orchestrator import _model_capabilities
-    if _model_capabilities:
-        payload["model_capabilities"] = {
-            mid: caps for mid, caps in _model_capabilities.items()
+    # Model capability registry (prefer CapabilityRegistry, fall back to raw dict)
+    if ctx.capability_registry:
+        caps = ctx.capability_registry.all_capabilities()
+        if caps:
+            payload["model_capabilities"] = caps
+    else:
+        from gateway.pipeline.orchestrator import _model_capabilities
+        if _model_capabilities:
+            payload["model_capabilities"] = dict(_model_capabilities)
+
+    # Phase 23: Resource monitor status
+    if ctx.resource_monitor:
+        try:
+            res_status = await ctx.resource_monitor.check()
+            payload["resource_monitor"] = {
+                "disk_free_pct": res_status.disk_free_pct,
+                "disk_healthy": res_status.disk_healthy,
+                "active_requests": res_status.active_requests,
+                "provider_error_rates": res_status.provider_error_rates,
+            }
+        except Exception:
+            pass
+
+    if ctx.startup_probe_results:
+        payload["startup_probes"] = {
+            name: {"healthy": r.healthy, **r.detail}
+            for name, r in ctx.startup_probe_results.items()
         }
 
     return JSONResponse(payload)

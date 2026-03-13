@@ -58,6 +58,14 @@ class PipelineContext:
         self.rate_limiter: Any | None = None
         self.alert_bus: Any | None = None
         self.alert_bus_task: Any | None = None
+        # Phase 23: Adaptive Gateway
+        self.startup_probe_results: dict = {}
+        self.request_classifier = None
+        self.identity_validator = None
+        self.resource_monitor = None
+        self.capability_registry = None
+        self.effective_wal_max_gb: float | None = None
+        self.resource_monitor_task: Any | None = None
 
 
 _ctx = PipelineContext()

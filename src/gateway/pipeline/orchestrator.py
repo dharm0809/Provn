@@ -1166,7 +1166,12 @@ async def _run_pre_checks(
     tool_strategy = _select_tool_strategy(adapter, settings)
     if tool_strategy == "active" and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
         # Skip tool injection if we already know this model doesn't support tools
-        if _model_supports_tools(call.model_id) is False:
+        _sup = None
+        if ctx.capability_registry:
+            _sup = ctx.capability_registry.supports_tools(call.model_id)
+        if _sup is None:
+            _sup = _model_supports_tools(call.model_id)
+        if _sup is False:
             logger.debug("Skipping tool injection for %s — known to not support tools", call.model_id)
             tool_strategy = "none"
         else:
@@ -1449,10 +1454,19 @@ async def handle_request(request: Request) -> Response:
     if client_context:
         extra["client_context"] = client_context
     # Classify request type: prefer metadata from OpenWebUI filter plugin,
-    # fall back to prompt content detection for unmodified OpenWebUI installs.
+    # fall back to multi-source adaptive classifier.
     _meta_rt = call.metadata.get("request_type")
+    _rc = get_pipeline_context().request_classifier
     if _meta_rt:
         extra["request_type"] = _meta_rt
+    elif _rc:
+        body_dict = {}
+        try:
+            body_dict = json.loads(call.raw_body) if call.raw_body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+        extra["request_type"] = _rc.classify(
+            call.prompt_text or "", dict(request.headers), body_dict)
     else:
         extra["request_type"] = _classify_request_type(call.prompt_text or "")
     # Propagate OpenWebUI message ID for per-message audit correlation
@@ -1552,7 +1566,10 @@ async def handle_request(request: Request) -> Response:
 
     # ── Tool-unsupported retry: if the model rejects tools, strip and retry ──
     if _is_tool_unsupported_error(http_response.status_code, bytes(http_response.body)):
-        _record_model_capability(call.model_id, supports_tools=False)
+        if ctx.capability_registry:
+            ctx.capability_registry.record(call.model_id, supports_tools=False, provider=provider)
+        else:
+            _record_model_capability(call.model_id, supports_tools=False)
         logger.info(
             "Model %s does not support tools — retrying without tool definitions",
             call.model_id,
@@ -1562,7 +1579,10 @@ async def handle_request(request: Request) -> Response:
         http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
     elif pre.tool_strategy == "active" and http_response.status_code < 400:
         # Model accepted tools successfully — cache this
-        _record_model_capability(call.model_id, supports_tools=True)
+        if ctx.capability_registry:
+            ctx.capability_registry.record(call.model_id, supports_tools=True, provider=provider)
+        else:
+            _record_model_capability(call.model_id, supports_tools=True)
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
     timings["forward_ms"] = round((time.perf_counter() - t_fwd) * 1000, 1)

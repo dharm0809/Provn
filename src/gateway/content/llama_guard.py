@@ -102,6 +102,13 @@ class LlamaGuardAnalyzer(ContentAnalyzer):
         self._timeout_ms = timeout_ms
         self._http_client = http_client
         self._role = role
+        self._category_actions: dict[str, str] = {"S4": "block"}
+
+    def configure(self, policies: list[dict]) -> None:
+        """Reconfigure category actions from control plane content policies."""
+        if not policies:
+            return
+        self._category_actions = {p["category"]: p["action"] for p in policies}
 
     @property
     def analyzer_id(self) -> str:
@@ -139,7 +146,21 @@ class LlamaGuardAnalyzer(ContentAnalyzer):
                 categories = ["unknown"]
 
             category = categories[0]
-            verdict = Verdict.BLOCK if category in _BLOCK_CATEGORIES else Verdict.WARN
+            # Check category actions from configure(), fall back to _BLOCK_CATEGORIES
+            # Map S-codes back to check _category_actions (e.g., "S4" -> "block")
+            action = None
+            for code, cat_name in _CATEGORY_MAP.items():
+                if cat_name == category and code in self._category_actions:
+                    action = self._category_actions[code]
+                    break
+            if action == "block":
+                verdict = Verdict.BLOCK
+            elif action == "warn":
+                verdict = Verdict.WARN
+            elif action == "pass":
+                verdict = Verdict.PASS
+            else:
+                verdict = Verdict.BLOCK if category in _BLOCK_CATEGORIES else Verdict.WARN
             reason = ",".join(categories)
             return Decision(
                 verdict=verdict,

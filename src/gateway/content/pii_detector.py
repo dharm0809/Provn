@@ -48,9 +48,26 @@ class PIIDetector(ContentAnalyzer):
     No content stored or logged.
     """
 
+    _analyzer_id = "walacor.pii.v1"
+
     @property
     def analyzer_id(self) -> str:
-        return "walacor.pii.v1"
+        return self._analyzer_id
+
+    def __init__(self) -> None:
+        self._block_types: set[str] = set(_BLOCK_PII_TYPES)
+        self._warn_types: set[str] = {
+            name for name, _ in _PATTERNS if name not in _BLOCK_PII_TYPES
+        }
+        self._pass_types: set[str] = set()
+
+    def configure(self, policies: list[dict]) -> None:
+        """Reconfigure block/warn/pass sets from control plane content policies."""
+        if not policies:
+            return
+        self._block_types = {p["category"] for p in policies if p.get("action") == "block"}
+        self._warn_types = {p["category"] for p in policies if p.get("action") == "warn"}
+        self._pass_types = {p["category"] for p in policies if p.get("action") == "pass"}
 
     @property
     def timeout_ms(self) -> int:
@@ -59,7 +76,15 @@ class PIIDetector(ContentAnalyzer):
     async def analyze(self, text: str) -> Decision:
         for name, pattern in _PATTERNS:
             if pattern.search(text):
-                verdict = Verdict.BLOCK if name in _BLOCK_PII_TYPES else Verdict.WARN
+                if name in self._pass_types:
+                    return Decision(
+                        verdict=Verdict.PASS,
+                        confidence=0.99,
+                        analyzer_id=self.analyzer_id,
+                        category="pii",
+                        reason=name,
+                    )
+                verdict = Verdict.BLOCK if name in self._block_types else Verdict.WARN
                 return Decision(
                     verdict=verdict,
                     confidence=0.99,

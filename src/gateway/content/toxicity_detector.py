@@ -35,6 +35,12 @@ class ToxicityDetector(ContentAnalyzer):
     No content stored or logged.
     """
 
+    _analyzer_id = "walacor.toxicity.v1"
+
+    @property
+    def analyzer_id(self) -> str:
+        return self._analyzer_id
+
     def __init__(self, extra_terms: list[str] | None = None) -> None:
         self._categories: list[tuple[str, re.Pattern[str]]] = [
             (name, _compile_category(terms)) for name, terms in _DEFAULT_CATEGORIES
@@ -43,6 +49,15 @@ class ToxicityDetector(ContentAnalyzer):
             self._categories.append(
                 ("custom_deny_list", _compile_category(extra_terms))
             )
+        self._block_categories: set[str] = {"child_safety"}
+        self._warn_categories: set[str] = {"self_harm_indicator", "violence_instruction"}
+
+    def configure(self, policies: list[dict]) -> None:
+        """Reconfigure block/warn category sets from control plane content policies."""
+        if not policies:
+            return
+        self._block_categories = {p["category"] for p in policies if p.get("action") == "block"}
+        self._warn_categories = {p["category"] for p in policies if p.get("action") == "warn"}
 
     def set_extra_terms(self, terms: list[str]) -> None:
         """Replace the custom deny list at runtime (e.g. after policy sync)."""
@@ -51,17 +66,18 @@ class ToxicityDetector(ContentAnalyzer):
             self._categories.append(("custom_deny_list", _compile_category(terms)))
 
     @property
-    def analyzer_id(self) -> str:
-        return "walacor.toxicity.v1"
-
-    @property
     def timeout_ms(self) -> int:
         return 20
 
     async def analyze(self, text: str) -> Decision:
         for category_name, pattern in self._categories:
             if pattern.search(text):
-                verdict = Verdict.BLOCK if category_name == "child_safety" else Verdict.WARN
+                if category_name in self._block_categories:
+                    verdict = Verdict.BLOCK
+                elif category_name in self._warn_categories:
+                    verdict = Verdict.WARN
+                else:
+                    verdict = Verdict.WARN
                 return Decision(
                     verdict=verdict,
                     confidence=0.90,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 
 from starlette.responses import JSONResponse
@@ -12,6 +13,17 @@ from gateway.cache.policy_cache import PolicyCache
 from gateway.content.base import ContentAnalyzer, Decision, Verdict
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Content analysis cache — SHA256-keyed, bounded to prevent unbounded growth
+# ---------------------------------------------------------------------------
+_analysis_cache: dict[str, list] = {}
+_CACHE_MAX = 1000
+
+
+def clear_analysis_cache() -> None:
+    """Clear the content analysis cache (e.g. after policy hot-reload)."""
+    _analysis_cache.clear()
 
 
 async def _run_analyzer(analyzer: ContentAnalyzer, text: str) -> Decision | None:
@@ -48,13 +60,24 @@ async def _run_analyzer(analyzer: ContentAnalyzer, text: str) -> Decision | None
 async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict]:
     """Run all analyzers on arbitrary text (tool outputs, injected content, etc.).
 
-    Returns a list of decision dicts — same shape as analyzer_decisions in evaluate_post_inference.
-    Never raises; timeouts and errors are skipped silently (same contract as _run_analyzer).
+    Results are cached by SHA256 hash of *text* so repeated identical content
+    skips re-running analyzers.  Cache is bounded at ``_CACHE_MAX`` entries to
+    prevent unbounded memory growth.
+
+    Returns a list of decision dicts -- same shape as analyzer_decisions in
+    evaluate_post_inference.  Never raises; timeouts and errors are skipped
+    silently (same contract as _run_analyzer).
     """
     if not analyzers or not text:
         return []
+
+    cache_key = hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    if cache_key in _analysis_cache:
+        return _analysis_cache[cache_key]
+
     results = await asyncio.gather(*[_run_analyzer(a, text) for a in analyzers])
-    return [
+    decisions = [
         {
             "analyzer_id": d.analyzer_id,
             "verdict": d.verdict.value,
@@ -64,6 +87,11 @@ async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict
         }
         for d in results if d is not None
     ]
+
+    if len(_analysis_cache) < _CACHE_MAX:
+        _analysis_cache[cache_key] = decisions
+
+    return decisions
 
 
 async def evaluate_post_inference(

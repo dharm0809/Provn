@@ -330,6 +330,20 @@ class Settings(BaseSettings):
         description="OTel service.name resource attribute.",
     )
 
+    # ── Phase 23: Adaptive Gateway ────────────────────────────────────────────
+    startup_probes_enabled: bool = Field(default=True, description="Run startup probes (provider health, disk, routing)")
+    provider_health_check_on_startup: bool = Field(default=True, description="Ping providers at startup")
+    capability_probe_ttl_seconds: int = Field(default=86400, description="Re-probe model capabilities after this many seconds")
+    identity_validation_enabled: bool = Field(default=True, description="Cross-validate JWT claims against headers")
+    disk_monitor_enabled: bool = Field(default=True, description="Monitor WAL disk space")
+    disk_min_free_percent: float = Field(default=5.0, description="Minimum free disk % before warning")
+    resource_monitor_interval_seconds: int = Field(default=60, description="Resource monitor check interval")
+    # Enterprise extension points (comma-separated Python dotted class paths)
+    custom_startup_probes: str = Field(default="", description="Custom StartupProbe classes")
+    custom_request_classifiers: str = Field(default="", description="Custom RequestClassifier classes")
+    custom_identity_validators: str = Field(default="", description="Custom IdentityValidator classes")
+    custom_resource_monitors: str = Field(default="", description="Custom ResourceMonitor classes")
+
     @property
     def api_keys_list(self) -> list[str]:
         return [k.strip() for k in self.gateway_api_keys.split(",") if k.strip()]
