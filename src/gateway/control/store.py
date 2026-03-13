@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS budgets (
     updated_at TEXT NOT NULL,
     UNIQUE(tenant_id, user, period)
 );
+
+CREATE TABLE IF NOT EXISTS content_policies (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT '*',
+    analyzer_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'warn',
+    threshold REAL DEFAULT 0.5,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, analyzer_id, category)
+);
 """
 
 
@@ -265,6 +277,66 @@ class ControlPlaneStore:
         cur = conn.execute("DELETE FROM budgets WHERE budget_id = ?", (budget_id,))
         conn.commit()
         return cur.rowcount > 0
+
+    # ── Content Policy CRUD ──────────────────────────────────
+
+    def list_content_policies(self, analyzer_id: str | None = None) -> list[dict]:
+        conn = self._ensure_conn()
+        if analyzer_id:
+            cur = conn.execute(
+                "SELECT * FROM content_policies WHERE analyzer_id = ? ORDER BY category",
+                (analyzer_id,))
+        else:
+            cur = conn.execute("SELECT * FROM content_policies ORDER BY analyzer_id, category")
+        return [dict(row) for row in cur.fetchall()]
+
+    def upsert_content_policy(self, tenant_id: str, analyzer_id: str,
+                              category: str, action: str,
+                              threshold: float = 0.5) -> dict:
+        conn = self._ensure_conn()
+        now = self._now()
+        pid = self._new_id()
+        cur = conn.execute(
+            """INSERT INTO content_policies (id, tenant_id, analyzer_id, category, action, threshold, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(tenant_id, analyzer_id, category) DO UPDATE SET
+                 action = excluded.action, threshold = excluded.threshold, updated_at = excluded.updated_at
+               RETURNING *""",
+            (pid, tenant_id, analyzer_id, category, action, threshold, now, now))
+        row = cur.fetchone()
+        conn.commit()
+        return dict(row)
+
+    def delete_content_policy(self, policy_id: str) -> bool:
+        conn = self._ensure_conn()
+        cur = conn.execute("DELETE FROM content_policies WHERE id = ?", (policy_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+    def seed_default_content_policies(self) -> None:
+        """Seed default content policies if table is empty."""
+        existing = self.list_content_policies()
+        if existing:
+            return
+        defaults = [
+            # PII
+            ("*", "walacor.pii.v1", "credit_card", "block"),
+            ("*", "walacor.pii.v1", "ssn", "block"),
+            ("*", "walacor.pii.v1", "aws_access_key", "block"),
+            ("*", "walacor.pii.v1", "api_key", "block"),
+            ("*", "walacor.pii.v1", "email_address", "warn"),
+            ("*", "walacor.pii.v1", "phone_number", "warn"),
+            ("*", "walacor.pii.v1", "ip_address", "warn"),
+            # Llama Guard
+            *[("*", "walacor.llama_guard.v1", f"S{i}",
+               "block" if i == 4 else "warn") for i in range(1, 15)],
+            # Toxicity
+            ("*", "walacor.toxicity.v1", "child_safety", "block"),
+            ("*", "walacor.toxicity.v1", "self_harm", "warn"),
+            ("*", "walacor.toxicity.v1", "violence", "warn"),
+        ]
+        for tenant, analyzer, category, action in defaults:
+            self.upsert_content_policy(tenant, analyzer, category, action)
 
     # ── Sync-contract formatters ──────────────────────────────
 
