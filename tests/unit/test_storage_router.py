@@ -125,6 +125,38 @@ async def test_empty_backends_list():
     await router.write_tool_event({"event_id": "t2"})  # no-op, no error
 
 
+@pytest.mark.anyio
+async def test_write_execution_parallel(anyio_backend):
+    """Verify fan-out writes run concurrently, not sequentially."""
+    import asyncio
+    import time
+
+    call_times: list[float] = []
+
+    class SlowBackend:
+        name = "slow"
+
+        async def write_execution(self, record):
+            call_times.append(time.monotonic())
+            await asyncio.sleep(0.1)
+            return True
+
+        async def write_attempt(self, record):
+            pass
+
+        async def write_tool_event(self, record):
+            pass
+
+        async def close(self):
+            pass
+
+    router = StorageRouter([SlowBackend(), SlowBackend()])
+    result = await router.write_execution({"execution_id": "test-parallel"})
+    assert len(result.succeeded) == 2
+    # Both calls should start within 50ms of each other (parallel)
+    assert abs(call_times[1] - call_times[0]) < 0.05, "Backends called sequentially, not in parallel"
+
+
 def test_backend_names():
     b1 = FakeBackend("wal")
     b2 = FakeBackend("walacor")
