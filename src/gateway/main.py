@@ -62,6 +62,12 @@ from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
 from gateway.openwebui.status_api import openwebui_status
 
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass  # Fallback to default asyncio event loop
+
 from gateway.util.json_logger import configure_json_logging
 configure_json_logging(os.environ.get("WALACOR_LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
