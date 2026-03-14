@@ -88,8 +88,8 @@ class Settings(BaseSettings):
         description="Enable Llama Guard 3 content analyzer (requires ollama pull llama-guard3).",
     )
     llama_guard_model: str = Field(
-        default="llama-guard3",
-        description="Ollama model name for Llama Guard 3 inference.",
+        default="llama-guard3:1b",
+        description="Ollama model for Llama Guard inference (1b is 5x faster than 8b).",
     )
     llama_guard_ollama_url: str = Field(
         default="",
