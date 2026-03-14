@@ -343,6 +343,9 @@ class Settings(BaseSettings):
     provider_max_connections: int = Field(default=200, description="Max concurrent provider connections")
     provider_max_keepalive: int = Field(default=50, description="Max keepalive provider connections")
     sse_keepalive_interval: float = Field(default=15.0, description="SSE keepalive ping interval in seconds")
+    http_pool_max_connections: int = Field(default=100, description="Max HTTP connections in pool")
+    http_pool_max_keepalive: int = Field(default=20, description="Max keepalive connections per host")
+    http_keepalive_expiry: int = Field(default=30, description="Keepalive expiry in seconds")
 
     # Hedged requests (tail latency reduction)
     hedged_requests_enabled: bool = Field(default=False, description="Enable hedged cross-provider requests")

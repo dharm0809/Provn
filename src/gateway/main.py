@@ -784,9 +784,14 @@ async def on_startup() -> None:
                 ctx.resource_monitor.record_provider_result(
                     provider, response.status_code < 500)
 
+        _limits = httpx.Limits(
+            max_connections=settings.http_pool_max_connections,
+            max_keepalive_connections=settings.http_pool_max_keepalive,
+            keepalive_expiry=settings.http_keepalive_expiry,
+        )
         ctx.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.provider_timeout, connect=settings.provider_connect_timeout),
-            limits=httpx.Limits(max_connections=settings.provider_max_connections, max_keepalive_connections=settings.provider_max_keepalive, keepalive_expiry=30),
+            limits=_limits,
             http2=True,
             event_hooks={"response": [_on_provider_response]},
         )
