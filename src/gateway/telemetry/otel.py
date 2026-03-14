@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,43 @@ def init_tracer(
     except Exception:
         logger.warning("OTel init failed (fail-open) — telemetry disabled", exc_info=True)
         return None
+
+
+@asynccontextmanager
+async def trace_span(tracer: Any, name: str, attributes: dict[str, Any] | None = None):
+    """Create a child span for a pipeline step.  No-op if *tracer* is None.
+
+    Usage::
+
+        async with trace_span(ctx.tracer, "parse_request", {"model": model_id}) as span:
+            ...
+
+    The span is automatically ended when the block exits.  If an exception
+    occurs the span is annotated with ``error=True`` and ``error.message``
+    before being re-raised.
+
+    Fail-open: if the OTel SDK is not installed the block executes normally
+    and ``span`` is ``None``.
+    """
+    if tracer is None:
+        yield None
+        return
+    try:
+        from opentelemetry import trace as otrace
+
+        span = tracer.start_span(name, kind=otrace.SpanKind.INTERNAL)
+        if attributes:
+            span.set_attributes(attributes)
+        try:
+            yield span
+        except Exception as exc:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(exc))
+            raise
+        finally:
+            span.end()
+    except ImportError:
+        yield None
 
 
 def emit_inference_span(

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.telemetry.otel import emit_inference_span, init_tracer
+from gateway.telemetry.otel import emit_inference_span, init_tracer, trace_span
 
 
 # ---------------------------------------------------------------------------
@@ -135,3 +135,101 @@ def test_emit_span_no_session_omits_attribute():
     assert len(spans) == 1
     attrs = dict(spans[0].attributes or {})
     assert "walacor.session_id" not in attrs
+
+
+# ---------------------------------------------------------------------------
+# trace_span — async context manager
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_trace_span_none_tracer(anyio_backend):
+    """trace_span with None tracer is a no-op."""
+    async with trace_span(None, "test") as span:
+        assert span is None
+
+
+@pytest.mark.anyio
+async def test_trace_span_creates_span(anyio_backend):
+    """trace_span creates and ends a span."""
+    mock_tracer = MagicMock()
+    mock_span = MagicMock()
+    mock_tracer.start_span.return_value = mock_span
+
+    with patch("gateway.telemetry.otel.otrace", create=True):
+        async with trace_span(mock_tracer, "test_step", {"key": "val"}) as span:
+            assert span is mock_span
+
+    mock_tracer.start_span.assert_called_once()
+    mock_span.set_attributes.assert_called_once_with({"key": "val"})
+    mock_span.end.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_trace_span_records_error(anyio_backend):
+    """trace_span records errors on the span."""
+    mock_tracer = MagicMock()
+    mock_span = MagicMock()
+    mock_tracer.start_span.return_value = mock_span
+
+    with pytest.raises(ValueError):
+        with patch("gateway.telemetry.otel.otrace", create=True):
+            async with trace_span(mock_tracer, "failing_step") as span:
+                raise ValueError("test error")
+
+    mock_span.set_attribute.assert_any_call("error", True)
+    mock_span.set_attribute.assert_any_call("error.message", "test error")
+    mock_span.end.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_trace_span_no_attributes(anyio_backend):
+    """trace_span works without attributes (None by default)."""
+    mock_tracer = MagicMock()
+    mock_span = MagicMock()
+    mock_tracer.start_span.return_value = mock_span
+
+    with patch("gateway.telemetry.otel.otrace", create=True):
+        async with trace_span(mock_tracer, "plain_step") as span:
+            assert span is mock_span
+
+    mock_span.set_attributes.assert_not_called()
+    mock_span.end.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_trace_span_import_error(anyio_backend):
+    """trace_span yields None when OTel SDK is not installed."""
+    mock_tracer = MagicMock()
+    # Make the import inside trace_span fail
+    with patch.dict("sys.modules", {"opentelemetry": None, "opentelemetry.trace": None}):
+        # Need a fresh tracer that will trigger the import path
+        # The function imports opentelemetry.trace inside — patch it to raise ImportError
+        with patch("builtins.__import__", side_effect=ImportError("no otel")):
+            async with trace_span(mock_tracer, "step") as span:
+                assert span is None
+
+
+@pytest.mark.anyio
+async def test_trace_span_with_in_memory_exporter(anyio_backend):
+    """trace_span works end-to-end with the real OTel in-memory exporter."""
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    except ImportError:
+        pytest.skip("opentelemetry-sdk not installed")
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+
+    async with trace_span(tracer, "pipeline.parse_request", {"model": "qwen3:4b"}) as span:
+        assert span is not None
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    s = spans[0]
+    assert s.name == "pipeline.parse_request"
+    attrs = dict(s.attributes or {})
+    assert attrs["model"] == "qwen3:4b"
