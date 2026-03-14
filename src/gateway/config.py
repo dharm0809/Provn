@@ -109,6 +109,15 @@ class Settings(BaseSettings):
     # Multimodal audit: attachment tracking
     attachment_tracking_enabled: bool = Field(default=True, description="Track file/image metadata in execution records")
 
+    # Multimodal audit: image safety classification
+    image_safety_enabled: bool = Field(default=False, description="Enable LlamaGuard Vision image safety classification")
+    image_safety_model: str = Field(default="llama-guard3-vision:11b", description="Ollama model for image safety")
+    image_safety_timeout_ms: int = Field(default=10000, description="Image safety classification timeout in ms")
+    image_safety_max_images: int = Field(default=5, description="Max images to analyze per request (skip if exceeded)")
+    # Multimodal audit: image OCR + PII detection
+    image_ocr_enabled: bool = Field(default=False, description="Enable Tesseract OCR + PII detection on images")
+    image_ocr_max_size_mb: int = Field(default=10, description="Skip OCR for images larger than this (MB)")
+
     # Prompt injection detection
     prompt_guard_enabled: bool = Field(
         default=False,
