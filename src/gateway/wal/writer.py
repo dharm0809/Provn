@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
+
+from gateway.util import json_utils as json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone

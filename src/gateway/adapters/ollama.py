@@ -16,8 +16,9 @@ Phase 16 additions:
 
 from __future__ import annotations
 
-import json
 import logging
+
+from gateway.util import json_utils as json
 import time
 from typing import Any
 
@@ -289,7 +290,7 @@ class OllamaAdapter(ProviderAdapter):
             })
 
         body["messages"] = messages
-        new_raw_body = json.dumps(body).encode("utf-8")
+        new_raw_body = json.dumps_bytes(body)
         return ModelCall(
             provider=original_call.provider,
             model_id=original_call.model_id,

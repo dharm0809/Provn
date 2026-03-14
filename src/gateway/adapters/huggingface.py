@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from gateway.util import json_utils as json
 
 import httpx
 from starlette.requests import Request

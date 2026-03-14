@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import dataclasses
 import fnmatch
-import json
 import logging
 import re
 import time
@@ -25,6 +24,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.background import BackgroundTask
 
 from gateway.config import get_settings
+from gateway.util import json_utils as json
 from gateway.util.request_context import disposition_var, execution_id_var, provider_var, model_id_var, request_id_var
 from gateway.adapters import OpenAIAdapter, OllamaAdapter
 from gateway.adapters.anthropic import AnthropicAdapter
@@ -455,7 +455,7 @@ def _strip_tools_from_call(call: ModelCall) -> ModelCall:
         body = json.loads(call.raw_body)
         body.pop("tools", None)
         body.pop("tool_choice", None)
-        new_body = json.dumps(body).encode("utf-8")
+        new_body = json.dumps_bytes(body)
         return dataclasses.replace(call, raw_body=new_body)
     except Exception:
         logger.warning("_strip_tools_from_call: failed to strip tools from model=%s — sending original body", call.model_id, exc_info=True)
@@ -492,7 +492,7 @@ def _inject_tools_into_call(call: ModelCall, tool_definitions: list[dict]) -> Mo
         body = json.loads(call.raw_body)
         if not body.get("tools"):
             body["tools"] = tool_definitions
-            new_body = json.dumps(body).encode("utf-8")
+            new_body = json.dumps_bytes(body)
             return ModelCall(
                 provider=call.provider, model_id=call.model_id,
                 prompt_text=call.prompt_text, raw_body=new_body,
@@ -1601,7 +1601,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             body = json.loads(call.raw_body)
             body["stream"] = False
             call = dataclasses.replace(
-                call, is_streaming=False, raw_body=json.dumps(body).encode("utf-8")
+                call, is_streaming=False, raw_body=json.dumps_bytes(body)
             )
             logger.debug("Active tool strategy: overriding stream=False for %s/%s", provider, model)
         except Exception:

@@ -10,8 +10,9 @@ Phase 14 additions:
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from gateway.util import json_utils as json
 
 import httpx
 from starlette.requests import Request
@@ -416,7 +417,7 @@ class OpenAIAdapter(ProviderAdapter):
             })
 
         body["messages"] = messages
-        new_raw_body = json.dumps(body).encode("utf-8")
+        new_raw_body = json.dumps_bytes(body)
         return ModelCall(
             provider=original_call.provider,
             model_id=original_call.model_id,
