@@ -1,0 +1,65 @@
+{
+  "name": "EU AI Act Baseline (Articles 9/12/14/15)",
+  "description": "Baseline governance policies for EU AI Act compliance. Covers risk management (Article 9), record-keeping (Article 12), human oversight (Article 14), and accuracy/robustness (Article 15).",
+  "version": "1.0",
+  "policies": [
+    {
+      "policy_id": "eu-ai-act-art9-model-attestation",
+      "policy_name": "Article 9: Active Model Attestation Required",
+      "description": "Blocks requests to models that have not been attested as active. Implements Article 9 risk management by ensuring only approved models are used in production.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [
+        {"field": "status", "operator": "equals", "value": "active"}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "eu-ai-act-art9-admin-attested",
+      "policy_name": "Article 9: Verified Attestation Level",
+      "description": "Warns when a model is only self-attested rather than admin-verified. Supports Article 9 risk management controls requiring documented conformity.",
+      "status": "active",
+      "enforcement_level": "warning",
+      "prompt_rules": [
+        {"field": "verification_level", "operator": "not_equals", "value": "self_attested"}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "eu-ai-act-art12-audit-completeness",
+      "policy_name": "Article 12: Audit Trail Completeness",
+      "description": "Always-pass policy ensuring every interaction is recorded for Article 12 record-keeping obligations. Acts as a sentinel for audit coverage.",
+      "status": "active",
+      "enforcement_level": "pass",
+      "prompt_rules": [],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "eu-ai-act-art14-human-oversight",
+      "policy_name": "Article 14: Human Oversight Notification",
+      "description": "Warns when PII is detected in model output, triggering human review workflows. Supports Article 14 human oversight requirements for high-risk AI.",
+      "status": "active",
+      "enforcement_level": "warning",
+      "prompt_rules": [],
+      "rules": [
+        {"field": "pii_detected", "operator": "equals", "value": false}
+      ],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "eu-ai-act-art15-accuracy",
+      "policy_name": "Article 15: Accuracy and Robustness",
+      "description": "Blocks toxic or harmful content in responses. Supports Article 15 accuracy and robustness requirements ensuring the AI system does not produce harmful outputs.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [],
+      "rules": [
+        {"field": "toxicity_flagged", "operator": "equals", "value": false}
+      ],
+      "rag_rules": []
+    }
+  ]
+}

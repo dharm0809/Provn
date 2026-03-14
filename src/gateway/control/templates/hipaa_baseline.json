@@ -1,0 +1,77 @@
+{
+  "name": "HIPAA Baseline — PHI Protection",
+  "description": "Baseline governance policies for HIPAA compliance. Protects Protected Health Information (PHI) in AI interactions per the HIPAA Privacy Rule (45 CFR 164.502) and Security Rule.",
+  "version": "1.0",
+  "policies": [
+    {
+      "policy_id": "hipaa-phi-prompt-block",
+      "policy_name": "HIPAA: Block PHI in Prompts",
+      "description": "Blocks requests where PII is detected in the prompt, preventing PHI from being sent to external AI models. Implements the HIPAA minimum necessary standard (45 CFR 164.502(b)).",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [
+        {"field": "pii_detected", "operator": "equals", "value": false}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "hipaa-phi-response-block",
+      "policy_name": "HIPAA: Block PHI in Responses",
+      "description": "Blocks model responses containing PII to prevent PHI disclosure to users who may lack authorization. Supports HIPAA Privacy Rule access controls.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [],
+      "rules": [
+        {"field": "pii_detected", "operator": "equals", "value": false}
+      ],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "hipaa-phi-rag-block",
+      "policy_name": "HIPAA: Block PHI in RAG Context",
+      "description": "Blocks RAG-injected context containing PII, preventing inadvertent PHI injection into AI prompts via retrieval pipelines.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [],
+      "rules": [],
+      "rag_rules": [
+        {"field": "pii_detected", "operator": "equals", "value": false}
+      ]
+    },
+    {
+      "policy_id": "hipaa-active-model-required",
+      "policy_name": "HIPAA: Attested Model Required for PHI Processing",
+      "description": "Blocks requests to unattested models when handling potentially sensitive health data. Ensures only approved, audited models process health information.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [
+        {"field": "status", "operator": "equals", "value": "active"}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "hipaa-audit-completeness",
+      "policy_name": "HIPAA: Audit Logging Completeness",
+      "description": "Always-pass sentinel policy ensuring every AI interaction is audit-logged for HIPAA audit controls (45 CFR 164.312(b)). Confirms audit trail coverage.",
+      "status": "active",
+      "enforcement_level": "pass",
+      "prompt_rules": [],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "hipaa-harmful-content-block",
+      "policy_name": "HIPAA: Block Harmful Clinical Content",
+      "description": "Blocks toxic model output that could constitute inappropriate medical guidance or patient harm. Supports HIPAA obligations around care quality in AI-assisted clinical settings.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [],
+      "rules": [
+        {"field": "toxicity_flagged", "operator": "equals", "value": false}
+      ],
+      "rag_rules": []
+    }
+  ]
+}

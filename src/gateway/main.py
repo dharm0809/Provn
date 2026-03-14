@@ -53,6 +53,8 @@ from gateway.control.api import (
     control_delete_pricing,
     control_status,
     control_discover_models,
+    control_list_templates,
+    control_apply_template,
 )
 from gateway.control.sync_api import (
     sync_attestation_proofs,
@@ -1152,6 +1154,8 @@ def create_app() -> Starlette:
         Route("/v1/control/pricing/{id:path}", control_delete_pricing, methods=["DELETE"]),
         Route("/v1/control/status", control_status, methods=["GET"]),
         Route("/v1/control/discover", control_discover_models, methods=["GET"]),
+        Route("/v1/control/templates", control_list_templates, methods=["GET"]),
+        Route("/v1/control/templates/{name}/apply", control_apply_template, methods=["POST"]),
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),

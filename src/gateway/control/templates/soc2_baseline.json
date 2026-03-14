@@ -1,0 +1,91 @@
+{
+  "name": "SOC 2 Baseline — Trust Services Criteria",
+  "description": "Baseline governance policies for SOC 2 Type II compliance. Covers Security (CC6), Availability (A1), Processing Integrity (PI1), Confidentiality (C1), and Privacy (P1–P8) trust services criteria.",
+  "version": "1.0",
+  "policies": [
+    {
+      "policy_id": "soc2-cc6-access-control",
+      "policy_name": "CC6: Logical Access — Attested Models Only",
+      "description": "Blocks access to models that have not been attested as active, implementing SOC 2 CC6.1 logical access controls. Only registered, attested models may serve requests.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [
+        {"field": "status", "operator": "equals", "value": "active"}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "soc2-cc6-verified-models",
+      "policy_name": "CC6: Verified Attestation Preferred",
+      "description": "Warns when self-attested models are used without admin verification. Supports SOC 2 CC6.6 boundary protection by flagging unverified model sources.",
+      "status": "active",
+      "enforcement_level": "warning",
+      "prompt_rules": [
+        {"field": "verification_level", "operator": "not_equals", "value": "self_attested"}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "soc2-pi1-processing-integrity",
+      "policy_name": "PI1: Processing Integrity — Block Toxic Output",
+      "description": "Blocks harmful model output to ensure processing integrity. SOC 2 PI1.2 requires outputs to be complete, accurate, and valid; toxic content violates this criteria.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [],
+      "rules": [
+        {"field": "toxicity_flagged", "operator": "equals", "value": false}
+      ],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "soc2-c1-confidentiality",
+      "policy_name": "C1: Confidentiality — Block PII in Responses",
+      "description": "Blocks model responses containing PII to protect confidential information. Supports SOC 2 C1.1 and C1.2 confidentiality commitments for information classified as confidential.",
+      "status": "active",
+      "enforcement_level": "blocking",
+      "prompt_rules": [],
+      "rules": [
+        {"field": "pii_detected", "operator": "equals", "value": false}
+      ],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "soc2-p3-privacy-collection",
+      "policy_name": "P3: Privacy — Warn on PII in Prompts",
+      "description": "Warns when PII is detected in prompts, supporting SOC 2 P3.1 personal information collection notice and P4.1 use/retention limitations. Enables data minimization review.",
+      "status": "active",
+      "enforcement_level": "warning",
+      "prompt_rules": [
+        {"field": "pii_detected", "operator": "equals", "value": false}
+      ],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "soc2-a1-audit-completeness",
+      "policy_name": "A1/CC7: Audit Trail — Completeness Sentinel",
+      "description": "Always-pass sentinel policy ensuring every AI interaction is recorded for SOC 2 CC7.2 monitoring and A1.2 availability commitments. Validates audit trail coverage.",
+      "status": "active",
+      "enforcement_level": "pass",
+      "prompt_rules": [],
+      "rules": [],
+      "rag_rules": []
+    },
+    {
+      "policy_id": "soc2-cc9-injection-detection",
+      "policy_name": "CC9: Risk Mitigation — Prompt Injection Detection",
+      "description": "Warns on common prompt injection patterns to mitigate vendor and business partner risk per SOC 2 CC9.2. Reduces exposure to adversarial AI inputs from external sources.",
+      "status": "active",
+      "enforcement_level": "warning",
+      "prompt_rules": [
+        {"field": "prompt.text", "operator": "not_contains", "value": "ignore previous instructions"},
+        {"field": "prompt.text", "operator": "not_contains", "value": "disregard all prior context"},
+        {"field": "prompt.text", "operator": "not_contains", "value": "jailbreak"}
+      ],
+      "rules": [],
+      "rag_rules": []
+    }
+  ]
+}

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from gateway.config import get_settings
 from gateway.pipeline.context import get_pipeline_context
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 logger = logging.getLogger(__name__)
 
@@ -487,3 +491,71 @@ async def control_discover_models(request: Request) -> JSONResponse:
     except Exception as e:
         logger.error("control_discover_models error: %s", e, exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Policy Template endpoints ─────────────────────────────────
+
+async def control_list_templates(request: Request) -> JSONResponse:
+    """GET /v1/control/templates — list available policy templates."""
+    templates = []
+    for path in sorted(_TEMPLATES_DIR.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+            templates.append({
+                "name": path.stem,
+                "display_name": data.get("name", path.stem),
+                "description": data.get("description", ""),
+                "version": data.get("version", "1.0"),
+                "policy_count": len(data.get("policies", [])),
+            })
+        except Exception as exc:
+            logger.warning("Failed to read template %s: %s", path.name, exc)
+    return JSONResponse({"templates": templates})
+
+
+async def control_apply_template(request: Request) -> JSONResponse:
+    """POST /v1/control/templates/{name}/apply — create all policies from a template."""
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+
+    template_name = request.path_params["name"]
+    path = _TEMPLATES_DIR / f"{template_name}.json"
+    if not path.exists():
+        return JSONResponse({"error": f"Template '{template_name}' not found"}, status_code=404)
+
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        logger.error("control_apply_template: failed to parse %s: %s", path.name, exc)
+        return JSONResponse({"error": f"Template file could not be parsed: {exc}"}, status_code=500)
+
+    settings = get_settings()
+    tenant_id = request.query_params.get("tenant_id", settings.gateway_tenant_id or "")
+
+    policies = data.get("policies", [])
+    created: list[str] = []
+    errors: list[dict] = []
+
+    for policy in policies:
+        try:
+            policy_data = dict(policy)
+            if "tenant_id" not in policy_data:
+                policy_data["tenant_id"] = tenant_id
+            store.create_policy(policy_data)
+            created.append(policy_data.get("policy_id") or policy_data.get("policy_name", "?"))
+        except Exception as exc:
+            errors.append({
+                "policy": policy.get("policy_id", policy.get("policy_name", "?")),
+                "error": str(exc),
+            })
+
+    if created:
+        _refresh_policy_cache()
+
+    return JSONResponse({
+        "template": template_name,
+        "created": len(created),
+        "errors": errors,
+        "policy_ids": created,
+    }, status_code=200)
