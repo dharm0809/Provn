@@ -664,6 +664,16 @@ async def _run_sync_loop(settings, ctx) -> None:
             backoff = await _sync_once(ctx, settings.gateway_provider, backoff, backoff_max)
 
 
+async def _event_loop_lag_monitor():
+    """Periodically measure asyncio event loop scheduling lag."""
+    from gateway.metrics.prometheus import event_loop_lag_seconds
+    while True:
+        t0 = asyncio.get_event_loop().time()
+        await asyncio.sleep(1.0)
+        lag = asyncio.get_event_loop().time() - t0 - 1.0
+        event_loop_lag_seconds.set(max(0.0, lag))
+
+
 async def on_startup() -> None:
     settings = get_settings()
     ctx = get_pipeline_context()
@@ -698,6 +708,7 @@ async def on_startup() -> None:
             ctx.skip_governance = True
             _init_storage(settings, ctx)
             _init_lineage(settings, ctx)
+            ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
             logger.info("Gateway running in skip_governance (transparent proxy) mode")
             return
 
@@ -801,6 +812,8 @@ async def on_startup() -> None:
             # Local sync loop keeps policy_cache.fetched_at fresh (fixes fail_closed)
             from gateway.control.loader import _run_local_sync_loop
             ctx.local_sync_task = asyncio.create_task(_run_local_sync_loop(settings, ctx))
+        # Event loop lag monitor (RED metrics)
+        ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
     except Exception:
         logger.critical("Gateway startup FAILED — cleaning up partially initialized resources", exc_info=True)
@@ -878,6 +891,15 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"lineage_reader.close: {e}")
         ctx.lineage_reader = None
+
+    if ctx.event_loop_lag_task and not ctx.event_loop_lag_task.done():
+        ctx.event_loop_lag_task.cancel()
+        try:
+            await ctx.event_loop_lag_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            errors.append(f"event_loop_lag_task: {e}")
 
     if ctx.resource_monitor_task and not ctx.resource_monitor_task.done():
         ctx.resource_monitor_task.cancel()

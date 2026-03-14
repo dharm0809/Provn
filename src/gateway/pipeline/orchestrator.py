@@ -43,6 +43,7 @@ from gateway.metrics.prometheus import (
     token_usage_total, budget_exceeded_total,
     tool_calls_total, tool_loop_iterations,
     rate_limit_hits_total, content_blocks_total,
+    inflight_requests, response_status_total, forward_duration_by_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -1446,6 +1447,23 @@ async def _build_and_write_record(
 async def handle_request(request: Request) -> Response:
     """Run the full 8-step pipeline (+ Phase 14 tool strategy at step 3.5)."""
     t0 = time.perf_counter()
+    inflight_requests.inc()
+    try:
+        return await _handle_request_inner(request, t0)
+    finally:
+        inflight_requests.dec()
+
+
+def _record_status(status_code: int, source: str = "gateway") -> None:
+    """Record HTTP response status code metric."""
+    try:
+        response_status_total.labels(status_code=str(status_code), source=source).inc()
+    except Exception:
+        logger.debug("Metric increment failed (response_status_total)", exc_info=True)
+
+
+async def _handle_request_inner(request: Request, t0: float) -> Response:
+    """Inner handler: full pipeline logic, called with inflight tracking around it."""
     _set_disposition(request, "error_gateway")
     settings = get_settings()
     is_audit_only = settings.enforcement_mode == "audit_only"
@@ -1453,14 +1471,18 @@ async def handle_request(request: Request) -> Response:
     if request.method != "POST":
         _set_disposition(request, "error_method_not_allowed")
         _inc_request("unknown", "unknown", "error")
-        return JSONResponse({"error": "Method not allowed"}, status_code=405)
+        resp = JSONResponse({"error": "Method not allowed"}, status_code=405)
+        _record_status(405)
+        return resp
 
     model_hint = await _peek_model_id(request) if get_settings().model_routes else ""
     adapter = _resolve_adapter(request.url.path, model_hint)
     if not adapter:
         _set_disposition(request, "error_no_adapter")
         _inc_request("unknown", "unknown", "error")
-        return JSONResponse({"error": "No adapter for this path"}, status_code=404)
+        resp = JSONResponse({"error": "No adapter for this path"}, status_code=404)
+        _record_status(404)
+        return resp
 
     try:
         call = await adapter.parse_request(request)
@@ -1468,7 +1490,9 @@ async def handle_request(request: Request) -> Response:
         logger.warning("parse_request failed: %s", e)
         _set_disposition(request, "error_parse")
         _inc_request("unknown", "unknown", "error")
-        return JSONResponse({"error": "Invalid request body"}, status_code=400)
+        resp = JSONResponse({"error": "Invalid request body"}, status_code=400)
+        _record_status(400)
+        return resp
 
     # Inject prompt_id + client context for end-to-end audit correlation
     prompt_id = request_id_var.get()
@@ -1541,6 +1565,7 @@ async def handle_request(request: Request) -> Response:
     pre = await _run_pre_checks(request, adapter, call, ctx, settings, is_audit_only, provider, model)
     timings: dict[str, float] = {**pre.timings, "pre_checks_ms": round((time.perf_counter() - t_pre) * 1000, 1)}
     if pre.error is not None:
+        _record_status(pre.error.status_code)
         return pre.error
 
     assert pre.call is not None  # always set when error is None
@@ -1576,6 +1601,7 @@ async def handle_request(request: Request) -> Response:
             )
             _set_disposition(request, "error_overloaded")
             _inc_request(provider, model, "overloaded")
+            _record_status(503)
             return JSONResponse(
                 {"error": "Service overloaded", "retry_after": 1},
                 status_code=503,
@@ -1616,6 +1642,7 @@ async def handle_request(request: Request) -> Response:
         pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
         outcome = "audit_only_allowed" if (is_audit_only and pre.whb) else "allowed"
         _inc_request(provider, model, outcome)
+        _record_status(200, source="provider")
         return resp
 
     t_fwd = time.perf_counter()
@@ -1644,6 +1671,7 @@ async def handle_request(request: Request) -> Response:
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
     fwd_rtt = time.perf_counter() - t_fwd
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
+    forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)
 
     # Release adaptive concurrency slot with observed forward RTT
     if _concurrency_acquired and _concurrency_limiter is not None:
@@ -1652,6 +1680,7 @@ async def handle_request(request: Request) -> Response:
     if http_response.status_code >= 500:
         _set_disposition(request, "error_provider")
         _inc_request(provider, model, "error")
+        _record_status(http_response.status_code, source="provider")
         await _record_token_usage(
             model_response, settings.gateway_tenant_id, provider,
             call.metadata.get("user"), estimated=pre.budget_estimated,
@@ -1674,6 +1703,7 @@ async def handle_request(request: Request) -> Response:
     if tool_result.error is not None:
         _set_disposition(request, "error_provider")
         _inc_request(provider, model, "error")
+        _record_status(500)
         await _record_token_usage(
             tool_result.model_response, settings.gateway_tenant_id, provider,
             call.metadata.get("user"), estimated=pre.budget_estimated,
@@ -1703,6 +1733,7 @@ async def handle_request(request: Request) -> Response:
     )
     timings["content_analysis_ms"] = round((time.perf_counter() - t_rp) * 1000, 1)
     if resp_err is not None:
+        _record_status(403)
         await _record_token_usage(
             model_response, settings.gateway_tenant_id, provider,
             call.metadata.get("user"), estimated=pre.budget_estimated,
@@ -1769,4 +1800,5 @@ async def handle_request(request: Request) -> Response:
         model_id=call.model_id,
     )
     _add_rate_limit_headers(http_response, request)
+    _record_status(http_response.status_code, source="provider")
     return http_response

@@ -113,6 +113,27 @@ rate_limit_hits_total = Counter(
     ["model"],
 )
 
+# RED method gap fillers
+inflight_requests = Gauge(
+    "walacor_gateway_inflight_requests",
+    "Requests currently being processed",
+)
+response_status_total = Counter(
+    "walacor_gateway_response_status_total",
+    "HTTP response status codes by source",
+    ["status_code", "source"],  # source: gateway | provider
+)
+event_loop_lag_seconds = Gauge(
+    "walacor_gateway_event_loop_lag_seconds",
+    "Asyncio event loop scheduling lag in seconds",
+)
+forward_duration_by_model = Histogram(
+    "walacor_gateway_forward_duration_by_model_seconds",
+    "Upstream forward duration by model",
+    ["model"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
 
 def get_metrics_content() -> bytes:
     return generate_latest(REGISTRY)

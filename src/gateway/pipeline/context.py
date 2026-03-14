@@ -69,6 +69,7 @@ class PipelineContext:
         self.capability_registry = None
         self.effective_wal_max_gb: float | None = None
         self.resource_monitor_task: Any | None = None
+        self.event_loop_lag_task: Any | None = None
 
 
 _ctx = PipelineContext()
