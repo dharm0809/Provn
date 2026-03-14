@@ -416,6 +416,13 @@ def _init_image_safety(settings, ctx):
     logger.info("Image safety analyzer enabled: model=%s timeout=%dms", settings.image_safety_model, settings.image_safety_timeout_ms)
 
 
+def _init_image_ocr(settings, ctx):
+    """Initialize image OCR analyzer if enabled."""
+    from gateway.content.image_ocr import ImageOCRAnalyzer
+    ctx.image_ocr_analyzer = ImageOCRAnalyzer(max_size_mb=settings.image_ocr_max_size_mb)
+    logger.info("Image OCR analyzer enabled: max_size=%dMB", settings.image_ocr_max_size_mb)
+
+
 def _init_prompt_guard(settings, ctx) -> None:
     """Prompt Guard 2 injection detection (CPU-based, 2-5ms)."""
     from gateway.content.prompt_guard import PromptGuardAnalyzer
@@ -809,6 +816,8 @@ async def on_startup() -> None:
             _init_presidio_pii(settings, ctx)
         if settings.image_safety_enabled:
             _init_image_safety(settings, ctx)
+        if settings.image_ocr_enabled:
+            _init_image_ocr(settings, ctx)
         _init_alert_bus(settings, ctx)
         _init_budget_tracker(settings, ctx)
         _init_session_chain(settings, ctx)

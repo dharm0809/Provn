@@ -78,6 +78,8 @@ class PipelineContext:
         self.attachment_cache: Any | None = None
         # Multimodal audit: image safety analyzer
         self.image_safety_analyzer: Any | None = None
+        # Multimodal audit: image OCR analyzer
+        self.image_ocr_analyzer: Any | None = None
 
 
 _ctx = PipelineContext()

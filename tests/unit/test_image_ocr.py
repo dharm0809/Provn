@@ -105,3 +105,29 @@ async def test_ocr_with_credit_card(anyio_backend):
         assert result["ocr_pii_found"] is True
         assert "credit_card" in result["ocr_pii_types"]
         assert result["ocr_pii_block"] is True
+
+
+@pytest.mark.anyio
+async def test_ocr_pipeline_block_on_pii(anyio_backend):
+    """OCR PII block in pipeline returns 403."""
+    from gateway.content.image_ocr import evaluate_image_ocr
+
+    mock_analyzer = MagicMock()
+
+    async def fake_analyze(image_bytes):
+        return {
+            "ocr_text_extracted": True,
+            "ocr_text_length": 30,
+            "ocr_pii_found": True,
+            "ocr_pii_types": ["credit_card"],
+            "ocr_pii_block": True,
+            "ocr_toxicity_found": False,
+        }
+    mock_analyzer.analyze_image = fake_analyze
+
+    images = [{"index": 0, "raw_bytes": b"fake", "hash_sha3_512": "abc"}]
+    blocked, response, results = await evaluate_image_ocr(mock_analyzer, images)
+
+    assert blocked is True
+    assert response.status_code == 403
+    assert results[0]["ocr_pii_block"] is True

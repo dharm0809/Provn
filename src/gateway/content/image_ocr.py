@@ -99,3 +99,33 @@ class ImageOCRAnalyzer:
             "ocr_pii_block": pii_block,
             "ocr_toxicity_found": toxicity_found,
         }
+
+
+async def evaluate_image_ocr(
+    analyzer: ImageOCRAnalyzer,
+    images: list[dict[str, Any]],
+) -> tuple[bool, Any, list[dict[str, Any]]]:
+    """Run OCR + PII on extracted images.
+
+    Returns (is_blocked, error_response_or_None, ocr_results).
+    """
+    from starlette.responses import JSONResponse
+
+    results: list[dict[str, Any]] = []
+
+    for img in images:
+        ocr_result = await analyzer.analyze_image(img["raw_bytes"])
+        ocr_result["image_index"] = img.get("index", 0)
+        ocr_result["hash_sha3_512"] = img.get("hash_sha3_512", "")
+        results.append(ocr_result)
+
+        if ocr_result.get("ocr_pii_block"):
+            pii_types = ", ".join(ocr_result.get("ocr_pii_types", []))
+            logger.warning("OCR PII BLOCK: types=%s hash=%.16s...", pii_types, img.get("hash_sha3_512", ""))
+            error_body = {
+                "error": f"Request blocked: image contains sensitive data detected via OCR ({pii_types})",
+                "pii_types": ocr_result.get("ocr_pii_types", []),
+            }
+            return True, JSONResponse(error_body, status_code=403), results
+
+    return False, None, results
