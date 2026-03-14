@@ -112,3 +112,41 @@ def test_extract_images_multiple():
     assert len(images) == 2
     assert images[0]["mimetype"] == "image/png"
     assert images[1]["mimetype"] == "image/jpeg"
+
+
+def test_extract_openwebui_file_metadata():
+    """Extract file metadata from OpenWebUI's metadata.files field."""
+    from gateway.middleware.attachment_tracker import extract_openwebui_files
+
+    body = {
+        "model": "qwen3:8b",
+        "messages": [{"role": "user", "content": "Summarize this doc"}],
+        "metadata": {
+            "files": [
+                {"id": "f1", "filename": "report.pdf", "type": "application/pdf", "size": 50000},
+                {"id": "f2", "filename": "data.csv", "type": "text/csv", "size": 1200},
+            ]
+        },
+    }
+    files = extract_openwebui_files(body)
+    assert len(files) == 2
+    assert files[0]["filename"] == "report.pdf"
+    assert files[0]["mimetype"] == "application/pdf"
+    assert files[0]["size_bytes"] == 50000
+    assert files[0]["source"] == "openwebui_upload"
+
+
+def test_extract_openwebui_files_no_metadata():
+    """Body without metadata.files returns empty list."""
+    from gateway.middleware.attachment_tracker import extract_openwebui_files
+
+    body = {"model": "qwen3:8b", "messages": []}
+    assert extract_openwebui_files(body) == []
+
+
+def test_extract_openwebui_files_empty_list():
+    """Empty files list returns empty."""
+    from gateway.middleware.attachment_tracker import extract_openwebui_files
+
+    body = {"metadata": {"files": []}}
+    assert extract_openwebui_files(body) == []

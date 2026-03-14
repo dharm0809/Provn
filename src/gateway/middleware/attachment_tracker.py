@@ -83,3 +83,28 @@ def extract_images_from_messages(messages: list[dict]) -> list[dict[str, Any]]:
             except Exception:
                 logger.warning("Failed to decode base64 image at index %d", idx, exc_info=True)
     return images
+
+
+def extract_openwebui_files(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract file metadata from OpenWebUI's metadata.files field.
+
+    Returns list of dicts: {filename, mimetype, size_bytes, source, file_id}.
+    """
+    metadata = body.get("metadata")
+    if not isinstance(metadata, dict):
+        return []
+    files_list = metadata.get("files")
+    if not isinstance(files_list, list):
+        return []
+    result = []
+    for f in files_list:
+        if not isinstance(f, dict):
+            continue
+        result.append({
+            "filename": f.get("filename", f.get("name", "unknown")),
+            "mimetype": f.get("type", f.get("mime_type", "application/octet-stream")),
+            "size_bytes": f.get("size", 0),
+            "source": "openwebui_upload",
+            "file_id": f.get("id", ""),
+        })
+    return result
