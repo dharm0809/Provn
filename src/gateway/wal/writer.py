@@ -6,7 +6,9 @@ import logging
 
 import gateway.util.json_utils as json
 import os
+import queue
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,11 +19,228 @@ logger = logging.getLogger(__name__)
 
 
 class WALWriter:
-    """SQLite WAL mode. Tables: wal_records (execution records), gateway_attempts (completeness invariant)."""
+    """SQLite WAL mode. Tables: wal_records (execution records), gateway_attempts (completeness invariant).
+
+    The writer runs a dedicated background thread that owns a single SQLite
+    connection for all enqueued writes.  This eliminates thread-pool dispatch
+    overhead (no asyncio.to_thread per write) and provides natural write
+    batching.
+
+    Direct synchronous methods (write_and_fsync, write_attempt, write_tool_event,
+    get_undelivered, mark_delivered, …) still work through self._conn and are
+    used by callers that run on the asyncio event-loop thread (delivery worker,
+    startup self-test, health checks, batch writer).  Those callers all run on
+    a single thread so there is no concurrent-access risk on self._conn.
+
+    Fire-and-forget enqueue methods (enqueue_write_execution, enqueue_write_attempt,
+    enqueue_write_tool_event) push work onto a thread-safe queue processed by
+    the dedicated writer thread using its own separate connection.
+    """
 
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._conn: sqlite3.Connection | None = None
+
+        # Dedicated writer thread state
+        self._queue: queue.Queue[tuple[Any, tuple] | None] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._thread_conn: sqlite3.Connection | None = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the dedicated background writer thread. Call once at startup."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._writer_loop, daemon=True, name="wal-writer"
+        )
+        self._thread.start()
+        logger.info("WALWriter dedicated thread started")
+
+    def stop(self) -> None:
+        """Stop the writer thread gracefully, draining the queue. Call once at shutdown."""
+        self._running = False
+        self._queue.put(None)  # sentinel — tells the loop to exit
+        if self._thread:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        if self._thread_conn:
+            try:
+                self._thread_conn.close()
+            except Exception:
+                pass
+            self._thread_conn = None
+        logger.info("WALWriter dedicated thread stopped")
+
+    # ------------------------------------------------------------------
+    # Internal: dedicated writer thread
+    # ------------------------------------------------------------------
+
+    def _ensure_thread_conn(self) -> sqlite3.Connection:
+        """Open the SQLite connection for the dedicated writer thread (called from that thread only).
+
+        Creates the schema if not already present — this ensures the tables exist even
+        if the writer thread receives its first enqueued item before the main-thread
+        connection has been opened (e.g. in tests or when batch writer is enabled
+        but the startup self-test has not yet run).
+        """
+        if self._thread_conn is None:
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self._path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS wal_records (
+                    execution_id  TEXT    PRIMARY KEY,
+                    record_json   TEXT    NOT NULL,
+                    created_at    TEXT    NOT NULL,
+                    delivered     INTEGER NOT NULL DEFAULT 0,
+                    delivered_at  TEXT
+                )"""
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wal_records_pending"
+                " ON wal_records (delivered, created_at)"
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS gateway_attempts (
+                    request_id    TEXT    PRIMARY KEY,
+                    timestamp     TEXT    NOT NULL,
+                    tenant_id     TEXT    NOT NULL,
+                    provider      TEXT,
+                    model_id      TEXT,
+                    path          TEXT    NOT NULL,
+                    disposition   TEXT    NOT NULL,
+                    execution_id  TEXT,
+                    status_code   INTEGER NOT NULL
+                )"""
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_timestamp"
+                " ON gateway_attempts (timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
+                " ON gateway_attempts (tenant_id, disposition)"
+            )
+            try:
+                conn.execute("ALTER TABLE gateway_attempts ADD COLUMN user TEXT")
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+            self._thread_conn = conn
+        return self._thread_conn
+
+    def _writer_loop(self) -> None:
+        """Process write operations from the queue in a single dedicated thread."""
+        conn = self._ensure_thread_conn()
+        while True:
+            try:
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:  # sentinel — graceful exit
+                break
+            fn, args = item
+            try:
+                fn(conn, *args)
+            except Exception:
+                logger.error("WAL dedicated writer error", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Inner write functions (accept an explicit conn; called from writer thread)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _do_write_execution(conn: sqlite3.Connection, record: ExecutionRecord | dict[str, Any]) -> None:
+        if isinstance(record, dict):
+            data = record
+        else:
+            data = record.model_dump(mode="json")
+        record_json = json.dumps(data)
+        now = datetime.now(timezone.utc).isoformat()
+        execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
+        conn.execute(
+            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
+            (execution_id, record_json, now),
+        )
+        conn.commit()
+        logger.debug("WAL (thread) write execution_id=%s", execution_id)
+
+    @staticmethod
+    def _do_write_attempt(
+        conn: sqlite3.Connection,
+        request_id: str,
+        tenant_id: str,
+        path: str,
+        disposition: str,
+        status_code: int,
+        provider: str | None = None,
+        model_id: str | None = None,
+        execution_id: str | None = None,
+        user: str | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO gateway_attempts
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None),
+        )
+        conn.commit()
+        logger.debug("WAL (thread) gateway_attempts request_id=%s disposition=%s", request_id, disposition)
+
+    @staticmethod
+    def _do_write_tool_event(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+        event_id = record["event_id"]
+        conn.execute(
+            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
+            (event_id, json.dumps(record), datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        logger.debug("WAL (thread) write_tool_event event_id=%s", event_id)
+
+    # ------------------------------------------------------------------
+    # Fire-and-forget enqueue API (used by WALBackend)
+    # ------------------------------------------------------------------
+
+    def enqueue_write_execution(self, record: ExecutionRecord | dict[str, Any]) -> None:
+        """Non-blocking enqueue of an execution record to the dedicated writer thread."""
+        self._queue.put((self._do_write_execution, (record,)))
+
+    def enqueue_write_attempt(
+        self,
+        request_id: str,
+        tenant_id: str,
+        path: str,
+        disposition: str,
+        status_code: int,
+        provider: str | None = None,
+        model_id: str | None = None,
+        execution_id: str | None = None,
+        user: str | None = None,
+    ) -> None:
+        """Non-blocking enqueue of an attempt record to the dedicated writer thread."""
+        self._queue.put((
+            self._do_write_attempt,
+            (request_id, tenant_id, path, disposition, status_code, provider, model_id, execution_id, user),
+        ))
+
+    def enqueue_write_tool_event(self, record: dict[str, Any]) -> None:
+        """Non-blocking enqueue of a tool event record to the dedicated writer thread."""
+        self._queue.put((self._do_write_tool_event, (record,)))
+
+    # ------------------------------------------------------------------
+    # Synchronous public API (used by delivery worker, startup, health, batch writer)
+    # All callers run on the asyncio event-loop thread — no concurrent access.
+    # ------------------------------------------------------------------
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -219,6 +438,7 @@ class WALWriter:
         return cur.rowcount
 
     def close(self) -> None:
+        self.stop()
         if self._conn:
             self._conn.close()
             self._conn = None

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -14,7 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class WALBackend:
-    """StorageBackend implementation backed by local SQLite WAL."""
+    """StorageBackend implementation backed by local SQLite WAL.
+
+    Write paths use the WALWriter's dedicated background thread via
+    enqueue_* methods (fire-and-forget queue puts), eliminating the
+    asyncio.to_thread dispatch overhead of the previous design.
+    """
 
     name = "wal"
 
@@ -27,7 +31,7 @@ class WALBackend:
             if self._batch_writer:
                 await self._batch_writer.enqueue(record)
             else:
-                await asyncio.to_thread(self._writer.write_and_fsync, record)
+                self._writer.enqueue_write_execution(record)
             return True
         except Exception:
             logger.error(
@@ -39,7 +43,7 @@ class WALBackend:
 
     async def write_attempt(self, record: dict) -> None:
         try:
-            await asyncio.to_thread(self._writer.write_attempt, **record)
+            self._writer.enqueue_write_attempt(**record)
         except Exception:
             logger.warning(
                 "WAL write_attempt failed request_id=%s",
@@ -49,7 +53,7 @@ class WALBackend:
 
     async def write_tool_event(self, record: dict) -> None:
         try:
-            await asyncio.to_thread(self._writer.write_tool_event, record)
+            self._writer.enqueue_write_tool_event(record)
         except Exception:
             logger.warning(
                 "WAL write_tool_event failed event_id=%s",

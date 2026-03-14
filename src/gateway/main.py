@@ -306,6 +306,7 @@ def _init_wal(settings, ctx) -> None:
     wal_dir = Path(settings.wal_path)
     wal_dir.mkdir(parents=True, exist_ok=True)
     ctx.wal_writer = WALWriter(str(wal_dir / "wal.db"))
+    ctx.wal_writer.start()
     if settings.control_plane_url:
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
