@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     toxicity_detection_enabled: bool = Field(default=False, description="Enable built-in toxicity detector (walacor.toxicity.v1)")
     toxicity_deny_terms: str = Field(default="", description="Comma-separated extra deny-list terms for toxicity detector")
 
+    # Stage B.7: Parallel content analysis
+    content_analysis_parallel: bool = Field(
+        default=True,
+        description="Run input content analysis in parallel with LLM call (reduces latency for slow analyzers)",
+    )
+
     # PII sanitization (strip-before-LLM, restore-after) — Stage B.1
     pii_sanitization_enabled: bool = Field(
         default=False,

@@ -1378,6 +1378,31 @@ async def _route_tool_strategy(
     return _ToolStrategyResult(call=call, model_response=model_response, interactions=[], iterations=0, error=None)
 
 
+# ── Input content analysis (B.7: parallel mode) ───────────────────────────────
+
+async def _run_input_analysis_async(call: ModelCall, ctx) -> list[dict]:
+    """Run content analyzers on the prompt text (input side).
+
+    Used in parallel-analysis mode (B.7): this coroutine is gathered alongside
+    the LLM forward call so that input PII/toxicity analysis does not add to the
+    end-to-end latency when the analyzer is slower than the LLM call.
+
+    Always fail-open — errors are logged and an empty list is returned so the
+    main pipeline is never blocked by analyzer unavailability.
+
+    Returns a list of decision dicts (same shape as evaluate_post_inference
+    analyzer_decisions) or [] when analyzers are disabled / no prompt text.
+    """
+    if not ctx.content_analyzers or not call.prompt_text:
+        return []
+    try:
+        from gateway.pipeline.response_evaluator import analyze_text
+        return await analyze_text(call.prompt_text, ctx.content_analyzers)
+    except Exception:
+        logger.warning("Input content analysis failed (fail-open)", exc_info=True)
+        return []
+
+
 # ── Response policy ───────────────────────────────────────────────────────────
 
 async def _run_response_policy(
@@ -1770,7 +1795,33 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         return resp
 
     t_fwd = time.perf_counter()
-    http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
+    # ── B.7: Parallel input analysis ─────────────────────────────────────────
+    # When content_analysis_parallel=True, run content analyzers on the *input*
+    # concurrently with the LLM call.  This reduces total latency when the
+    # analyzer (PII, toxicity) takes non-trivial time, because both proceed in
+    # parallel rather than sequentially.
+    #
+    # IMPORTANT: input blocking is not enforced in parallel mode — the request
+    # has already been forwarded.  Input analysis results are stored in the
+    # audit record as metadata only (informational, not enforcement).
+    # Output analysis (evaluate_post_inference) still enforces BLOCK decisions.
+    _input_analysis: list[dict] = []
+    if settings.content_analysis_parallel and ctx.content_analyzers and call.prompt_text:
+        logger.debug(
+            "B.7 parallel input analysis: starting alongside forward provider=%s model=%s",
+            provider, model,
+        )
+        (http_response, model_response, _used_fallback), _input_analysis = await asyncio.gather(
+            _forward_with_resilience(adapter, call, request),
+            _run_input_analysis_async(call, ctx),
+        )
+        if _input_analysis:
+            logger.debug(
+                "B.7 parallel input analysis: %d decision(s) for provider=%s model=%s",
+                len(_input_analysis), provider, model,
+            )
+    else:
+        http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
 
     # ── Tool-unsupported retry: if the model rejects tools, strip and retry ──
     if _is_tool_unsupported_error(http_response.status_code, bytes(http_response.body)):
@@ -1797,6 +1848,13 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
     forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)
     latency_detector.record(provider, fwd_rtt)
+
+    # B.7: Merge input analysis results into audit metadata (informational; not enforcement)
+    if _input_analysis:
+        pre = dataclasses.replace(
+            pre,
+            audit_metadata={**pre.audit_metadata, "input_analysis": _input_analysis},
+        )
 
     # Release adaptive concurrency slot with observed forward RTT
     if _concurrency_acquired and _concurrency_limiter is not None:
