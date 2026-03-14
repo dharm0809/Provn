@@ -308,6 +308,48 @@ async def control_delete_content_policy(request: Request) -> JSONResponse:
     return JSONResponse({"deleted": True})
 
 
+# ── Model Pricing endpoints ───────────────────────────────────
+
+async def control_list_pricing(request: Request) -> JSONResponse:
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    try:
+        rows = store.list_model_pricing()
+        return JSONResponse({"pricing": rows, "count": len(rows)})
+    except Exception as e:
+        logger.error("control_list_pricing error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def control_upsert_pricing(request: Request) -> JSONResponse:
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    try:
+        body = await request.json()
+        if not body.get("model_pattern"):
+            return JSONResponse({"error": "model_pattern is required"}, status_code=400)
+        result = store.upsert_model_pricing(body)
+        return JSONResponse(result, status_code=200)
+    except Exception as e:
+        logger.error("control_upsert_pricing error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+async def control_delete_pricing(request: Request) -> JSONResponse:
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    pricing_id = request.path_params["id"]
+    try:
+        deleted = store.delete_model_pricing(pricing_id)
+        return JSONResponse({"deleted": deleted})
+    except Exception as e:
+        logger.error("control_delete_pricing error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── Status endpoint ───────────────────────────────────────────
 
 async def control_status(request: Request) -> JSONResponse:

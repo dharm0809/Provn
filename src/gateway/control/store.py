@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import sqlite3
@@ -71,6 +72,17 @@ CREATE TABLE IF NOT EXISTS shadow_policies (
     rules_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_pricing (
+    pricing_id TEXT PRIMARY KEY,
+    model_pattern TEXT NOT NULL,
+    input_cost_per_1k REAL NOT NULL DEFAULT 0.0,
+    output_cost_per_1k REAL NOT NULL DEFAULT 0.0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(model_pattern)
 );
 """
 
@@ -400,6 +412,57 @@ class ControlPlaneStore:
         cur = conn.execute("DELETE FROM shadow_policies WHERE policy_id = ?", (policy_id,))
         conn.commit()
         return cur.rowcount > 0
+
+    # ── Model Pricing CRUD ──────────────────────────────────────
+
+    def list_model_pricing(self) -> list[dict[str, Any]]:
+        conn = self._ensure_conn()
+        cur = conn.execute("SELECT * FROM model_pricing ORDER BY updated_at DESC")
+        return [dict(row) for row in cur.fetchall()]
+
+    def upsert_model_pricing(self, data: dict[str, Any]) -> dict[str, Any]:
+        conn = self._ensure_conn()
+        now = self._now()
+        pricing_id = data.get("pricing_id") or self._new_id()
+        model_pattern = data.get("model_pattern", "")
+        input_cost = float(data.get("input_cost_per_1k", 0.0))
+        output_cost = float(data.get("output_cost_per_1k", 0.0))
+        currency = data.get("currency", "USD")
+
+        conn.execute(
+            """INSERT INTO model_pricing
+                   (pricing_id, model_pattern, input_cost_per_1k, output_cost_per_1k,
+                    currency, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(model_pattern) DO UPDATE SET
+                   input_cost_per_1k = excluded.input_cost_per_1k,
+                   output_cost_per_1k = excluded.output_cost_per_1k,
+                   currency = excluded.currency,
+                   updated_at = excluded.updated_at
+            """,
+            (pricing_id, model_pattern, input_cost, output_cost, currency, now, now),
+        )
+        conn.commit()
+        cur = conn.execute(
+            "SELECT * FROM model_pricing WHERE model_pattern = ?",
+            (model_pattern,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {"pricing_id": pricing_id}
+
+    def delete_model_pricing(self, pricing_id: str) -> bool:
+        conn = self._ensure_conn()
+        cur = conn.execute("DELETE FROM model_pricing WHERE pricing_id = ?", (pricing_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+    def get_model_pricing(self, model_id: str) -> dict[str, Any] | None:
+        """Find first pricing row whose model_pattern fnmatch-matches model_id."""
+        rows = self.list_model_pricing()
+        for row in rows:
+            if fnmatch.fnmatch(model_id, row["model_pattern"]):
+                return row
+        return None
 
     # ── Sync-contract formatters ──────────────────────────────
 

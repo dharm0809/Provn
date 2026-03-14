@@ -354,6 +354,61 @@ class LineageReader:
         session_ids = [row["session_id"] for row in cur.fetchall()]
         return [self.verify_chain(sid) for sid in session_ids]
 
+    def get_cost_summary(self, range_key: str = "24h", group_by: str = "model") -> dict:
+        """Aggregate estimated costs by model or user over a time range."""
+        conn = self._ensure_conn()
+
+        interval_map = {"1h": "-1 hour", "24h": "-1 day", "7d": "-7 days", "30d": "-30 days"}
+        interval = interval_map.get(range_key, "-1 day")
+
+        if group_by == "user":
+            group_col = "json_extract(record_json, '$.user')"
+            group_alias = "user"
+        else:
+            group_col = (
+                "COALESCE(json_extract(record_json, '$.model_id'), "
+                "json_extract(record_json, '$.model_attestation_id'))"
+            )
+            group_alias = "model"
+
+        sql = f"""
+            SELECT
+                {group_col} AS group_key,
+                COUNT(*) AS request_count,
+                SUM(COALESCE(json_extract(record_json, '$.prompt_tokens'), 0)) AS total_prompt_tokens,
+                SUM(COALESCE(json_extract(record_json, '$.completion_tokens'), 0)) AS total_completion_tokens,
+                SUM(COALESCE(json_extract(record_json, '$.total_tokens'), 0)) AS total_tokens,
+                SUM(COALESCE(json_extract(record_json, '$.estimated_cost_usd'), 0.0)) AS total_cost_usd
+            FROM wal_records
+            WHERE json_extract(record_json, '$.timestamp') > datetime('now', ?)
+              AND (json_extract(record_json, '$.event_type') IS NULL
+                   OR json_extract(record_json, '$.event_type') = '')
+            GROUP BY group_key
+            ORDER BY total_cost_usd DESC
+        """
+
+        cur = conn.execute(sql, (interval,))
+        rows = []
+        grand_total = 0.0
+        for row in cur.fetchall():
+            entry = {
+                group_alias: row["group_key"] or "unknown",
+                "request_count": row["request_count"],
+                "prompt_tokens": row["total_prompt_tokens"],
+                "completion_tokens": row["total_completion_tokens"],
+                "total_tokens": row["total_tokens"],
+                "cost_usd": round(row["total_cost_usd"], 6),
+            }
+            grand_total += row["total_cost_usd"]
+            rows.append(entry)
+
+        return {
+            "range": range_key,
+            "group_by": group_by,
+            "entries": rows,
+            "grand_total_usd": round(grand_total, 6),
+        }
+
     def verify_chain(self, session_id: str) -> dict:
         """Verify Merkle chain integrity for a session.
 

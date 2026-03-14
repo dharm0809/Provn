@@ -32,6 +32,7 @@ from gateway.lineage.api import (
     lineage_trace,
     lineage_verify,
 )
+from gateway.lineage.cost import lineage_cost_summary
 from gateway.control.api import (
     control_list_attestations,
     control_upsert_attestation,
@@ -46,6 +47,9 @@ from gateway.control.api import (
     control_list_content_policies,
     control_upsert_content_policy,
     control_delete_content_policy,
+    control_list_pricing,
+    control_upsert_pricing,
+    control_delete_pricing,
     control_status,
     control_discover_models,
 )
@@ -930,6 +934,7 @@ def create_app() -> Starlette:
         Route("/v1/lineage/token-latency", lineage_token_latency_history, methods=["GET"]),
         Route("/v1/lineage/trace/{execution_id:path}", lineage_trace, methods=["GET"]),
         Route("/v1/lineage/verify/{session_id:path}", lineage_verify, methods=["GET"]),
+        Route("/v1/lineage/cost", lineage_cost_summary, methods=["GET"]),
         # Control plane CRUD
         Route("/v1/control/attestations", control_list_attestations, methods=["GET"]),
         Route("/v1/control/attestations", control_upsert_attestation, methods=["POST"]),
@@ -944,6 +949,9 @@ def create_app() -> Starlette:
         Route("/v1/control/content-policies", control_list_content_policies, methods=["GET"]),
         Route("/v1/control/content-policies", control_upsert_content_policy, methods=["POST"]),
         Route("/v1/control/content-policies/{policy_id:path}", control_delete_content_policy, methods=["DELETE"]),
+        Route("/v1/control/pricing", control_list_pricing, methods=["GET"]),
+        Route("/v1/control/pricing", control_upsert_pricing, methods=["POST"]),
+        Route("/v1/control/pricing/{id:path}", control_delete_pricing, methods=["DELETE"]),
         Route("/v1/control/status", control_status, methods=["GET"]),
         Route("/v1/control/discover", control_discover_models, methods=["GET"]),
         # Sync-contract endpoints (for fleet sync)

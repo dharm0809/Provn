@@ -1386,6 +1386,21 @@ async def _build_and_write_record(
         timings=params.timings,
         variant_id=params.variant_id,
     )
+    # Cost attribution: compute estimated cost from pricing table
+    if ctx.control_store:
+        try:
+            pricing = ctx.control_store.get_model_pricing(call.model_id or "")
+            if pricing:
+                prompt_t = record.get("prompt_tokens", 0) or 0
+                completion_t = record.get("completion_tokens", 0) or 0
+                cost = (
+                    prompt_t * pricing["input_cost_per_1k"] / 1000
+                    + completion_t * pricing["output_cost_per_1k"] / 1000
+                )
+                record["estimated_cost_usd"] = round(cost, 6)
+        except Exception:
+            logger.debug("Cost computation failed (non-fatal)", exc_info=True)
+
     t_chain = time.perf_counter()
     record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
     if params.timings is not None:
