@@ -396,6 +396,10 @@ class Settings(BaseSettings):
         description="Verify OpenSSF model signatures during discovery.",
     )
 
+    # Phase 24: Periodic Merkle tree checkpoints
+    merkle_checkpoint_enabled: bool = Field(default=False, description="Enable periodic Merkle tree checkpoints for session chains")
+    merkle_checkpoint_interval_seconds: int = Field(default=3600, description="Seconds between Merkle tree checkpoint builds")
+
     # Enterprise extension points (comma-separated Python dotted class paths)
     custom_startup_probes: str = Field(default="", description="Custom StartupProbe classes")
     custom_request_classifiers: str = Field(default="", description="Custom RequestClassifier classes")

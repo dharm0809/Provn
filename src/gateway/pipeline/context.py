@@ -72,6 +72,8 @@ class PipelineContext:
         self.event_loop_lag_task: Any | None = None
         # Phase 18 (Task 18): Batch WAL writer
         self.batch_writer: Any | None = None
+        # Phase 24: Merkle tree checkpoint task
+        self.merkle_checkpoint_task: Any | None = None
 
 
 _ctx = PipelineContext()

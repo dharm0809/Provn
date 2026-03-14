@@ -703,6 +703,33 @@ async def _event_loop_lag_monitor():
         event_loop_lag_seconds.set(max(0.0, lag))
 
 
+async def _merkle_checkpoint_loop(ctx, interval: int) -> None:
+    """Periodically build Merkle tree checkpoint from recent session chain hashes."""
+    from gateway.crypto.merkle_tree import build_merkle_tree
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            if ctx.wal_writer is None:
+                continue
+            # Read recent record hashes from WAL
+            conn = ctx.wal_writer._ensure_conn()
+            cur = conn.execute(
+                "SELECT json_extract(record_json, '$.record_hash') FROM wal_records "
+                "WHERE json_extract(record_json, '$.record_hash') IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1000"
+            )
+            hashes = [row[0] for row in cur.fetchall() if row[0]]
+            if not hashes:
+                continue
+            root, levels = build_merkle_tree(hashes)
+            logger.info("Merkle checkpoint: root=%s leaves=%d levels=%d", root[:16], len(hashes), len(levels))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.error("Merkle checkpoint failed", exc_info=True)
+
+
 async def on_startup() -> None:
     settings = get_settings()
     ctx = get_pipeline_context()
@@ -847,6 +874,11 @@ async def on_startup() -> None:
             # Local sync loop keeps policy_cache.fetched_at fresh (fixes fail_closed)
             from gateway.control.loader import _run_local_sync_loop
             ctx.local_sync_task = asyncio.create_task(_run_local_sync_loop(settings, ctx))
+        # Phase 24: Merkle tree checkpoint background task
+        if settings.merkle_checkpoint_enabled:
+            ctx.merkle_checkpoint_task = asyncio.create_task(
+                _merkle_checkpoint_loop(ctx, settings.merkle_checkpoint_interval_seconds)
+            )
         # Event loop lag monitor (RED metrics)
         ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
@@ -969,6 +1001,15 @@ async def on_shutdown() -> None:
             pass
         except Exception as e:
             errors.append(f"alert_bus_task: {e}")
+
+    if ctx.merkle_checkpoint_task and not ctx.merkle_checkpoint_task.done():
+        ctx.merkle_checkpoint_task.cancel()
+        try:
+            await ctx.merkle_checkpoint_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            errors.append(f"merkle_checkpoint_task: {e}")
 
     if ctx.control_store:
         try:
