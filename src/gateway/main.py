@@ -481,6 +481,23 @@ def _init_prompt_guard(settings, ctx) -> None:
         logger.info("Content analyzer loaded: walacor.prompt_guard.v2 (model=%s)", settings.prompt_guard_model)
 
 
+def _init_dlp_classifier(settings, ctx) -> None:
+    """B.8: DLP data classification — financial, health, secrets, infrastructure."""
+    from gateway.content.dlp_classifier import DLPClassifier
+    categories = {c.strip() for c in settings.dlp_categories.split(",") if c.strip()}
+    classifier = DLPClassifier(enabled_categories=categories)
+    # Apply per-category action overrides from config
+    action_overrides = [
+        {"category": "financial", "action": settings.dlp_action_financial},
+        {"category": "health", "action": settings.dlp_action_health},
+        {"category": "secrets", "action": settings.dlp_action_secrets},
+        {"category": "infrastructure", "action": settings.dlp_action_infrastructure},
+    ]
+    classifier.configure(action_overrides)
+    ctx.content_analyzers.append(classifier)
+    logger.info("Content analyzer loaded: walacor.dlp.v1 (categories=%s)", sorted(categories))
+
+
 async def _init_redis(settings) -> "Any | None":
     """Phase 15: Redis client for shared state (multi-replica). Returns None when redis_url is empty."""
     if not settings.redis_url:
@@ -881,6 +898,8 @@ async def on_startup() -> None:
             _init_prompt_guard(settings, ctx)
         if settings.presidio_pii_enabled:
             _init_presidio_pii(settings, ctx)
+        if settings.dlp_enabled:
+            _init_dlp_classifier(settings, ctx)
         if settings.image_safety_enabled:
             _init_image_safety(settings, ctx)
         if settings.image_ocr_enabled:

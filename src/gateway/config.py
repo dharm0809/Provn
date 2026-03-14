@@ -152,6 +152,32 @@ class Settings(BaseSettings):
         description="Classification threshold for injection detection (0.0-1.0).",
     )
 
+    # B.8: DLP data classification
+    dlp_enabled: bool = Field(
+        default=False,
+        description="Enable DLP data classification for financial, health, secrets, and infrastructure data",
+    )
+    dlp_categories: str = Field(
+        default="financial,health,secrets,infrastructure",
+        description="Comma-separated DLP categories to scan (financial, health, secrets, infrastructure)",
+    )
+    dlp_action_financial: str = Field(
+        default="warn",
+        description="Action for financial data detection: warn or block",
+    )
+    dlp_action_health: str = Field(
+        default="block",
+        description="Action for health/PHI data detection (HIPAA): warn or block",
+    )
+    dlp_action_secrets: str = Field(
+        default="block",
+        description="Action for secrets/private keys detection: warn or block",
+    )
+    dlp_action_infrastructure: str = Field(
+        default="warn",
+        description="Action for infrastructure data detection: warn or block",
+    )
+
     # Phase 11: Token budget
     token_budget_enabled: bool = Field(default=False, description="Enable token budget enforcement")
     token_budget_period: str = Field(default="monthly", description="Budget period: 'daily' or 'monthly'")
