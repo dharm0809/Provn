@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from gateway.cache.attestation_cache import AttestationCache
     from gateway.cache.policy_cache import PolicyCache
+    from gateway.cache.semantic_cache import SemanticCache
     from gateway.content.base import ContentAnalyzer
     from gateway.export.base import AuditExporter
     from gateway.mcp.registry import ToolRegistry
@@ -83,6 +84,8 @@ class PipelineContext:
         self.image_ocr_analyzer: Any | None = None
         # B.2: Audit log exporter (file, webhook, s3)
         self.audit_exporter: AuditExporter | None = None
+        # B.4: Semantic cache (exact-match tier)
+        self.semantic_cache: SemanticCache | None = None
 
 
 _ctx = PipelineContext()

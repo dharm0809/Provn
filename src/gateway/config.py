@@ -450,6 +450,28 @@ class Settings(BaseSettings):
     transparency_log_enabled: bool = Field(default=False, description="Publish Merkle checkpoint roots to external transparency log")
     transparency_log_url: str = Field(default="", description="Transparency log endpoint URL for POST requests")
 
+    # ── B.4: Semantic caching (exact-match tier) ──────────────────────────────
+    semantic_cache_enabled: bool = Field(
+        default=False,
+        description="Cache LLM responses for identical prompts (exact-match SHA-256 key)",
+    )
+    semantic_cache_ttl: int = Field(
+        default=3600,
+        description="Cache TTL in seconds",
+    )
+    semantic_cache_max_entries: int = Field(
+        default=10000,
+        description="Max cached entries (oldest-first eviction)",
+    )
+    semantic_cache_similarity_threshold: float = Field(
+        default=0.95,
+        description="Cosine similarity threshold (Phase 2 embedding cache, unused in exact-match mode)",
+    )
+    semantic_cache_embedding_model: str = Field(
+        default="",
+        description="Ollama model for embeddings (empty = exact-match only)",
+    )
+
     # Enterprise extension points (comma-separated Python dotted class paths)
     custom_startup_probes: str = Field(default="", description="Custom StartupProbe classes")
     custom_request_classifiers: str = Field(default="", description="Custom RequestClassifier classes")

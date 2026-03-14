@@ -697,6 +697,22 @@ def _init_rate_limiter(settings, ctx) -> None:
     )
 
 
+def _init_semantic_cache(settings, ctx) -> None:
+    """B.4: Initialize in-memory semantic cache (exact-match tier)."""
+    if not settings.semantic_cache_enabled:
+        return
+    from gateway.cache.semantic_cache import SemanticCache
+    ctx.semantic_cache = SemanticCache(
+        max_entries=settings.semantic_cache_max_entries,
+        ttl=settings.semantic_cache_ttl,
+    )
+    logger.info(
+        "Semantic cache initialized: max_entries=%d ttl=%ds",
+        settings.semantic_cache_max_entries,
+        settings.semantic_cache_ttl,
+    )
+
+
 def _init_load_balancer(settings, ctx) -> None:
     """Phase 25: Initialize load balancer and circuit breakers from model_groups_json."""
     from gateway.routing.balancer import Endpoint, LoadBalancer, ModelGroup
@@ -884,6 +900,7 @@ async def on_startup() -> None:
             # Seed default content policies if control plane is active
             if ctx.control_store:
                 ctx.control_store.seed_default_content_policies()
+        _init_semantic_cache(settings, ctx)
         _init_load_balancer(settings, ctx)
         # Warn if control plane is active but no API keys are configured
         if settings.control_plane_enabled and not settings.api_keys_list:

@@ -44,6 +44,7 @@ from gateway.metrics.prometheus import (
     tool_calls_total, tool_loop_iterations,
     rate_limit_hits_total, content_blocks_total,
     inflight_requests, response_status_total, forward_duration_by_model,
+    cache_hits, cache_misses,
 )
 from gateway.metrics.anomaly import latency_detector
 
@@ -1601,6 +1602,30 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     assert pre.call is not None  # always set when error is None
     call = pre.call
 
+    # ── B.4: Semantic cache check (non-streaming only) ───────────────────────
+    # Cache hit returns the stored response immediately — no LLM call, no audit
+    # record (correct: there was no actual inference, so nothing to audit).
+    if ctx.semantic_cache is not None and not call.is_streaming and call.prompt_text:
+        _cached = ctx.semantic_cache.get(call.model_id, call.prompt_text)
+        if _cached is not None:
+            try:
+                cache_hits.labels(model=call.model_id or "unknown").inc()
+            except Exception:
+                logger.debug("Metric increment failed (cache_hits)", exc_info=True)
+            logger.debug("Semantic cache HIT: model=%s", call.model_id)
+            _set_disposition(request, "allowed")
+            _inc_request(provider, model, "allowed")
+            pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
+            return Response(
+                content=_cached.response_body,
+                status_code=_cached.status_code,
+                headers={"Content-Type": _cached.content_type, "X-Cache": "HIT"},
+            )
+        try:
+            cache_misses.labels(model=call.model_id or "unknown").inc()
+        except Exception:
+            logger.debug("Metric increment failed (cache_misses)", exc_info=True)
+
     # Active tool strategy requires non-streaming: we need to intercept the
     # response, execute tools, and loop before returning anything to the client.
     if pre.tool_strategy == "active" and call.is_streaming:
@@ -1823,6 +1848,26 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         model_response, settings.gateway_tenant_id, provider,
         call.metadata.get("user"), estimated=pre.budget_estimated,
     )
+
+    # ── B.4: Semantic cache store (non-streaming, status=200 only) ───────────
+    # Cache successful responses so identical future prompts get instant replies.
+    if (
+        ctx.semantic_cache is not None
+        and not call.is_streaming
+        and http_response.status_code == 200
+        and call.prompt_text
+    ):
+        try:
+            ctx.semantic_cache.put(
+                call.model_id,
+                call.prompt_text,
+                bytes(http_response.body),
+                status_code=http_response.status_code,
+                content_type=http_response.headers.get("content-type", "application/json"),
+            )
+            logger.debug("Semantic cache STORE: model=%s size=%d", call.model_id, ctx.semantic_cache.size)
+        except Exception:
+            logger.debug("Semantic cache put failed (non-fatal)", exc_info=True)
 
     # ── Steps 6-8: Hash, session chain, write ────────────────────────────────
     t_write = time.perf_counter()

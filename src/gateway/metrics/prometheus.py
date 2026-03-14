@@ -96,6 +96,18 @@ tool_loop_iterations = Histogram(
 )
 
 
+# B.4: Semantic cache
+cache_hits = Counter(
+    "gateway_cache_hits_total",
+    "Semantic cache hits (no LLM call made)",
+    ["model"],
+)
+cache_misses = Counter(
+    "gateway_cache_misses_total",
+    "Semantic cache misses (LLM call required)",
+    ["model"],
+)
+
 # Phase 26: Rate limiting + alerting
 budget_utilization_ratio = Gauge(
     "walacor_gateway_budget_utilization_ratio",
