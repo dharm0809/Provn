@@ -1611,6 +1611,27 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 provider, model, exc_info=True,
             )
 
+    # ── Step 2.9: PII Sanitization (pre-forward, non-streaming only) ─────────
+    # Strip high-risk PII from the prompt before it reaches the LLM.
+    # The mapping is stored in call.metadata["_pii_mapping"] and used post-
+    # response to restore original values (so the user sees their data back).
+    # Streaming restoration is deferred (TODO: streaming restore support).
+    if settings.pii_sanitization_enabled and call.prompt_text and not call.is_streaming:
+        from gateway.content.pii_sanitizer import PIISanitizer
+        _san_types = {t.strip() for t in settings.pii_sanitization_types.split(",") if t.strip()}
+        _sanitizer = PIISanitizer(sanitize_types=_san_types)
+        _san_result = _sanitizer.sanitize(call.prompt_text)
+        if _san_result.pii_count > 0:
+            call = dataclasses.replace(
+                call,
+                prompt_text=_san_result.sanitized_text,
+                metadata={**call.metadata, "_pii_mapping": _san_result.mapping},
+            )
+            logger.info(
+                "PII sanitized %d token(s) pre-forward provider=%s model=%s",
+                _san_result.pii_count, provider, model,
+            )
+
     # ── Adaptive concurrency gate ────────────────────────────────────────────
     _concurrency_acquired = False
     _concurrency_limiter: ConcurrencyLimiter | None = None
@@ -1749,6 +1770,23 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # original http_response (which still has finish_reason=tool_calls from the first forward).
     if tool_result.http_response is not None:
         http_response = tool_result.http_response
+
+    # ── Step 3.9: PII Restoration (post-response, replace=mode only) ─────────
+    # Restore original PII values in the model response so the user receives
+    # their data back.  Only runs when a mapping was stored pre-forward and
+    # mode is "replace" (redact mode intentionally omits restoration).
+    _pii_mapping = call.metadata.get("_pii_mapping")
+    if (
+        _pii_mapping
+        and settings.pii_sanitization_enabled
+        and settings.pii_sanitization_mode == "replace"
+        and model_response.content
+    ):
+        from gateway.content.pii_sanitizer import get_default_sanitizer
+        _restored_content = get_default_sanitizer().restore(model_response.content, _pii_mapping)
+        if _restored_content != model_response.content:
+            model_response = dataclasses.replace(model_response, content=_restored_content)
+            logger.debug("PII restored %d placeholder(s) in model response", len(_pii_mapping))
 
     # ── Step 4: Post-inference policy (G4) ───────────────────────────────────
     t_rp = time.perf_counter()

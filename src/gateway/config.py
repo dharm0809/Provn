@@ -70,6 +70,20 @@ class Settings(BaseSettings):
     toxicity_detection_enabled: bool = Field(default=False, description="Enable built-in toxicity detector (walacor.toxicity.v1)")
     toxicity_deny_terms: str = Field(default="", description="Comma-separated extra deny-list terms for toxicity detector")
 
+    # PII sanitization (strip-before-LLM, restore-after) — Stage B.1
+    pii_sanitization_enabled: bool = Field(
+        default=False,
+        description="Strip high-risk PII from prompt before sending to LLM, restore in response. Requires pii_detection_enabled. Off by default.",
+    )
+    pii_sanitization_mode: str = Field(
+        default="replace",
+        description="Sanitization mode: 'replace' (placeholder tokens) or 'redact' (remove entirely, no restore).",
+    )
+    pii_sanitization_types: str = Field(
+        default="SSN,CREDIT_CARD,AWS_ACCESS_KEY,API_KEY",
+        description="Comma-separated PII types to sanitize before forwarding to LLM.",
+    )
+
     # Phase 28: Prompt caching
     prompt_caching_enabled: bool = Field(
         default=True,
