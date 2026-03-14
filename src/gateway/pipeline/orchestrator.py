@@ -1011,6 +1011,29 @@ async def _attestation_check(
     return att_id, att_ctx, False, None, None
 
 
+def _get_policies_for_key(api_key: str | None, ctx) -> list | None:
+    """Return per-key policies if assigned, otherwise None (use global policies).
+
+    Per-key policies are fetched from the embedded control store using a SHA-256
+    hash of the raw API key (never stored in plaintext).  If no assignments exist
+    for this key, None is returned and the caller falls back to the global policy
+    cache.
+    """
+    if not api_key or ctx.control_store is None:
+        return None
+    import hashlib
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    policy_ids = ctx.control_store.get_key_policies(key_hash)
+    if not policy_ids:
+        return None
+    policies = []
+    for pid in policy_ids:
+        policy = ctx.control_store.get_policy(pid)
+        if policy:
+            policies.append(policy)
+    return policies if policies else None
+
+
 async def _pre_policy_check(
     request: Request, call: ModelCall, ctx, is_audit_only: bool,
     att_id: str, att_ctx: dict, whb: bool, reason: str | None, provider: str, model: str,
@@ -1036,7 +1059,32 @@ async def _pre_policy_check(
             )
         return 0, "opa_allow", whb, reason, None
 
-    # Builtin policy engine path
+    # Check for per-key policy override — use only the assigned policies for this key
+    # if any are configured; otherwise fall through to the global policy cache.
+    from gateway.auth.api_key import get_api_key_from_request
+    raw_api_key = get_api_key_from_request(request)
+    per_key_policies = _get_policies_for_key(raw_api_key, ctx)
+    if per_key_policies is not None:
+        logger.debug(
+            "Per-key policy override: key_hash=%.8s... policies=%d",
+            __import__("hashlib").sha256((raw_api_key or "").encode()).hexdigest(),
+            len(per_key_policies),
+        )
+        # Evaluate using only the per-key policy set via a temporary PolicyCache
+        from gateway.cache.policy_cache import PolicyCache
+        per_key_cache = PolicyCache(staleness_threshold_seconds=86400)
+        per_key_cache.set_policies(ctx.policy_cache.version if ctx.policy_cache else 0, per_key_policies)
+        _, pv, pr, err = evaluate_pre_inference(per_key_cache, call, att_id, att_ctx)
+        if err is not None:
+            if is_audit_only:
+                logger.warning("AUDIT_ONLY: Would have blocked (per-key policy) provider=%s model=%s", provider, model)
+                return pv, pr, True, reason or "policy", None
+            _set_disposition(request, "denied_policy")
+            _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_policy")
+            return pv, pr, whb, reason, err
+        return pv, pr, whb, reason, None
+
+    # Builtin policy engine path (global policies)
     _, pv, pr, err = evaluate_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
     if err is not None:
         if is_audit_only:

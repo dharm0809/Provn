@@ -493,6 +493,70 @@ async def control_discover_models(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ── Key-Policy Assignment endpoints ──────────────────────────
+
+async def control_get_key_policies(request: Request) -> JSONResponse:
+    """GET /v1/control/keys/{key_hash}/policies — list policies assigned to an API key."""
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    key_hash = request.path_params["key_hash"]
+    try:
+        policy_ids = store.get_key_policies(key_hash)
+        return JSONResponse({"api_key_hash": key_hash, "policy_ids": policy_ids})
+    except Exception as e:
+        logger.error("control_get_key_policies error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def control_set_key_policies(request: Request) -> JSONResponse:
+    """PUT /v1/control/keys/{key_hash}/policies — set (replace) all policy assignments for an API key."""
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    key_hash = request.path_params["key_hash"]
+    try:
+        body = await request.json()
+        policy_ids = body.get("policy_ids", [])
+        if not isinstance(policy_ids, list):
+            return JSONResponse({"error": "policy_ids must be a list"}, status_code=400)
+        store.set_key_policies(key_hash, policy_ids)
+        return JSONResponse({"api_key_hash": key_hash, "policy_ids": policy_ids, "status": "updated"})
+    except Exception as e:
+        logger.error("control_set_key_policies error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+async def control_remove_key_policy(request: Request) -> JSONResponse:
+    """DELETE /v1/control/keys/{key_hash}/policies/{policy_id} — remove a single policy from an API key."""
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    key_hash = request.path_params["key_hash"]
+    policy_id = request.path_params["policy_id"]
+    try:
+        removed = store.remove_key_policy(key_hash, policy_id)
+        if not removed:
+            return JSONResponse({"error": "Assignment not found"}, status_code=404)
+        return JSONResponse({"api_key_hash": key_hash, "policy_id": policy_id, "status": "removed"})
+    except Exception as e:
+        logger.error("control_remove_key_policy error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def control_list_key_policy_assignments(request: Request) -> JSONResponse:
+    """GET /v1/control/keys/assignments — list all key-policy assignments."""
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    try:
+        assignments = store.list_key_policy_assignments()
+        return JSONResponse({"assignments": assignments, "count": len(assignments)})
+    except Exception as e:
+        logger.error("control_list_key_policy_assignments error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── Policy Template endpoints ─────────────────────────────────
 
 async def control_list_templates(request: Request) -> JSONResponse:

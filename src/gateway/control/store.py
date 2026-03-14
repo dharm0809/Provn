@@ -84,6 +84,13 @@ CREATE TABLE IF NOT EXISTS model_pricing (
     updated_at TEXT NOT NULL,
     UNIQUE(model_pattern)
 );
+
+CREATE TABLE IF NOT EXISTS key_policy_assignments (
+    api_key_hash  TEXT NOT NULL,
+    policy_id     TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (api_key_hash, policy_id)
+);
 """
 
 
@@ -485,3 +492,60 @@ class ControlPlaneStore:
         """Format active policies matching SyncClient expectation."""
         all_policies = self.list_policies(tenant_id)
         return [p for p in all_policies if p.get("status") == "active"]
+
+    def get_policy(self, policy_id: str) -> dict[str, Any] | None:
+        """Return a single policy by ID, or None if not found."""
+        conn = self._ensure_conn()
+        cur = conn.execute("SELECT * FROM policies WHERE policy_id = ?", (policy_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["rules"] = json.loads(d.pop("rules_json", "[]"))
+        d["prompt_rules"] = json.loads(d.pop("prompt_rules_json", "[]"))
+        d["rag_rules"] = json.loads(d.pop("rag_rules_json", "[]"))
+        return d
+
+    # ── Key-Policy Assignment CRUD ────────────────────────────
+
+    def get_key_policies(self, api_key_hash: str) -> list[str]:
+        """Return list of policy_ids assigned to an API key."""
+        conn = self._ensure_conn()
+        rows = conn.execute(
+            "SELECT policy_id FROM key_policy_assignments WHERE api_key_hash = ?",
+            (api_key_hash,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def set_key_policies(self, api_key_hash: str, policy_ids: list[str]) -> None:
+        """Replace all policy assignments for a key."""
+        conn = self._ensure_conn()
+        with conn:
+            conn.execute(
+                "DELETE FROM key_policy_assignments WHERE api_key_hash = ?",
+                (api_key_hash,),
+            )
+            for pid in policy_ids:
+                conn.execute(
+                    "INSERT OR REPLACE INTO key_policy_assignments (api_key_hash, policy_id) VALUES (?, ?)",
+                    (api_key_hash, pid),
+                )
+
+    def remove_key_policy(self, api_key_hash: str, policy_id: str) -> bool:
+        """Remove a single policy from a key. Returns True if it existed."""
+        conn = self._ensure_conn()
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM key_policy_assignments WHERE api_key_hash = ? AND policy_id = ?",
+                (api_key_hash, policy_id),
+            )
+        return cursor.rowcount > 0
+
+    def list_key_policy_assignments(self) -> list[dict]:
+        """Return all key-policy assignments."""
+        conn = self._ensure_conn()
+        rows = conn.execute(
+            "SELECT api_key_hash, policy_id, created_at FROM key_policy_assignments"
+            " ORDER BY api_key_hash, policy_id"
+        ).fetchall()
+        return [{"api_key_hash": r[0], "policy_id": r[1], "created_at": r[2]} for r in rows]
