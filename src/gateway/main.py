@@ -209,6 +209,14 @@ async def catch_all_post(request: Request):
     return await handle_request(request)
 
 
+async def _attachment_notify(request: Request) -> Response:
+    from gateway.middleware.attachment_tracker import attachment_notify_handler
+    ctx = get_pipeline_context()
+    if ctx.attachment_cache is None:
+        return JSONResponse({"error": "Attachment tracking not enabled"}, status_code=503)
+    return await attachment_notify_handler(request, ctx.attachment_cache)
+
+
 async def _self_test() -> None:
     """Verify critical subsystems before accepting traffic. Raises on failure."""
     from datetime import datetime, timezone
@@ -881,6 +889,11 @@ async def on_startup() -> None:
             )
         # Event loop lag monitor (RED metrics)
         ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
+        # Multimodal audit: attachment notification cache
+        if settings.attachment_tracking_enabled:
+            from gateway.middleware.attachment_tracker import AttachmentNotificationCache
+            ctx.attachment_cache = AttachmentNotificationCache()
+            logger.info("Attachment tracking cache enabled")
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
     except Exception:
         logger.critical("Gateway startup FAILED — cleaning up partially initialized resources", exc_info=True)
@@ -1068,6 +1081,8 @@ def create_app() -> Starlette:
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
         Route("/v1/compliance/export", compliance_export, methods=["GET"]),
+        # Attachment tracking webhook
+        Route("/v1/attachments/notify", _attachment_notify, methods=["POST"]),
         # Proxy routes
         Route("/v1/chat/completions", catch_all_post, methods=["POST"]),
         Route("/v1/chat/completions/", catch_all_post, methods=["POST"]),

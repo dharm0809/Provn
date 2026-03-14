@@ -106,6 +106,9 @@ class Settings(BaseSettings):
         description="Enable Presidio NER PII analyzer (requires pip install 'walacor-gateway[presidio]')",
     )
 
+    # Multimodal audit: attachment tracking
+    attachment_tracking_enabled: bool = Field(default=True, description="Track file/image metadata in execution records")
+
     # Prompt injection detection
     prompt_guard_enabled: bool = Field(
         default=False,

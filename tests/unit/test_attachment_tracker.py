@@ -150,3 +150,51 @@ def test_extract_openwebui_files_empty_list():
 
     body = {"metadata": {"files": []}}
     assert extract_openwebui_files(body) == []
+
+
+import pytest
+import json
+
+
+@pytest.fixture(params=["asyncio"])
+def anyio_backend(request):
+    return request.param
+
+
+@pytest.mark.anyio
+async def test_attachment_notify_endpoint(anyio_backend):
+    """POST /v1/attachments/notify stores metadata in cache."""
+    from gateway.middleware.attachment_tracker import (
+        attachment_notify_handler,
+        AttachmentNotificationCache,
+    )
+    from starlette.requests import Request as StarletteRequest
+
+    cache = AttachmentNotificationCache(max_size=100, ttl_seconds=3600)
+
+    body = {
+        "filename": "contract.pdf",
+        "mimetype": "application/pdf",
+        "size_bytes": 245000,
+        "hash_sha3_512": "abc" * 42 + "ab",
+        "chat_id": "chat-123",
+        "user_id": "user-1",
+        "user_email": "user@test.com",
+        "upload_timestamp": "2026-03-14T12:00:00Z",
+    }
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/attachments/notify",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    request = StarletteRequest(scope, receive=None)
+    request._body = json.dumps(body).encode()
+
+    response = await attachment_notify_handler(request, cache)
+
+    assert response.status_code == 200
+    stored = cache.get("abc" * 42 + "ab")
+    assert stored is not None
+    assert stored["filename"] == "contract.pdf"

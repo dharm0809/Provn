@@ -9,6 +9,9 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,3 +111,19 @@ def extract_openwebui_files(body: dict[str, Any]) -> list[dict[str, Any]]:
             "file_id": f.get("id", ""),
         })
     return result
+
+
+async def attachment_notify_handler(request: Request, cache: AttachmentNotificationCache) -> JSONResponse:
+    """Handle POST /v1/attachments/notify from OpenWebUI pipeline plugin."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    file_hash = body.get("hash_sha3_512")
+    if not file_hash:
+        return JSONResponse({"error": "Missing hash_sha3_512"}, status_code=400)
+
+    cache.store(body)
+    logger.info("Attachment notification stored: filename=%s hash=%.16s...", body.get("filename", "?"), file_hash)
+    return JSONResponse({"stored": True})

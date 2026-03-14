@@ -74,6 +74,8 @@ class PipelineContext:
         self.batch_writer: Any | None = None
         # Phase 24: Merkle tree checkpoint task
         self.merkle_checkpoint_task: Any | None = None
+        # Multimodal audit: attachment notification cache
+        self.attachment_cache: Any | None = None
 
 
 _ctx = PipelineContext()
