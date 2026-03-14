@@ -151,6 +151,12 @@ class Settings(BaseSettings):
     token_budget_period: str = Field(default="monthly", description="Budget period: 'daily' or 'monthly'")
     token_budget_max_tokens: int = Field(default=0, description="Max tokens per period per tenant (0 = unlimited)")
 
+    # B.6: Token-based rate limiting
+    token_rate_limit_enabled: bool = Field(default=False, description="Enable token-based rate limiting (sliding window per scope)")
+    token_rate_limit_window: int = Field(default=60, description="Rate limit window in seconds")
+    token_rate_limit_max_tokens: int = Field(default=100000, description="Max tokens per window per scope")
+    token_rate_limit_scope: str = Field(default="user", description="Rate limit scope: user, key, tenant, global")
+
     # Phase 26: Rate limiting
     rate_limit_enabled: bool = Field(default=False, description="Enable request rate limiting")
     rate_limit_rpm: int = Field(default=60, description="Requests per minute limit")

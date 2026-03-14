@@ -1212,6 +1212,24 @@ def create_app() -> Starlette:
     app.middleware("http")(cors_middleware)
     # api_key runs inside completeness so denied_auth attempts are always recorded.
     app.middleware("http")(api_key_middleware)
+    # Token rate limiter runs inside api_key (auth already checked) but outside
+    # completeness so 429 responses are recorded as attempts.
+    settings = get_settings()
+    if settings.token_rate_limit_enabled:
+        from gateway.middleware.token_rate_limiter import TokenRateLimiter
+        app.add_middleware(
+            TokenRateLimiter,
+            max_tokens=settings.token_rate_limit_max_tokens,
+            window_seconds=settings.token_rate_limit_window,
+            scope=settings.token_rate_limit_scope,
+            enabled=True,
+        )
+        logger.info(
+            "Token rate limiter enabled: max_tokens=%d window=%ds scope=%s",
+            settings.token_rate_limit_max_tokens,
+            settings.token_rate_limit_window,
+            settings.token_rate_limit_scope,
+        )
     app.middleware("http")(completeness_middleware)
     app.add_event_handler("startup", on_startup)
     app.add_event_handler("shutdown", on_shutdown)
