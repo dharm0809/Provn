@@ -510,6 +510,18 @@ class Settings(BaseSettings):
         description="Ollama model for embeddings (empty = exact-match only)",
     )
 
+    # B.9: A/B model testing
+    ab_tests_json: str = Field(
+        default="",
+        description=(
+            'JSON array of A/B test configs. Example: '
+            '[{"name":"size-test","model_pattern":"qwen3:*",'
+            '"variants":[{"model":"qwen3:1.7b","weight":50},{"model":"qwen3:4b","weight":50}]}]. '
+            "When a request model matches model_pattern, a variant is selected by weight and "
+            "the model field is rewritten. ab_variant + ab_original_model are stored in metadata."
+        ),
+    )
+
     # Enterprise extension points (comma-separated Python dotted class paths)
     custom_startup_probes: str = Field(default="", description="Custom StartupProbe classes")
     custom_request_classifiers: str = Field(default="", description="Custom RequestClassifier classes")

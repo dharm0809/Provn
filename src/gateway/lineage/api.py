@@ -156,3 +156,23 @@ async def lineage_attachments(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage not enabled"}, status_code=503)
     attachments = ctx.lineage_reader.get_attachments(session_id)
     return JSONResponse({"session_id": session_id, "attachments": attachments})
+
+
+async def lineage_ab_test_results(request: Request) -> JSONResponse:
+    """GET /v1/lineage/ab-tests/{test_name}/results — compare A/B variant stats.
+
+    Returns per-variant request counts, average latency (ms), and total/average
+    token usage for all executions tagged with the given A/B test name.
+    """
+    reader = _reader_or_503()
+    if reader is None:
+        return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
+    test_name = request.path_params.get("test_name", "")
+    if not test_name:
+        return JSONResponse({"error": "test_name path parameter required"}, status_code=400)
+    try:
+        results = reader.get_ab_test_results(test_name)
+        return JSONResponse(results)
+    except Exception as exc:
+        logger.error("lineage_ab_test_results error: %s", exc, exc_info=True)
+        return JSONResponse({"error": str(exc)}, status_code=500)

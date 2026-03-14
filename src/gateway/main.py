@@ -32,6 +32,7 @@ from gateway.lineage.api import (
     lineage_trace,
     lineage_verify,
     lineage_attachments,
+    lineage_ab_test_results,
 )
 from gateway.lineage.cost import lineage_cost_summary
 from gateway.control.api import (
@@ -1175,6 +1176,7 @@ def create_app() -> Starlette:
         Route("/v1/lineage/verify/{session_id:path}", lineage_verify, methods=["GET"]),
         Route("/v1/lineage/cost", lineage_cost_summary, methods=["GET"]),
         Route("/v1/lineage/attachments", lineage_attachments, methods=["GET"]),
+        Route("/v1/lineage/ab-tests/{test_name}/results", lineage_ab_test_results, methods=["GET"]),
         # Control plane CRUD
         Route("/v1/control/attestations", control_list_attestations, methods=["GET"]),
         Route("/v1/control/attestations", control_upsert_attestation, methods=["POST"]),

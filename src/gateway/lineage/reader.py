@@ -485,3 +485,44 @@ class LineageReader:
             "errors": errors,
             "session_id": session_id,
         }
+
+    def get_ab_test_results(self, test_name: str) -> dict:
+        """Aggregate execution stats by model variant for a given A/B test.
+
+        Groups rows by model_id for all execution records that carry the
+        matching ``ab_variant`` metadata field, and returns per-variant
+        request counts, average latency, and total token usage so callers
+        can compare quality/cost/latency across variants.
+        """
+        conn = self._ensure_conn()
+        rows = conn.execute(
+            """
+            SELECT
+                json_extract(record, '$.model_id')                   AS model_id,
+                json_extract(record, '$.metadata.ab_variant')        AS ab_variant,
+                json_extract(record, '$.metadata.ab_original_model') AS original_model,
+                COUNT(*)                                             AS request_count,
+                AVG(json_extract(record, '$.latency_ms'))            AS avg_latency_ms,
+                SUM(json_extract(record, '$.total_tokens'))          AS total_tokens,
+                AVG(json_extract(record, '$.total_tokens'))          AS avg_tokens
+            FROM gateway_executions
+            WHERE json_extract(record, '$.metadata.ab_variant') = ?
+            GROUP BY model_id
+            ORDER BY request_count DESC
+            """,
+            (test_name,),
+        ).fetchall()
+
+        variants = []
+        for row in rows:
+            variants.append({
+                "model_id": row[0],
+                "ab_variant": row[1],
+                "original_model": row[2],
+                "request_count": row[3],
+                "avg_latency_ms": round(row[4], 1) if row[4] is not None else None,
+                "total_tokens": row[5],
+                "avg_tokens": round(row[6], 1) if row[6] is not None else None,
+            })
+
+        return {"test_name": test_name, "variants": variants, "total_requests": sum(v["request_count"] for v in variants)}

@@ -97,6 +97,21 @@ def _record_model_capability(model_id: str, supports_tools: bool) -> None:
     logger.info("Model capability cached: %s supports_tools=%s", model_id, supports_tools)
 
 
+# ── A/B test cache (B.9) ─────────────────────────────────────────────────────
+# Parsed once at first use from settings.ab_tests_json and reused for all
+# subsequent requests.  Thread-safe for asyncio (single writer, atomic assign).
+_AB_TESTS_CACHE: list | None = None
+
+
+def _get_ab_tests() -> list:
+    """Return parsed A/B test list, loading from config on first call."""
+    global _AB_TESTS_CACHE
+    if _AB_TESTS_CACHE is None:
+        from gateway.routing.ab_test import load_ab_tests
+        _AB_TESTS_CACHE = load_ab_tests(get_settings().ab_tests_json)
+    return _AB_TESTS_CACHE
+
+
 # ── Resilience layer (Phase 25) ──────────────────────────────────────────────
 
 async def _forward_with_resilience(adapter, call, request):
@@ -1651,6 +1666,29 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         request.state.walacor_user_id = caller_identity.user_id
 
     call = dataclasses.replace(call, metadata={**call.metadata, **extra})
+
+    # ── B.9: A/B model testing — rewrite model before adapter resolution ──────
+    if settings.ab_tests_json:
+        _ab_tests = _get_ab_tests()
+        if _ab_tests and call.model_id:
+            from gateway.routing.ab_test import resolve_ab_model
+            _original_model = call.model_id
+            _resolved_model, _test_name = resolve_ab_model(call.model_id, _ab_tests)
+            if _test_name is not None:
+                _ab_meta = {
+                    "ab_variant": _test_name,
+                    "ab_original_model": _original_model,
+                    "ab_selected_model": _resolved_model,
+                }
+                call = dataclasses.replace(
+                    call,
+                    model_id=_resolved_model,
+                    metadata={**call.metadata, **_ab_meta},
+                )
+                logger.info(
+                    "A/B test '%s': model rewritten %s → %s",
+                    _test_name, _original_model, _resolved_model,
+                )
 
     ctx = get_pipeline_context()
     provider = adapter.get_provider_name()
