@@ -13,7 +13,7 @@ from starlette.background import BackgroundTask
 
 from gateway.adapters.base import ModelCall, ModelResponse, ProviderAdapter
 from gateway.config import get_settings
-from gateway.content.stream_safety import check_stream_safety
+from gateway.content.stream_safety import check_stream_pii, check_stream_safety
 from gateway.pipeline.context import get_pipeline_context
 from gateway.metrics.prometheus import forward_duration
 
@@ -174,6 +174,7 @@ async def stream_with_tee(
     async def generate():
         buffer_size = 0
         accumulated_text = ""
+        pii_checked_len = 0
         _exc: BaseException | None = None
         try:
             async for chunk in upstream.aiter_bytes():
@@ -188,6 +189,10 @@ async def stream_with_tee(
                     logger.warning("S4 safety abort triggered mid-stream")
                     yield b'event: error\ndata: {"error": "content_safety", "message": "Response blocked by safety filter (S4)"}\n\n'
                     return
+                # Windowed PII check — warn only (can't un-send streamed chunks)
+                pii_found, pii_checked_len = check_stream_pii(accumulated_text, pii_checked_len)
+                if pii_found:
+                    logger.warning("PII detected in stream, logging warning")
                 yield chunk
         except BaseException as e:
             _exc = e
