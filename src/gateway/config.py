@@ -100,6 +100,12 @@ class Settings(BaseSettings):
         description="Llama Guard inference timeout in ms (inference takes 500ms–2s; default 5000ms).",
     )
 
+    # Phase 23: Presidio NER PII detection
+    presidio_pii_enabled: bool = Field(
+        default=False,
+        description="Enable Presidio NER PII analyzer (requires pip install 'walacor-gateway[presidio]')",
+    )
+
     # Prompt injection detection
     prompt_guard_enabled: bool = Field(
         default=False,

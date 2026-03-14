@@ -382,6 +382,18 @@ def _init_llama_guard(settings, ctx) -> None:
     )
 
 
+def _init_presidio_pii(settings, ctx) -> None:
+    """Optional Presidio NER PII analyzer (fail-open on missing deps)."""
+    try:
+        from gateway.content.presidio_pii import PresidioPIIAnalyzer
+        analyzer = PresidioPIIAnalyzer()
+        if analyzer._available:
+            ctx.content_analyzers.append(analyzer)
+            logger.info("Content analyzer loaded: walacor.presidio_pii.v1")
+    except Exception as e:
+        logger.warning("Failed to initialize Presidio PII analyzer: %s", e)
+
+
 def _init_prompt_guard(settings, ctx) -> None:
     """Prompt Guard 2 injection detection (CPU-based, 2-5ms)."""
     from gateway.content.prompt_guard import PromptGuardAnalyzer
@@ -744,6 +756,8 @@ async def on_startup() -> None:
             _init_llama_guard(settings, ctx)
         if settings.prompt_guard_enabled:
             _init_prompt_guard(settings, ctx)
+        if settings.presidio_pii_enabled:
+            _init_presidio_pii(settings, ctx)
         _init_alert_bus(settings, ctx)
         _init_budget_tracker(settings, ctx)
         _init_session_chain(settings, ctx)
