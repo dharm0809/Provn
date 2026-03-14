@@ -45,6 +45,7 @@ from gateway.metrics.prometheus import (
     rate_limit_hits_total, content_blocks_total,
     inflight_requests, response_status_total, forward_duration_by_model,
 )
+from gateway.metrics.anomaly import latency_detector
 
 logger = logging.getLogger(__name__)
 
@@ -1672,6 +1673,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     fwd_rtt = time.perf_counter() - t_fwd
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
     forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)
+    latency_detector.record(provider, fwd_rtt)
 
     # Release adaptive concurrency slot with observed forward RTT
     if _concurrency_acquired and _concurrency_limiter is not None:
