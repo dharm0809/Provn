@@ -27,7 +27,7 @@ class WALWriter:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self._path)
             self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=FULL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute(
                 """CREATE TABLE IF NOT EXISTS wal_records (
