@@ -70,12 +70,26 @@ func (p *Proxy) handleStreaming(
 	// Increase scanner buffer for large chunks.
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
 
+	// Batch flushes: flush at most every 50ms instead of every line.
+	const flushInterval = 50 * time.Millisecond
+	lastFlush := time.Now()
+	dirty := false
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Relay the line to the client immediately.
+		// Relay the line to the client.
 		fmt.Fprintf(w, "%s\n", line)
-		flusher.Flush()
+		dirty = true
+
+		// Check if this is a [DONE] marker — always flush immediately.
+		isDone := strings.HasPrefix(line, "data: ") && strings.TrimPrefix(line, "data: ") == "[DONE]"
+		now := time.Now()
+		if isDone || now.Sub(lastFlush) >= flushInterval {
+			flusher.Flush()
+			lastFlush = now
+			dirty = false
+		}
 
 		// Parse SSE data lines to accumulate content.
 		if strings.HasPrefix(line, "data: ") {
@@ -92,6 +106,11 @@ func (p *Proxy) handleStreaming(
 				completionTokens = ct
 			}
 		}
+	}
+
+	// Final flush for any remaining buffered data.
+	if dirty {
+		flusher.Flush()
 	}
 
 	if err := scanner.Err(); err != nil {

@@ -44,6 +44,11 @@ type Config struct {
 
 	// LLMForwardTimeoutSec is the timeout for forwarding requests to LLM providers in seconds (default 30).
 	LLMForwardTimeoutSec int
+
+	// PostInferenceAsync sends the response to the client before running
+	// post-inference evaluation. Trades the ability to block responses for
+	// lower latency. Default true.
+	PostInferenceAsync bool
 }
 
 // Load reads configuration from environment variables, applying defaults where unset.
@@ -60,6 +65,7 @@ func Load() *Config {
 		CacheEnabled:         envBool("PROXY_CACHE_ENABLED", false),
 		GRPCTimeoutSec:       envInt("PROXY_GRPC_TIMEOUT_SEC", 5),
 		LLMForwardTimeoutSec: envInt("PROXY_LLM_FORWARD_TIMEOUT_SEC", 30),
+		PostInferenceAsync:   envBool("PROXY_POST_INFERENCE_ASYNC", true),
 	}
 }
 

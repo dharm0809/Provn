@@ -116,8 +116,8 @@ class Settings(BaseSettings):
         description="Ollama URL for Llama Guard inference. Defaults to WALACOR_PROVIDER_OLLAMA_URL if empty.",
     )
     llama_guard_timeout_ms: int = Field(
-        default=5000,
-        description="Llama Guard inference timeout in ms (inference takes 500ms–2s; default 5000ms).",
+        default=1500,
+        description="Llama Guard inference timeout in ms (inference takes 500ms–2s; default 1500ms).",
     )
 
     # Phase 23: Presidio NER PII detection

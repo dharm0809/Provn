@@ -10,6 +10,7 @@ Phase 14 additions (steps 2.7 and 3.5):
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import fnmatch
 import logging
@@ -83,6 +84,21 @@ def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
 
 _model_capabilities: dict[str, dict[str, bool]] = {}
 # e.g.  {"gemma3:1b": {"supports_tools": False}, "qwen3:4b": {"supports_tools": True}}
+
+# PIISanitizer singleton — avoid recompiling regex patterns on every request.
+_pii_sanitizer_instance = None
+_pii_sanitizer_types: set[str] | None = None
+
+
+def _get_pii_sanitizer(settings):
+    """Return a cached PIISanitizer, recreating only if sanitize_types change."""
+    global _pii_sanitizer_instance, _pii_sanitizer_types
+    types = {t.strip() for t in settings.pii_sanitization_types.split(",") if t.strip()}
+    if _pii_sanitizer_instance is None or _pii_sanitizer_types != types:
+        from gateway.content.pii_sanitizer import PIISanitizer
+        _pii_sanitizer_instance = PIISanitizer(sanitize_types=types)
+        _pii_sanitizer_types = types
+    return _pii_sanitizer_instance
 
 
 def _model_supports_tools(model_id: str) -> bool | None:
@@ -302,10 +318,16 @@ def _inject_caller_role(att_ctx: dict, request) -> None:
 
 
 async def _peek_model_id(request: Request) -> str:
-    """Extract model field from request body without consuming it."""
+    """Extract model field from request body without consuming it.
+
+    Caches the parsed dict on request.state._parsed_body so downstream code
+    (e.g. request classifier) can reuse it without re-parsing.
+    """
     try:
         body = await request.body()
-        return str(json.loads(body).get("model") or "")
+        parsed = json.loads(body)
+        request.state._parsed_body = parsed
+        return str(parsed.get("model") or "")
     except (json.JSONDecodeError, AttributeError, UnicodeDecodeError):
         return ""
     except Exception:
@@ -1260,15 +1282,55 @@ async def _run_pre_checks(
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Policy cache not configured"}, status_code=503))
 
-    t_step = time.perf_counter()
-    pv, pr, whb, reason, err = await _pre_policy_check(
-        request, call, ctx, is_audit_only, att_id, att_ctx, whb, reason, provider, model
-    )
-    step_timings["policy_ms"] = round((time.perf_counter() - t_step) * 1000, 1)
-    if err is not None:
-        return _PreCheckResult(error=err)
+    # WAL backpressure is sync and fast — check before launching concurrent tasks.
+    if not is_audit_only:
+        wal_err = _wal_backpressure_check(request, ctx, settings, provider, model)
+        if wal_err is not None:
+            return _PreCheckResult(error=wal_err)
 
-    # Shadow policy evaluation (observe-only)
+    # Run policy, budget, and rate-limit checks concurrently.
+    # Policy depends on att_ctx (from attestation above) but is independent of budget/rate-limit.
+    t_parallel = time.perf_counter()
+
+    async def _policy_task():
+        t = time.perf_counter()
+        result = await _pre_policy_check(
+            request, call, ctx, is_audit_only, att_id, att_ctx, whb, reason, provider, model
+        )
+        return result, round((time.perf_counter() - t) * 1000, 1)
+
+    async def _budget_task():
+        t = time.perf_counter()
+        result = await _budget_check(
+            request, ctx, settings, is_audit_only, call, whb, reason, provider, model
+        )
+        return result, round((time.perf_counter() - t) * 1000, 1)
+
+    async def _rate_limit_task():
+        if settings.rate_limit_enabled and ctx.rate_limiter:
+            return await _rate_limit_check(request, ctx, settings, call, provider, model)
+        return None
+
+    policy_res, budget_res, rl_err = await asyncio.gather(
+        _policy_task(), _budget_task(), _rate_limit_task()
+    )
+
+    (pv, pr, whb, reason, pol_err), pol_ms = policy_res
+    step_timings["policy_ms"] = pol_ms
+    if pol_err is not None:
+        return _PreCheckResult(error=pol_err)
+
+    (budget_rem, budget_est, whb, reason, bud_err), bud_ms = budget_res
+    step_timings["budget_ms"] = bud_ms
+    if bud_err is not None:
+        return _PreCheckResult(error=bud_err)
+
+    if rl_err is not None:
+        return _PreCheckResult(error=rl_err)
+
+    step_timings["parallel_checks_ms"] = round((time.perf_counter() - t_parallel) * 1000, 1)
+
+    # Shadow policy evaluation (observe-only, non-blocking)
     if settings.shadow_policy_enabled and ctx.control_store is not None:
         try:
             shadow_policies = ctx.control_store.list_shadow_policies(settings.gateway_tenant_id)
@@ -1278,25 +1340,6 @@ async def _run_pre_checks(
                 call.metadata["shadow_policy_results"] = shadow_results
         except Exception as e:
             logger.warning("Shadow policy evaluation failed: %s", e)
-
-    if not is_audit_only:
-        wal_err = _wal_backpressure_check(request, ctx, settings, provider, model)
-        if wal_err is not None:
-            return _PreCheckResult(error=wal_err)
-
-    t_step = time.perf_counter()
-    budget_rem, budget_est, whb, reason, err = await _budget_check(
-        request, ctx, settings, is_audit_only, call, whb, reason, provider, model
-    )
-    step_timings["budget_ms"] = round((time.perf_counter() - t_step) * 1000, 1)
-    if err is not None:
-        return _PreCheckResult(error=err)
-
-    # Phase 26: Rate limit check
-    if settings.rate_limit_enabled and ctx.rate_limiter:
-        rl_err = await _rate_limit_check(request, ctx, settings, call, provider, model)
-        if rl_err is not None:
-            return _PreCheckResult(error=rl_err)
 
     tool_strategy = _select_tool_strategy(adapter, settings)
     if tool_strategy == "active" and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
@@ -1670,11 +1713,14 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     if _meta_rt:
         extra["request_type"] = _meta_rt
     elif _rc:
-        body_dict = {}
-        try:
-            body_dict = json.loads(call.raw_body) if call.raw_body else {}
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+        # Use cached parsed body from request.state if available (set by _peek_model_id),
+        # otherwise parse once and cache for future use.
+        body_dict = getattr(request.state, "_parsed_body", None)
+        if body_dict is None:
+            try:
+                body_dict = json.loads(call.raw_body) if call.raw_body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body_dict = {}
         extra["request_type"] = _rc.classify(
             call.prompt_text or "", dict(request.headers), body_dict)
     else:
@@ -1793,9 +1839,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # response to restore original values (so the user sees their data back).
     # Streaming restoration is deferred (TODO: streaming restore support).
     if settings.pii_sanitization_enabled and call.prompt_text and not call.is_streaming:
-        from gateway.content.pii_sanitizer import PIISanitizer
-        _san_types = {t.strip() for t in settings.pii_sanitization_types.split(",") if t.strip()}
-        _sanitizer = PIISanitizer(sanitize_types=_san_types)
+        _sanitizer = _get_pii_sanitizer(settings)
         _san_result = _sanitizer.sanitize(call.prompt_text)
         if _san_result.pii_count > 0:
             call = dataclasses.replace(

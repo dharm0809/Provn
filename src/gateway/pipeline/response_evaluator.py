@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from cachetools import LRUCache
 from starlette.responses import JSONResponse
 
 from gateway.adapters.base import ModelResponse
@@ -42,10 +43,9 @@ class ContentBlockDetail:
         }
 
 # ---------------------------------------------------------------------------
-# Content analysis cache — SHA256-keyed, bounded to prevent unbounded growth
+# Content analysis cache — SHA256-keyed LRU to prevent unbounded growth
 # ---------------------------------------------------------------------------
-_analysis_cache: dict[str, list] = {}
-_CACHE_MAX = 1000
+_analysis_cache: LRUCache = LRUCache(maxsize=5000)
 
 
 def clear_analysis_cache() -> None:
@@ -88,7 +88,7 @@ async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict
     """Run all analyzers on arbitrary text (tool outputs, injected content, etc.).
 
     Results are cached by SHA256 hash of *text* so repeated identical content
-    skips re-running analyzers.  Cache is bounded at ``_CACHE_MAX`` entries to
+    skips re-running analyzers.  Cache is bounded at 5000 entries (LRU) to
     prevent unbounded memory growth.
 
     Returns a list of decision dicts -- same shape as analyzer_decisions in
@@ -115,8 +115,7 @@ async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict
         for d in results if d is not None
     ]
 
-    if len(_analysis_cache) < _CACHE_MAX:
-        _analysis_cache[cache_key] = decisions
+    _analysis_cache[cache_key] = decisions
 
     return decisions
 

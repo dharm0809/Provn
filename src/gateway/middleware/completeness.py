@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from starlette.requests import Request
@@ -45,17 +46,22 @@ async def completeness_middleware(request: Request, call_next) -> Response:
             execution_id = getattr(request.state, "walacor_execution_id", execution_id_var.get())
             user_id = getattr(request.state, "walacor_user_id", None)
             try:
-                await ctx.storage.write_attempt({
-                    "request_id": rid,
-                    "tenant_id": tenant_id,
-                    "path": request.url.path,
-                    "disposition": disposition,
-                    "status_code": status_code,
-                    "provider": provider,
-                    "model_id": model_id,
-                    "execution_id": execution_id,
-                    "user": user_id,
-                })
+                await asyncio.wait_for(
+                    ctx.storage.write_attempt({
+                        "request_id": rid,
+                        "tenant_id": tenant_id,
+                        "path": request.url.path,
+                        "disposition": disposition,
+                        "status_code": status_code,
+                        "provider": provider,
+                        "model_id": model_id,
+                        "execution_id": execution_id,
+                        "user": user_id,
+                    }),
+                    timeout=5.0,
+                )
                 gateway_attempts_total.labels(disposition=disposition).inc()
+            except asyncio.TimeoutError:
+                logger.warning("write_attempt timed out after 5s — skipping")
             except Exception as e:
                 logger.warning("Failed to write gateway_attempt: %s", e)

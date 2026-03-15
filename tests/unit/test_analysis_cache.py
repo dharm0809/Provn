@@ -47,8 +47,14 @@ async def test_different_text_no_cache_hit():
 
 @pytest.mark.anyio
 async def test_cache_bounded_at_max():
-    """Cache should not grow beyond _CACHE_MAX entries."""
-    from gateway.pipeline.response_evaluator import _CACHE_MAX
+    """Cache should not grow beyond its maxsize (LRU eviction)."""
+    _analysis_cache.clear()
+    # Monkey-patch: create a small LRU cache to test eviction
+    import gateway.pipeline.response_evaluator as rev
+    from cachetools import LRUCache
+    small_cache = LRUCache(maxsize=10)
+    original_cache = rev._analysis_cache
+    rev._analysis_cache = small_cache
 
     analyzer = MagicMock()
     analyzer.analyzer_id = "test"
@@ -56,15 +62,16 @@ async def test_cache_bounded_at_max():
     analyzer.analyze = AsyncMock(return_value=MagicMock(
         verdict=Verdict.PASS, confidence=1.0, analyzer_id="test", category="", reason=""))
 
-    # Fill cache to the max
-    for i in range(_CACHE_MAX):
-        await analyze_text(f"text-{i}", [analyzer])
+    try:
+        for i in range(10):
+            await analyze_text(f"text-{i}", [analyzer])
+        assert len(small_cache) == 10
 
-    assert len(_analysis_cache) == _CACHE_MAX
-
-    # One more should not grow the cache beyond _CACHE_MAX
-    await analyze_text("overflow-text", [analyzer])
-    assert len(_analysis_cache) == _CACHE_MAX
+        # One more triggers LRU eviction — size stays at 10
+        await analyze_text("overflow-text", [analyzer])
+        assert len(small_cache) == 10
+    finally:
+        rev._analysis_cache = original_cache
 
 
 @pytest.mark.anyio

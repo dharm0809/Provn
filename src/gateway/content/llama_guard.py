@@ -93,7 +93,7 @@ class LlamaGuardAnalyzer(ContentAnalyzer):
         self,
         ollama_url: str,
         model: str = "llama-guard3",
-        timeout_ms: int = 5000,
+        timeout_ms: int = 1500,
         http_client: httpx.AsyncClient | None = None,
         role: str = "Agent",
     ) -> None:

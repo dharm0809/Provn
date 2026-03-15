@@ -74,7 +74,28 @@ func (p *Proxy) handleNonStreaming(
 	// Extract content and token counts from the response.
 	content, thinkingContent, promptTokens, completionTokens := extractResponseContent(respBody, provider)
 
-	// --- Post-inference evaluation (synchronous for non-streaming) ---
+	if p.postInferenceAsync {
+		// --- Async mode: send response immediately, run post-inference in background ---
+		// This trades the ability to block responses for lower latency.
+		for _, h := range []string{"Content-Type", "X-Request-Id"} {
+			if v := resp.Header.Get(h); v != "" {
+				w.Header().Set(h, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+
+		// Fire-and-forget: post-inference + record in a single goroutine.
+		go p.asyncPostInferenceAndRecord(
+			modelID, provider, promptText, content, thinkingContent,
+			respBody, preResult, latencyMs, promptTokens, completionTokens,
+			sessionID, userID, tenantID,
+		)
+
+		return nil
+	}
+
+	// --- Sync mode: evaluate post-inference before sending response ---
 	postResult, postErr := p.brain.EvaluatePostInference(r.Context(), &pb.PostInferenceRequest{
 		Content:          content,
 		ThinkingContent:  thinkingContent,
@@ -134,6 +155,88 @@ func (p *Proxy) handleNonStreaming(
 	)
 
 	return nil
+}
+
+// asyncPostInferenceAndRecord runs post-inference evaluation in the background
+// after the response has already been sent to the client. If post-inference
+// would have blocked the response, it logs a warning (response already sent).
+// This is the "speed over blocking" tradeoff when postInferenceAsync is enabled.
+func (p *Proxy) asyncPostInferenceAndRecord(
+	modelID, provider, promptText, content, thinkingContent string,
+	respBody []byte,
+	preResult *pb.PreInferenceResult,
+	latencyMs float64,
+	promptTokens, completionTokens int32,
+	sessionID, userID, tenantID string,
+) {
+	defer func() {
+		if rv := recover(); rv != nil {
+			slog.Error("panic in async post-inference goroutine", "recover", rv)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	postResult, err := p.brain.EvaluatePostInference(ctx, &pb.PostInferenceRequest{
+		Content:          content,
+		ThinkingContent:  thinkingContent,
+		ModelId:          modelID,
+		Provider:         provider,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		LatencyMs:        latencyMs,
+		SessionId:        sessionID,
+	})
+	if err != nil {
+		slog.Error("async post-inference evaluation failed", "error", err)
+	}
+
+	policyResult := "pass"
+	if postResult != nil {
+		policyResult = postResult.PolicyResult
+		if postResult.Blocked {
+			slog.Warn("post-inference would have blocked response (already sent to client)",
+				"model", modelID, "reason", postResult.BlockReason,
+				"session_id", sessionID, "user_id", userID,
+			)
+			policyResult = "block"
+		}
+	}
+
+	// Record execution.
+	_, recErr := p.brain.RecordExecution(ctx, &pb.ExecutionRecord{
+		ModelId:          modelID,
+		Provider:         provider,
+		PromptText:       promptText,
+		ResponseContent:  content,
+		ThinkingContent:  thinkingContent,
+		AttestationId:    preResult.AttestationId,
+		PolicyVersion:    preResult.PolicyVersion,
+		PolicyResult:     policyResult,
+		LatencyMs:        latencyMs,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		SessionId:        sessionID,
+		User:             userID,
+		TenantId:         tenantID,
+	})
+	if recErr != nil {
+		slog.Error("record execution failed", "error", recErr)
+	}
+
+	// Cache put if enabled and response allowed.
+	if p.cacheEnabled && content != "" && (postResult == nil || !postResult.Blocked) {
+		_, cacheErr := p.brain.CachePut(ctx, &pb.CachePutRequest{
+			PromptText:   promptText,
+			ModelId:      modelID,
+			ResponseBody: content,
+		})
+		if cacheErr != nil {
+			slog.Debug("cache put failed", "error", cacheErr)
+		}
+	}
 }
 
 // recordExecution persists an audit record via the sidecar.

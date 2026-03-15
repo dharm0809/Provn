@@ -25,10 +25,11 @@ type Proxy struct {
 	cacheEnabled bool
 	forwardTimeout time.Duration
 	maxBodySize  int64
+	postInferenceAsync bool // when true, send response before post-inference evaluation
 }
 
 // NewProxy creates a proxy handler with the given configuration.
-func NewProxy(brainClient *brain.Client, providers map[string]string, cacheEnabled bool, forwardTimeoutSec int, maxBodySize int64) *Proxy {
+func NewProxy(brainClient *brain.Client, providers map[string]string, cacheEnabled bool, forwardTimeoutSec int, maxBodySize int64, postInferenceAsync bool) *Proxy {
 	if forwardTimeoutSec <= 0 {
 		forwardTimeoutSec = 30
 	}
@@ -37,17 +38,20 @@ func NewProxy(brainClient *brain.Client, providers map[string]string, cacheEnabl
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		MaxConnsPerHost:       50,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
 	return &Proxy{
-		brain:        brainClient,
-		providers:    providers,
-		cacheEnabled: cacheEnabled,
-		forwardTimeout: time.Duration(forwardTimeoutSec) * time.Second,
-		maxBodySize:  maxBodySize,
+		brain:              brainClient,
+		providers:          providers,
+		cacheEnabled:       cacheEnabled,
+		forwardTimeout:     time.Duration(forwardTimeoutSec) * time.Second,
+		maxBodySize:        maxBodySize,
+		postInferenceAsync: postInferenceAsync,
 		client: &http.Client{
 			Transport: transport,
 			// No global timeout — streaming responses can run long.

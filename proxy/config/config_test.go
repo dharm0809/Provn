@@ -14,6 +14,7 @@ func TestLoadDefaults(t *testing.T) {
 		"PROXY_CACHE_ENABLED", "PROXY_GRPC_TIMEOUT_SEC",
 		"PROXY_LLM_FORWARD_TIMEOUT_SEC",
 		"PROXY_READ_TIMEOUT_SEC", "PROXY_WRITE_TIMEOUT_SEC",
+		"PROXY_POST_INFERENCE_ASYNC",
 	} {
 		os.Unsetenv(k)
 	}
@@ -40,6 +41,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.LLMForwardTimeoutSec != 30 {
 		t.Errorf("LLMForwardTimeoutSec = %d, want 30", cfg.LLMForwardTimeoutSec)
+	}
+	if !cfg.PostInferenceAsync {
+		t.Error("PostInferenceAsync should default to true")
 	}
 	if cfg.ReadTimeout != 30*time.Second {
 		t.Errorf("ReadTimeout = %v, want 30s", cfg.ReadTimeout)
