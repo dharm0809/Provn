@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Gateway Chat — qwen3:4b via Walacor</title>
+  <title>Gateway Chat — qwen3:1.7b via Walacor</title>
   <style>
     * { box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
@@ -20,7 +20,7 @@
 </head>
 <body>
   <h1>Gateway Chat</h1>
-  <p class="sub">Sends requests to the Walacor Gateway at <code>http://localhost:8000</code> → Ollama (qwen3:4b). Make sure the gateway and Ollama are running.</p>
+  <p class="sub">Sends requests to the Walacor Gateway at <code>http://localhost:8000</code> → Ollama (qwen3:1.7b). Make sure the gateway and Ollama are running.</p>
   <div id="log"></div>
   <div id="input">
     <input type="text" id="msg" placeholder="Type a message..." autocomplete="off" />
@@ -29,7 +29,7 @@
 
   <script>
     const API_BASE = 'http://localhost:8000';
-    const MODEL = 'qwen3:4b';
+    const MODEL = 'qwen3:1.7b';
     const logEl = document.getElementById('log');
     const inputEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');

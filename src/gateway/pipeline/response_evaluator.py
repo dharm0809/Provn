@@ -128,7 +128,7 @@ async def evaluate_post_inference(
     """
     Run all content analyzers on model_response.content (or thinking_content as fallback).
 
-    When thinking strip moves all model output to thinking_content (e.g. qwen3:4b),
+    When thinking strip moves all model output to thinking_content (e.g. qwen3:1.7b),
     content may be empty. We analyse whatever text the model actually produced so that
     safety classifiers (Llama Guard, PII, toxicity) still fire.
 

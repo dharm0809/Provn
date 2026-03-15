@@ -420,18 +420,6 @@ def _init_presidio_pii(settings, ctx) -> None:
         logger.warning("Failed to initialize Presidio PII analyzer: %s", e)
 
 
-def _init_image_safety(settings, ctx):
-    """Initialize image safety analyzer if enabled."""
-    from gateway.content.image_safety import ImageSafetyAnalyzer
-    ollama_url = settings.llama_guard_ollama_url or settings.provider_ollama_url or "http://localhost:11434"
-    ctx.image_safety_analyzer = ImageSafetyAnalyzer(
-        ollama_url=ollama_url,
-        model=settings.image_safety_model,
-        timeout_ms=settings.image_safety_timeout_ms,
-        http_client=ctx.http_client,
-    )
-    logger.info("Image safety analyzer enabled: model=%s timeout=%dms", settings.image_safety_model, settings.image_safety_timeout_ms)
-
 
 def _init_image_ocr(settings, ctx):
     """Initialize image OCR analyzer if enabled."""
@@ -904,8 +892,6 @@ async def on_startup() -> None:
             _init_presidio_pii(settings, ctx)
         if settings.dlp_enabled:
             _init_dlp_classifier(settings, ctx)
-        if settings.image_safety_enabled:
-            _init_image_safety(settings, ctx)
         if settings.image_ocr_enabled:
             _init_image_ocr(settings, ctx)
         _init_alert_bus(settings, ctx)

@@ -2,7 +2,7 @@
 """Walacor Gateway quickstart demo.
 
 Demonstrates:
-1. Pulling qwen3:4b from Ollama (if not already cached)
+1. Pulling qwen3:1.7b from Ollama (if not already cached)
 2. Sending a chat request through the gateway
 3. Showing the audit record fields, execution_id, and tool interactions
 
@@ -24,7 +24,7 @@ import urllib.request
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-DEMO_MODEL = os.environ.get("DEMO_MODEL", "qwen3:4b")
+DEMO_MODEL = os.environ.get("DEMO_MODEL", "qwen3:1.7b")
 
 
 def _request(url: str, method: str = "GET", data: dict | None = None, timeout: int = 30) -> tuple[int, dict]:

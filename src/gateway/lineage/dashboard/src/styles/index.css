@@ -1383,7 +1383,6 @@ html[data-theme="light"] .form-select {
   border-radius: 6px;
   padding: 0.75rem;
 }
-.attachment-card.attachment-image { border-left-color: var(--gold, #f5a623); }
 .attachment-name { font-weight: 600; margin-bottom: 0.25rem; }
 .attachment-meta { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.25rem; align-items: center; }
 .attachment-hash { font-family: var(--mono); font-size: 0.75rem; color: var(--text-muted, #888); }

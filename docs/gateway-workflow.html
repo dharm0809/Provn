@@ -558,7 +558,7 @@
   <div class="loop-flow">
     <div class="loop-box model">
       <div class="lbl">LLM</div>
-      <div class="val">qwen3:4b</div>
+      <div class="val">qwen3:1.7b</div>
     </div>
     <div>
       <div class="loop-arrow">&rarr;</div>
@@ -844,7 +844,7 @@
 
 <div style="display: flex; gap: 16px; flex-wrap: wrap;">
   <div style="flex: 1; min-width: 320px; background: #111827; border: 1px solid #10b981; border-radius: 12px; padding: 24px;">
-    <div style="font-size: 14px; font-weight: 600; color: #10b981; margin-bottom: 8px;">qwen3:4b — supports tools</div>
+    <div style="font-size: 14px; font-weight: 600; color: #10b981; margin-bottom: 8px;">qwen3:1.7b — supports tools</div>
     <div style="font-size: 13px; color: #c0c8d4; line-height: 1.7;">
       1st request: Gateway injects tools &rarr; model accepts &rarr; gateway caches <code style="background:#1e2a3a;padding:1px 4px;border-radius:3px;font-size:11px;">supports_tools=True</code><br>
       2nd+ request: Gateway knows tools work &rarr; injects tools &rarr; full tool loop available
@@ -868,12 +868,12 @@
 <span class="comment">// Every LLM interaction produces this record</span><br>
 {<br>
 &nbsp;&nbsp;<span class="key">"execution_id"</span>: <span class="str">"550e8400-e29b-..."</span>,<br>
-&nbsp;&nbsp;<span class="key">"model_id"</span>: <span class="str">"qwen3:4b"</span>,<br>
+&nbsp;&nbsp;<span class="key">"model_id"</span>: <span class="str">"qwen3:1.7b"</span>,<br>
 &nbsp;&nbsp;<span class="key">"provider"</span>: <span class="str">"ollama"</span>,<br>
 &nbsp;&nbsp;<span class="key">"prompt_text"</span>: <span class="str">"What is Python?"</span>,<br>
 &nbsp;&nbsp;<span class="key">"response_text"</span>: <span class="str">"Python is a programming..."</span>,<br>
 &nbsp;&nbsp;<span class="key">"thinking_content"</span>: <span class="str">"&lt;think&gt;The user asked about...&lt;/think&gt;"</span>, <span class="comment">// reasoning stripped from response</span><br>
-&nbsp;&nbsp;<span class="key">"attestation_id"</span>: <span class="str">"self-attested:qwen3:4b"</span>,<br>
+&nbsp;&nbsp;<span class="key">"attestation_id"</span>: <span class="str">"self-attested:qwen3:1.7b"</span>,<br>
 &nbsp;&nbsp;<span class="key">"policy_result"</span>: <span class="str">"pass"</span>,<br>
 &nbsp;&nbsp;<span class="key">"content_analysis"</span>: [<br>
 &nbsp;&nbsp;&nbsp;&nbsp;{ <span class="key">"analyzer"</span>: <span class="str">"pii"</span>, <span class="key">"verdict"</span>: <span class="str">"pass"</span> },<br>

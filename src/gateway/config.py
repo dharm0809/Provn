@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     # Phase 17: Llama Guard safety classifier
     llama_guard_enabled: bool = Field(
         default=True,
-        description="Enable Llama Guard 3 content analyzer (requires ollama pull llama-guard3).",
+        description="Enable Llama Guard 3 content analyzer (requires ollama pull llama-guard3:1b).",
     )
     llama_guard_model: str = Field(
         default="llama-guard3:1b",
@@ -126,14 +126,12 @@ class Settings(BaseSettings):
         description="Enable Presidio NER PII analyzer (requires pip install 'walacor-gateway[presidio]')",
     )
 
+    # System task filtering: skip audit for OpenWebUI auto-generated requests (tags, suggestions, titles)
+    skip_system_task_audit: bool = Field(default=True, description="Skip audit records for system-generated requests (tag/title/suggestion generation)")
+
     # Multimodal audit: attachment tracking
     attachment_tracking_enabled: bool = Field(default=True, description="Track file/image metadata in execution records")
 
-    # Multimodal audit: image safety classification
-    image_safety_enabled: bool = Field(default=False, description="Enable LlamaGuard Vision image safety classification")
-    image_safety_model: str = Field(default="llama-guard3-vision:11b", description="Ollama model for image safety")
-    image_safety_timeout_ms: int = Field(default=10000, description="Image safety classification timeout in ms")
-    image_safety_max_images: int = Field(default=5, description="Max images to analyze per request (skip if exceeded)")
     # Multimodal audit: image OCR + PII detection
     image_ocr_enabled: bool = Field(default=False, description="Enable Tesseract OCR + PII detection on images")
     image_ocr_max_size_mb: int = Field(default=10, description="Skip OCR for images larger than this (MB)")

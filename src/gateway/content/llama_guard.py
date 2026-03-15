@@ -92,7 +92,7 @@ class LlamaGuardAnalyzer(ContentAnalyzer):
     def __init__(
         self,
         ollama_url: str,
-        model: str = "llama-guard3",
+        model: str = "llama-guard3:1b",
         timeout_ms: int = 1500,
         http_client: httpx.AsyncClient | None = None,
         role: str = "Agent",

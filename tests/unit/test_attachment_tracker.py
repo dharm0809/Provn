@@ -229,7 +229,6 @@ def test_build_execution_record_with_file_metadata():
         file_metadata=file_metadata,
     )
     assert record["file_metadata"] == file_metadata
-    assert record["image_analysis"] == []
 
 
 def test_lineage_reader_get_attachments(tmp_path):
@@ -247,7 +246,6 @@ def test_lineage_reader_get_attachments(tmp_path):
         "execution_id": "exec-1",
         "session_id": "sess-1",
         "file_metadata": [{"filename": "test.pdf", "hash_sha3_512": "abc", "mimetype": "application/pdf", "size_bytes": 1000}],
-        "image_analysis": [],
     }
     conn.execute("INSERT INTO wal_records VALUES (?, ?, ?, 0, NULL)", ("exec-1", json.dumps(record), "2026-03-14T00:00:00Z"))
     conn.commit()

@@ -201,7 +201,7 @@ Not all models support tool calling. The gateway detects this automatically:
 
 | Model | 1st Request | 2nd+ Request |
 |---|---|---|
-| **qwen3:4b** (supports tools) | Gateway injects tools → model accepts → cache `supports_tools=True` | Tools injected, full tool loop available |
+| **qwen3:1.7b** (supports tools) | Gateway injects tools → model accepts → cache `supports_tools=True` | Tools injected, full tool loop available |
 | **gemma3:1b** (no tool support) | Gateway injects tools → model returns 400 → strip tools, retry, cache `supports_tools=False` | Tools skipped entirely, no wasted round-trip |
 
 Source: `orchestrator.py:55-68` (`_model_capabilities` registry)
@@ -302,12 +302,12 @@ Every LLM interaction produces an execution record:
 ```json
 {
   "execution_id": "550e8400-e29b-...",
-  "model_id": "qwen3:4b",
+  "model_id": "qwen3:1.7b",
   "provider": "ollama",
   "prompt_text": "What is Python?",
   "response_text": "Python is a programming...",
   "thinking_content": "<think>The user asked about...</think>",
-  "attestation_id": "self-attested:qwen3:4b",
+  "attestation_id": "self-attested:qwen3:1.7b",
   "policy_version": 2,
   "policy_result": "pass",
   "content_analysis": [

@@ -26,7 +26,7 @@ docker compose -f deploy/docker-compose.yml \
 
 Pull a model then start chatting:
 ```bash
-docker exec -it $(docker compose ps -q ollama) ollama pull qwen3:4b
+docker exec -it $(docker compose ps -q ollama) ollama pull qwen3:1.7b
 ```
 
 Every message you send appears in the governance dashboard within seconds with its chain sequence, policy verdict, and PII status.
@@ -93,7 +93,7 @@ After sending a few messages, visit http://localhost:8002/lineage/ to see:
 ## Troubleshooting
 
 **OpenWebUI shows no models**
-Gateway auto-discovers models from Ollama. If the model selector is empty, ensure Ollama has at least one model pulled: `ollama pull qwen3:4b`. The model list refreshes every 60 seconds.
+Gateway auto-discovers models from Ollama. If the model selector is empty, ensure Ollama has at least one model pulled: `ollama pull qwen3:1.7b`. The model list refreshes every 60 seconds.
 
 **Conversations don't appear in the dashboard**
 Check that `ENABLE_FORWARD_USER_INFO_HEADERS=true` and `ENABLE_DIRECT_CONNECTIONS=false` are set. Verify Gateway is healthy: `curl http://gateway:8000/health`.

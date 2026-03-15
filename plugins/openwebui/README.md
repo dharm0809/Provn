@@ -18,7 +18,7 @@ After each assistant message:
 ```
 ─── Walacor Governance ─────────────────────────
 🔒 Chain #4  ✅ Policy: pass  🛡️ Clean  💰 8,200 tokens remaining (18% used)
-Execution: abc123ef... | Model: qwen3:4b (attested)
+Execution: abc123ef... | Model: qwen3:1.7b (attested)
 ```
 
 Operational alerts appear as system messages when budget thresholds are

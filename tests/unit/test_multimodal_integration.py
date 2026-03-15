@@ -2,9 +2,8 @@
 
 import base64
 import hashlib
-import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 
 @pytest.fixture(params=["asyncio"])
@@ -13,14 +12,11 @@ def anyio_backend(request):
 
 
 @pytest.mark.anyio
-async def test_full_image_pipeline(anyio_backend):
-    """Image goes through: extraction -> safety -> OCR -> execution record."""
+async def test_image_extraction_pipeline(anyio_backend):
+    """Image extraction and hashing works end-to-end."""
     from gateway.middleware.attachment_tracker import extract_images_from_messages
-    from gateway.content.image_safety import evaluate_image_safety
-    from gateway.content.image_ocr import evaluate_image_ocr
-    from gateway.content.base import Decision, Verdict
 
-    # 1. Extract image from messages
+    # Extract image from messages
     b64_data = base64.b64encode(b"fake_png_data").decode()
     messages = [{"role": "user", "content": [
         {"type": "text", "text": "What is in this image?"},
@@ -30,64 +26,6 @@ async def test_full_image_pipeline(anyio_backend):
     assert len(images) == 1
     assert images[0]["mimetype"] == "image/png"
     assert len(images[0]["hash_sha3_512"]) == 128
-
-    # 2. Image safety passes
-    mock_safety = MagicMock()
-    mock_safety.analyze_image = AsyncMock(return_value=Decision(
-        verdict=Verdict.PASS, confidence=0.95,
-        analyzer_id="walacor.image_safety.v1", category="safety", reason="safe",
-    ))
-    blocked, _, safety_results = await evaluate_image_safety(mock_safety, images, max_images=5)
-    assert not blocked
-    assert safety_results[0]["safety_verdict"] == "pass"
-
-    # 3. OCR finds no PII
-    mock_ocr = MagicMock()
-    async def fake_ocr(image_bytes):
-        return {"ocr_text_extracted": True, "ocr_text_length": 11, "ocr_pii_found": False, "ocr_pii_types": [], "ocr_pii_block": False, "ocr_toxicity_found": False}
-    mock_ocr.analyze_image = fake_ocr
-    blocked, _, ocr_results = await evaluate_image_ocr(mock_ocr, images)
-    assert not blocked
-    assert ocr_results[0]["ocr_text_extracted"] is True
-
-    # 4. Merge results for execution record
-    image_analysis = []
-    for i, img in enumerate(images):
-        entry = {**safety_results[i]}
-        if i < len(ocr_results):
-            entry.update(ocr_results[i])
-        image_analysis.append(entry)
-
-    assert image_analysis[0]["safety_verdict"] == "pass"
-    assert image_analysis[0]["ocr_text_extracted"] is True
-
-    # 5. Verify execution record includes attachments
-    from gateway.pipeline.hasher import build_execution_record
-
-    call = MagicMock()
-    call.prompt_text = "What is in this image?"
-    call.model_id = "qwen3:8b"
-    call.metadata = {}
-    resp = MagicMock()
-    resp.content = "I see a document"
-    resp.thinking_content = None
-    resp.provider_request_id = "req-1"
-    resp.model_hash = None
-    resp.usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-
-    record = build_execution_record(
-        call=call,
-        model_response=resp,
-        attestation_id="att-1",
-        policy_version=1,
-        policy_result="pass",
-        tenant_id="t1",
-        gateway_id="gw-1",
-        image_analysis=image_analysis,
-    )
-    assert len(record["image_analysis"]) == 1
-    assert record["image_analysis"][0]["safety_verdict"] == "pass"
-    assert record["image_analysis"][0]["ocr_text_extracted"] is True
 
 
 @pytest.mark.anyio

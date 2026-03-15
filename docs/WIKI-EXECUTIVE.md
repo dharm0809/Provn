@@ -55,7 +55,7 @@ Total attempts = Allowed + Denied + Errors    (no gaps permitted)
 | Full prompt text | Stored in execution record | Enables retrospective review of what was actually asked |
 | Full response content | Stored in execution record | Response is where PII leakage and harmful content appear |
 | Provider request ID | Extracted from provider response headers | Ties the gateway record to the provider's own logs |
-| Model name and provider | Stored in execution record | The actual model name (e.g. `qwen3:4b`) and provider (`ollama`, `openai`) for human-readable display and filtering |
+| Model name and provider | Stored in execution record | The actual model name (e.g. `qwen3:1.7b`) and provider (`ollama`, `openai`) for human-readable display and filtering |
 | Model attestation ID | Looked up from control plane | Proves which registered model was requested |
 | Model content digest | Fetched from Ollama `/api/show` for local models | For on-device models, proves exactly which weights were used |
 | Policy version and outcome | From policy evaluation step | Proves which rules were applied and what they decided |

@@ -104,7 +104,7 @@ services:
       - ../demo:/demo
     environment:
       - GATEWAY_URL=http://gateway:8000
-      - DEMO_MODEL=${DEMO_MODEL:-qwen3:4b}
+      - DEMO_MODEL=${DEMO_MODEL:-qwen3:1.7b}
       - OLLAMA_URL=http://ollama:11434
 
   model-init:

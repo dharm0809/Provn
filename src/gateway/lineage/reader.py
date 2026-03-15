@@ -31,7 +31,7 @@ class LineageReader:
             if not Path(self._path).exists():
                 raise FileNotFoundError(f"WAL database not found: {self._path}")
             uri = f"file:{self._path}?mode=ro"
-            self._conn = sqlite3.connect(uri, uri=True)
+            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
             self._conn.execute("PRAGMA query_only=ON")
             self._conn.execute("PRAGMA mmap_size=268435456")  # 256MB
             self._conn.row_factory = sqlite3.Row

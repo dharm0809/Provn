@@ -254,7 +254,7 @@ At low traffic (<100 RPS), the proxy overhead itself is negligible regardless of
 {
   "object": "list",
   "data": [
-    {"id": "qwen3:4b", "object": "model", "created": 1686935002, "owned_by": "walacor-gateway"}
+    {"id": "qwen3:1.7b", "object": "model", "created": 1686935002, "owned_by": "walacor-gateway"}
   ]
 }
 ```
@@ -359,7 +359,7 @@ X-Walacor-Budget-Remaining: 45000
   "summary": {
     "total_requests": 14500,
     "unique_users": 23,
-    "models_used": ["qwen3:4b", "llama3.1:8b"],
+    "models_used": ["qwen3:1.7b", "llama3.1:8b"],
     "pii_incidents": 3,
     "blocked_requests": 47,
     "chain_integrity": "all_valid"

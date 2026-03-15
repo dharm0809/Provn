@@ -367,8 +367,9 @@ def test_qwen_basic_qa():
     resp = send(QWEN, [{"role": "user", "content": "What is 10 * 15?"}], max_tokens=150)
     content = get_content(resp)
     # qwen3 may put answer in reasoning field
-    if not content:
-        msg = resp["body"].get("choices", [{}])[0].get("message", {})
+    if not content and resp["status"] == 200:
+        body = resp["body"]
+        msg = body.get("choices", [{}])[0].get("message", {})
         content = msg.get("reasoning", "")
     passed = resp["status"] == 200
     return TestResult(passed=passed, model=QWEN, details=content[:80],
@@ -396,8 +397,9 @@ def test_multi_turn_conversation():
     ], max_tokens=150)
     content = get_content(resp)
     # qwen3 may put answer in reasoning field
-    if not content:
-        msg = resp["body"].get("choices", [{}])[0].get("message", {})
+    if not content and resp["status"] == 200:
+        body = resp["body"]
+        msg = body.get("choices", [{}])[0].get("message", {})
         content = msg.get("reasoning", "")
     passed = resp["status"] == 200 and "alice" in content.lower()
     return TestResult(passed=passed, model=QWEN, details=content[:80],

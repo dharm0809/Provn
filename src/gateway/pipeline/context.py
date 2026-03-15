@@ -78,8 +78,6 @@ class PipelineContext:
         self.merkle_checkpoint_task: Any | None = None
         # Multimodal audit: attachment notification cache
         self.attachment_cache: Any | None = None
-        # Multimodal audit: image safety analyzer
-        self.image_safety_analyzer: Any | None = None
         # Multimodal audit: image OCR analyzer
         self.image_ocr_analyzer: Any | None = None
         # B.2: Audit log exporter (file, webhook, s3)

@@ -46,6 +46,8 @@ os.environ.setdefault("WALACOR_PROVIDER_OLLAMA_URL", OLLAMA_URL)
 os.environ.setdefault("WALACOR_GATEWAY_PROVIDER", "ollama")
 os.environ.setdefault("WALACOR_GATEWAY_TENANT_ID", "integration-test")
 os.environ.setdefault("WALACOR_CONTROL_PLANE_URL", "http://dummy-cp")
+# Disable API key auth — overrides .env.gateway which sets test keys.
+os.environ.setdefault("WALACOR_GATEWAY_API_KEYS", "")
 
 
 @pytest.fixture(params=["asyncio"])
@@ -501,7 +503,7 @@ async def test_s5_active_tool_loop_with_real_qwen3():
             print(f"  [§5] Thinking content: {model_response.thinking_content[:100]!r}...")
 
         # Run the active tool loop (may be zero iterations if qwen3 already answered)
-        call, final_response, loop_err, interactions, iterations = await _run_active_tool_loop(
+        call, final_response, loop_err, interactions, iterations, _final_http = await _run_active_tool_loop(
             adapter=adapter,
             call=call,
             request=req_mock,

@@ -83,7 +83,7 @@ def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
 # asyncio (single writer, dict mutation is atomic in CPython).
 
 _model_capabilities: dict[str, dict[str, bool]] = {}
-# e.g.  {"gemma3:1b": {"supports_tools": False}, "qwen3:4b": {"supports_tools": True}}
+# e.g.  {"gemma3:1b": {"supports_tools": False}, "qwen3:1.7b": {"supports_tools": True}}
 
 # PIISanitizer singleton — avoid recompiling regex patterns on every request.
 _pii_sanitizer_instance = None
@@ -928,7 +928,6 @@ async def _after_stream_record(
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - pipeline_start) * 1000, 1) if pipeline_start else None,
             file_metadata=getattr(request.state, "file_metadata", None) if request else None,
-            image_analysis=getattr(request.state, "image_analysis", None) if request else None,
         )
         _exec_id = record.get("execution_id", "unknown")
 
@@ -965,6 +964,8 @@ async def _skip_governance_after_stream(
     settings = get_settings()
     if not ctx.storage:
         return
+    if request and getattr(request.state, "skip_audit", None) is True:
+        return
     try:
         model_response = adapter.parse_streamed_response(buffer)
         if isinstance(adapter, OllamaAdapter) and call.model_id and ctx.http_client:
@@ -980,7 +981,6 @@ async def _skip_governance_after_stream(
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - pipeline_start) * 1000, 1) if pipeline_start else None,
             file_metadata=getattr(request.state, "file_metadata", None) if request else None,
-            image_analysis=getattr(request.state, "image_analysis", None) if request else None,
         )
         if ctx.storage:
             await ctx.storage.write_execution(record)
@@ -1384,7 +1384,7 @@ async def _handle_skip_governance_non_streaming(
     ctx, settings, t0: float, provider: str, model: str,
 ) -> Response:
     response, model_response = await forward(adapter, call, request)
-    if ctx.storage:
+    if ctx.storage and getattr(request.state, "skip_audit", None) is not True:
         if isinstance(adapter, OllamaAdapter) and call.model_id and ctx.http_client:
             mh = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
             if mh:
@@ -1398,7 +1398,6 @@ async def _handle_skip_governance_non_streaming(
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - t0) * 1000, 1),
             file_metadata=getattr(request.state, "file_metadata", None),
-            image_analysis=getattr(request.state, "image_analysis", None),
         )
         if ctx.storage:
             result = await ctx.storage.write_execution(record)
@@ -1550,6 +1549,10 @@ async def _build_and_write_record(
     settings,
 ) -> None:
     """Steps 6-8: build record, apply session chain, write to storage."""
+    # Skip audit for system-generated requests (OpenWebUI tags/suggestions/titles)
+    if getattr(request.state, "skip_audit", None) is True:
+        logger.debug("Skipping audit record for system task: %s", call.metadata.get("request_type"))
+        return
     session_id = call.metadata.get("session_id")
     tool_meta = _build_tool_audit_metadata(params.tool_interactions, params.tool_strategy, params.tool_iterations)
 
@@ -1573,7 +1576,6 @@ async def _build_and_write_record(
         timings=params.timings,
         variant_id=params.variant_id,
         file_metadata=getattr(request.state, "file_metadata", None),
-        image_analysis=getattr(request.state, "image_analysis", None),
     )
     # Cost attribution: compute estimated cost from pricing table
     if ctx.control_store:
@@ -1768,6 +1770,12 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     "A/B test '%s': model rewritten %s → %s",
                     _test_name, _original_model, _resolved_model,
                 )
+
+    # ── System task detection: skip audit for auto-generated requests ────────
+    _req_type = extra.get("request_type", "user_message")
+    if settings.skip_system_task_audit and isinstance(_req_type, str) and _req_type.startswith("system_task:"):
+        request.state.skip_audit = True
+        logger.debug("System task detected (%s) — will skip audit record", _req_type)
 
     ctx = get_pipeline_context()
     provider = adapter.get_provider_name()

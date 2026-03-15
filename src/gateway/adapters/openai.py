@@ -285,6 +285,10 @@ class OpenAIAdapter(ProviderAdapter):
         model_id = data.get("model") or ""
         messages = data.get("messages", [])
         prompt_text = _concat_messages(messages) if messages else data.get("prompt", "") or ""
+        # Strip <think> tags echoed back from prior turns so audit trail stays clean
+        if get_settings().thinking_strip_enabled and "<think>" in prompt_text.lower():
+            from gateway.adapters.thinking import strip_thinking_tokens
+            prompt_text, _ = strip_thinking_tokens(prompt_text)
         is_streaming = data.get("stream", False)
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):

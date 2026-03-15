@@ -104,6 +104,11 @@ async def forward(
     forward_duration.labels(provider=adapter.get_provider_name()).observe(time.perf_counter() - t0)
     model_response = adapter.parse_response(upstream_resp)
     resp_headers = dict(upstream_resp.headers)
+    # Remove hop-by-hop headers that conflict with Starlette's own framing.
+    # Starlette sets content-length from the body; keeping transfer-encoding
+    # from upstream causes "Content-Length can't be present with Transfer-Encoding".
+    resp_headers.pop("transfer-encoding", None)
+    resp_headers.pop("content-length", None)
     resp_headers["X-Session-Id"] = call.metadata.get("session_id", "")
     response = Response(
         content=upstream_resp.content,

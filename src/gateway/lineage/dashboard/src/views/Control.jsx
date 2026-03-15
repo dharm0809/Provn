@@ -132,7 +132,7 @@ function ModelsView({ refresh }) {
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label">Model ID</label>
-                <input className="form-input" placeholder="e.g. qwen3:4b" value={form.model_id} onChange={e => setForm({ ...form, model_id: e.target.value })} />
+                <input className="form-input" placeholder="e.g. qwen3:1.7b" value={form.model_id} onChange={e => setForm({ ...form, model_id: e.target.value })} />
               </div>
               <div className="form-group">
                 <label className="form-label">Provider</label>
