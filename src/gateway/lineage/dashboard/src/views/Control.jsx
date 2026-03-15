@@ -39,6 +39,22 @@ function AuthGate({ onAuth }) {
   );
 }
 
+function ConfirmDialog({ title, message, item, onConfirm, onCancel }) {
+  return (
+    <div className="confirm-overlay" onClick={onCancel}>
+      <div className="confirm-dialog" onClick={e => e.stopPropagation()}>
+        <h3>{title}</h3>
+        {item && <div className="confirm-item">{item}</div>}
+        <p>{message}</p>
+        <div className="confirm-actions">
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button className="btn-danger" onClick={onConfirm}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Models Sub-View ────────────────────────────────────────────
 
 function ModelsView({ refresh }) {
@@ -50,6 +66,7 @@ function ModelsView({ refresh }) {
   const [discovered, setDiscovered] = useState(null);
   const [discovering, setDiscovering] = useState(false);
   const [registeringAll, setRegisteringAll] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -175,7 +192,7 @@ function ModelsView({ refresh }) {
                           ? <button className="btn-ghost btn-sm" onClick={async () => { try { await api.revokeAttestation(a.attestation_id); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Revoke</button>
                           : <button className="btn-ghost btn-sm" onClick={async () => { try { await api.approveAttestation({ model_id: a.model_id, provider: a.provider, status: 'active' }); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Approve</button>
                         }
-                        <button className="btn-danger btn-sm" onClick={async () => { try { await api.removeAttestation(a.attestation_id); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Remove</button>
+                        <button className="btn-danger btn-sm" onClick={() => setConfirmRemove(a)}>Remove</button>
                       </div>
                     </td>
                   </tr>
@@ -232,6 +249,18 @@ function ModelsView({ refresh }) {
           )}
         </div>
       )}
+      {confirmRemove && (
+        <ConfirmDialog
+          title="Remove Model"
+          item={confirmRemove.model_id}
+          message="This will permanently remove this model attestation. The model will be blocked from serving requests."
+          onCancel={() => setConfirmRemove(null)}
+          onConfirm={async () => {
+            try { await api.removeAttestation(confirmRemove.attestation_id); setConfirmRemove(null); load(); }
+            catch (e) { if (e.message === 'AUTH') refresh(); }
+          }}
+        />
+      )}
     </>
   );
 }
@@ -244,6 +273,7 @@ function PoliciesView({ refresh }) {
   const [form, setForm] = useState({ policy_name: '', enforcement_level: 'blocking', description: '' });
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -329,7 +359,7 @@ function PoliciesView({ refresh }) {
                     <td><span className={`badge ${p.status === 'active' ? 'badge-pass' : 'badge-muted'}`}>{p.status}</span></td>
                     <td>
                       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                        <button className="btn-danger btn-sm" onClick={async () => { try { await api.deletePolicy(p.policy_id); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Delete</button>
+                        <button className="btn-danger btn-sm" onClick={() => setConfirmDelete(p)}>Delete</button>
                       </div>
                     </td>
                   </tr>
@@ -338,6 +368,18 @@ function PoliciesView({ refresh }) {
             </tbody>
           </table>
         </div>
+      )}
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete Policy"
+          item={confirmDelete.policy_name}
+          message="This will permanently delete this policy. Governance rules in this policy will no longer be enforced."
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={async () => {
+            try { await api.deletePolicy(confirmDelete.policy_id); setConfirmDelete(null); load(); }
+            catch (e) { if (e.message === 'AUTH') refresh(); }
+          }}
+        />
       )}
     </div>
   );
@@ -350,6 +392,7 @@ function BudgetsView({ refresh, health }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ tenant_id: '', user: '', period: 'monthly', max_tokens: '' });
   const [loading, setLoading] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -442,7 +485,7 @@ function BudgetsView({ refresh, health }) {
                     <td className="mono">{formatNumber(b.max_tokens)}</td>
                     <td>
                       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                        <button className="btn-danger btn-sm" onClick={async () => { try { await api.deleteBudget(b.budget_id); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Delete</button>
+                        <button className="btn-danger btn-sm" onClick={() => setConfirmDelete(b)}>Delete</button>
                       </div>
                     </td>
                   </tr>
@@ -452,6 +495,18 @@ function BudgetsView({ refresh, health }) {
           </div>
         )}
       </div>
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete Budget"
+          item={`${confirmDelete.tenant_id}${confirmDelete.user ? ' / ' + confirmDelete.user : ''} — ${confirmDelete.period}`}
+          message="This will permanently remove this token budget. Usage limits will no longer be enforced for this scope."
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={async () => {
+            try { await api.deleteBudget(confirmDelete.budget_id); setConfirmDelete(null); load(); }
+            catch (e) { if (e.message === 'AUTH') refresh(); }
+          }}
+        />
+      )}
     </>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { getAttempts } from '../api';
 import { displayModel, timeAgo, formatNumber, dispositionClass, dispositionLabel, statusCodeClass } from '../utils';
 
@@ -8,6 +8,7 @@ export default function Attempts({ navigate, params = {} }) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [search, setSearch] = useState('');
   const limit = 100;
   const offset = params.offset || 0;
 
@@ -24,6 +25,17 @@ export default function Attempts({ navigate, params = {} }) {
     })();
   }, [offset]);
 
+  const filtered = useMemo(() => {
+    if (!search.trim()) return items;
+    const q = search.toLowerCase();
+    return items.filter(a =>
+      (a.disposition || '').toLowerCase().includes(q) ||
+      (a.user || '').toLowerCase().includes(q) ||
+      (a.model_id || '').toLowerCase().includes(q) ||
+      (a.path || '').toLowerCase().includes(q)
+    );
+  }, [items, search]);
+
   if (loading) return <div className="skeleton-block" style={{ height: 400 }} />;
   if (error) return <div className="error-card">Error: {error}</div>;
 
@@ -32,7 +44,7 @@ export default function Attempts({ navigate, params = {} }) {
   return (
     <div className="fade-child">
       {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(160px, 1fr))`, gap: 12, marginBottom: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
         <div className="stat-card">
           <div className="stat-value">{total}</div>
           <div className="stat-label">Total Attempts</div>
@@ -56,6 +68,12 @@ export default function Attempts({ navigate, params = {} }) {
           <div className="card-head">
             <span className="card-title">Attempts</span>
           </div>
+          <div style={{ padding: '0 16px' }}>
+            <div className="search-bar">
+              <input className="search-input" placeholder="Filter by disposition, user, model, or path…" value={search} onChange={e => setSearch(e.target.value)} />
+              {search && <span className="search-count">{filtered.length} / {items.length}</span>}
+            </div>
+          </div>
           <div className="table-wrap">
             <table>
               <thead>
@@ -64,7 +82,7 @@ export default function Attempts({ navigate, params = {} }) {
                 </tr>
               </thead>
               <tbody>
-                {items.map((a, i) => (
+                {filtered.map((a, i) => (
                   <tr key={i} className={a.execution_id ? 'clickable' : ''} onClick={() => a.execution_id && navigate('execution', { executionId: a.execution_id })}>
                     <td><span className={`badge ${dispositionClass(a.disposition)}`}>{dispositionLabel(a.disposition)}</span></td>
                     <td className="mono" style={{ fontSize: 12 }}>{a.user || '-'}</td>

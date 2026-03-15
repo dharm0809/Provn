@@ -1,13 +1,31 @@
 import { useState, useEffect } from 'react';
 import { getExecution, getTrace } from '../api';
-import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes } from '../utils';
+import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes, copyToClipboard } from '../utils';
 import TraceWaterfall from '../components/TraceWaterfall';
 
-function DetailRow({ label, value, className = '' }) {
+function CopyBtn({ text }) {
+  const [copied, setCopied] = useState(false);
+  if (!text) return null;
+  return (
+    <button className={`copy-btn${copied ? ' copied' : ''}`} onClick={e => {
+      e.stopPropagation();
+      copyToClipboard(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+    }}>{copied ? '✓' : '⎘'}</button>
+  );
+}
+
+function DetailRow({ label, value, className = '', copyable = false }) {
   return (
     <>
       <div className="detail-label">{label}</div>
-      <div className={`detail-value ${className}`}>{value ?? '-'}</div>
+      <div className={`detail-value ${className}`}>
+        {copyable && value && value !== '-' ? (
+          <div className="copy-wrap">
+            <span className="copy-text">{value}</span>
+            <CopyBtn text={value} />
+          </div>
+        ) : (value ?? '-')}
+      </div>
     </>
   );
 }
@@ -65,9 +83,9 @@ export default function Execution({ navigate, executionId, sessionId }) {
             Execution Record
           </div>
           <div className="detail-grid">
-            <DetailRow label="Execution ID" value={r.execution_id} className="mono" />
+            <DetailRow label="Execution ID" value={r.execution_id} className="mono" copyable />
             <DetailRow label="Model" value={displayModel(r.model_id || r.model_attestation_id)} />
-            <DetailRow label="Provider Request" value={r.provider_request_id} className="mono" />
+            <DetailRow label="Provider Request" value={r.provider_request_id} className="mono" copyable />
             <DetailRow label="Policy" value={r.policy_result} className={policyBadgeClass(r.policy_result)} />
             <DetailRow label="Policy Version" value={r.policy_version} />
             <DetailRow label="Tenant" value={r.tenant_id} />
@@ -86,8 +104,8 @@ export default function Execution({ navigate, executionId, sessionId }) {
           </div>
           <div className="detail-grid">
             <DetailRow label="Sequence" value={r.sequence_number} className="mono" />
-            <DetailRow label="Record Hash" value={r.record_hash} className="gold mono" />
-            <DetailRow label="Previous Hash" value={r.previous_record_hash} className="gold mono" />
+            <DetailRow label="Record Hash" value={r.record_hash} className="gold mono" copyable />
+            <DetailRow label="Previous Hash" value={r.previous_record_hash} className="gold mono" copyable />
           </div>
         </div>
       </div>
@@ -170,8 +188,8 @@ export default function Execution({ navigate, executionId, sessionId }) {
                   </div>
                 )}
                 <div className="detail-grid" style={{ marginTop: 8 }}>
-                  {te.input_hash && <DetailRow label="Input Hash" value={te.input_hash} className="hash-gold" />}
-                  {te.output_hash && <DetailRow label="Output Hash" value={te.output_hash} className="hash-gold" />}
+                  {te.input_hash && <DetailRow label="Input Hash" value={te.input_hash} className="hash-gold" copyable />}
+                  {te.output_hash && <DetailRow label="Output Hash" value={te.output_hash} className="hash-gold" copyable />}
                   <DetailRow label="Timestamp" value={formatTime(te.timestamp)} />
                   {te.iteration && <DetailRow label="Iteration" value={te.iteration} />}
                 </div>
@@ -209,8 +227,11 @@ export default function Execution({ navigate, executionId, sessionId }) {
                   <span>{formatBytes(f.size_bytes)}</span>
                   <span className="badge badge-source">{f.source || 'unknown'}</span>
                 </div>
-                <div className="attachment-hash" title={f.hash_sha3_512 || ''}>
-                  SHA3: {(f.hash_sha3_512 || '').substring(0, 24)}...
+                <div className="attachment-hash">
+                  <div className="copy-wrap">
+                    <span className="copy-text" title={f.hash_sha3_512 || ''}>SHA3: {(f.hash_sha3_512 || '').substring(0, 24)}…</span>
+                    <CopyBtn text={f.hash_sha3_512} />
+                  </div>
                 </div>
               </div>
             ))}

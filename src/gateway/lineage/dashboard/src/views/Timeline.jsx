@@ -1,7 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import { sha3_512 } from 'js-sha3';
 import { getSession, verifySession } from '../api';
-import { formatSessionId, displayModel, timeAgo, truncHash, getTokenCount, policyBadgeClass } from '../utils';
+import { formatSessionId, displayModel, timeAgo, truncHash, getTokenCount, policyBadgeClass, copyToClipboard } from '../utils';
+
+function CopyBtn({ text }) {
+  const [copied, setCopied] = useState(false);
+  if (!text) return null;
+  return (
+    <button className={`copy-btn${copied ? ' copied' : ''}`} onClick={e => {
+      e.stopPropagation();
+      copyToClipboard(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+    }}>{copied ? '✓' : '⎘'}</button>
+  );
+}
 
 export default function Timeline({ navigate, sessionId }) {
   const [records, setRecords] = useState([]);
@@ -109,7 +120,12 @@ export default function Timeline({ navigate, sessionId }) {
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>{formatSessionId(sessionId)}</div>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>
+            <span className="copy-wrap">
+              <span className="copy-text">{formatSessionId(sessionId)}</span>
+              <CopyBtn text={sessionId} />
+            </span>
+          </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
             {records.length} record{records.length !== 1 ? 's' : ''} · {model} · {lastTime}
           </div>
@@ -158,7 +174,12 @@ export default function Timeline({ navigate, sessionId }) {
                     {toolInfo.length > 0 && <span className="badge badge-gold">⚙ {toolInfo.map(t => t.tool_name || 'tool').join(', ')}</span>}
                     {(r.file_metadata && r.file_metadata.length > 0) && <span className="badge badge-file">📎 {r.file_metadata.length} file{r.file_metadata.length > 1 ? 's' : ''}</span>}
                     {tokens && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>{tokens} tokens</span>}
-                    <span className="hash-gold">{truncHash(r.record_hash, 20)}</span>
+                    <span className="hash-gold">
+                      <span className="copy-wrap">
+                        <span className="copy-text">{truncHash(r.record_hash, 20)}</span>
+                        <CopyBtn text={r.record_hash} />
+                      </span>
+                    </span>
                   </div>
                 </div>
               </div>
