@@ -102,21 +102,21 @@ async def _build_pdf_response(
     """Build a PDF compliance report. Returns 501 if WeasyPrint is not installed."""
     try:
         from gateway.compliance.pdf_report import generate_pdf_report
-    except ImportError:
+
+        pdf_bytes = generate_pdf_report(
+            summary=summary,
+            attestations=attestations,
+            executions=executions,
+            chain_integrity=chain_integrity,
+            framework=framework,
+            start=start,
+            end=end,
+        )
+    except (ImportError, OSError) as exc:
         return JSONResponse(
-            {"error": "PDF export requires WeasyPrint: pip install 'walacor-gateway[compliance]'"},
+            {"error": f"PDF export unavailable: {exc}. Install system libraries: brew install pango"},
             status_code=501,
         )
-
-    pdf_bytes = generate_pdf_report(
-        summary=summary,
-        attestations=attestations,
-        executions=executions,
-        chain_integrity=chain_integrity,
-        framework=framework,
-        start=start,
-        end=end,
-    )
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

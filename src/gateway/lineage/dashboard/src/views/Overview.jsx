@@ -36,7 +36,7 @@ function RangeSelector({ active, onChange }) {
 
 function GovernanceBadge({ label, value, ok }) {
   return (
-    <div style={{ padding: '14px 16px', background: 'var(--bg-inset)', border: '1px solid var(--border)', borderRadius: 6 }}>
+    <div style={{ padding: '14px 16px', background: 'var(--bg-inset)', border: '1px solid var(--border)', borderRadius: 0 }}>
       <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>{label}</div>
       <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 500, color: ok ? 'var(--green)' : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}>
         {ok && <span style={{ fontSize: 11 }}>✓</span>}

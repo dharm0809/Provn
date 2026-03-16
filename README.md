@@ -1,10 +1,14 @@
 # Walacor AI Security Gateway
 
+![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue) ![License](https://img.shields.io/badge/license-Apache%202.0-green)
+
 **Governance enforcement and cryptographic audit layer for enterprise AI infrastructure.**
 
 A drop-in proxy that sits between your application and any LLM provider. No code changes required. Every inference request passes through an 8-step governance pipeline that enforces five security guarantees before the response reaches the caller.
 
 Available in two deployment modes: **Python-only** (ASGI, single process) or **Hybrid Go/Python** (Go HTTP proxy + Python gRPC governance sidecar) for maximum throughput.
+
+> **Shadow mode for safe rollout:** Set `WALACOR_ENFORCEMENT_MODE=audit_only` to record and analyze traffic without blocking anything. Use this to validate policies and tune content analyzers before enabling enforcement.
 
 | Guarantee | What it does |
 |---|---|
@@ -72,7 +76,7 @@ Client
 Provider (OpenAI / Anthropic / Ollama / HuggingFace)
 ```
 
-Deploy with `docker compose -f deploy/docker-compose.hybrid.yml up`.
+Deploy with `docker compose -f deploy/docker-compose.hybrid.yml up`. See [Hybrid Architecture Plan](docs/plans/2026-03-14-hybrid-architecture-and-competitive-features.md) for design details and benchmarks.
 
 ---
 
@@ -88,6 +92,9 @@ export WALACOR_PROVIDER_OPENAI_KEY=sk-...
 walacor-gateway
 
 # Full governance — Ollama, no control plane needed
+# Prerequisites: install Ollama (https://ollama.com), then:
+#   ollama serve
+#   ollama pull qwen3:4b   (or any model)
 export WALACOR_SKIP_GOVERNANCE=false
 export WALACOR_GATEWAY_TENANT_ID=tenant-abc
 export WALACOR_GATEWAY_API_KEYS=my-secret-key
@@ -98,6 +105,8 @@ walacor-gateway
 ```
 
 Point any OpenAI-compatible client at `http://localhost:8000`. All config uses the `WALACOR_` prefix and can go in `.env.gateway` (see `.env.gateway.example`).
+
+Open `http://localhost:8000/lineage/` for the audit dashboard.
 
 ---
 
@@ -190,9 +199,9 @@ The gateway serves a built-in React dashboard at `/lineage/` with:
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # run tests
-cp .env.gateway.example .env.gateway  # fill in credentials
-uvicorn gateway.main:app --reload --port 8000 --app-dir src
+pytest                                        # run tests
+cp .env.gateway.example .env.gateway          # fill in credentials
+python3 -m uvicorn src.gateway.main:app --reload --port 8000
 ```
 
 Requirements: Python 3.12+. Optional extras: `[redis]`, `[telemetry]`, `[auth]`.
@@ -217,7 +226,6 @@ Requires Go 1.21+. Configure via `PROXY_*` env vars (see `proxy/config/config.go
 | **[Flow & Soundness](docs/FLOW-AND-SOUNDNESS.md)** | Pipeline flowcharts and soundness analysis |
 | **[Executive Briefing](docs/WIKI-EXECUTIVE.md)** | What we built and why (non-technical) |
 | **[Gateway Reference](docs/GATEWAY-REFERENCE.md)** | Complete API and configuration reference |
-| **[Hybrid Architecture Plan](docs/plans/2026-03-14-hybrid-architecture-and-competitive-features.md)** | Go/Python hybrid design and competitive analysis |
 | **[Visual Workflow](docs/gateway-workflow.html)** | Interactive HTML architecture diagram |
 
 ---

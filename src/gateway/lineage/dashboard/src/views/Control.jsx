@@ -1,6 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import * as api from '../api';
 import { formatNumber, formatTime, formatUptime } from '../utils';
+
+function SortArrow({ col, sortCol, sortDir }) {
+  return (
+    <span className={`sort-arrow${sortCol === col ? ' active' : ''}`}>
+      {sortCol === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+    </span>
+  );
+}
 
 // ─── Auth Gate ──────────────────────────────────────────────────
 
@@ -67,6 +75,8 @@ function ModelsView({ refresh }) {
   const [discovering, setDiscovering] = useState(false);
   const [registeringAll, setRegisteringAll] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(null);
+  const [sortCol, setSortCol] = useState('model_id');
+  const [sortDir, setSortDir] = useState('asc');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,6 +89,25 @@ function ModelsView({ refresh }) {
   }, [refresh]);
 
   useEffect(() => { load(); }, [load]);
+
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('asc'); }
+  };
+
+  const sortedAttestations = useMemo(() => {
+    return [...attestations].sort((a, b) => {
+      let av, bv;
+      if (sortCol === 'model_id') { av = (a.model_id || '').toLowerCase(); bv = (b.model_id || '').toLowerCase(); }
+      else if (sortCol === 'provider') { av = (a.provider || '').toLowerCase(); bv = (b.provider || '').toLowerCase(); }
+      else if (sortCol === 'status') { av = (a.status || '').toLowerCase(); bv = (b.status || '').toLowerCase(); }
+      else if (sortCol === 'verification_level') { av = (a.verification_level || '').toLowerCase(); bv = (b.verification_level || '').toLowerCase(); }
+      else { av = (a.model_id || '').toLowerCase(); bv = (b.model_id || '').toLowerCase(); }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [attestations, sortCol, sortDir]);
 
   const submit = async () => {
     if (!form.model_id.trim()) return;
@@ -177,9 +206,15 @@ function ModelsView({ refresh }) {
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Model ID</th><th>Provider</th><th>Status</th><th>Verification</th><th>Notes</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+              <thead><tr>
+                <th className="sortable" onClick={() => toggleSort('model_id')}>Model ID <SortArrow col="model_id" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="sortable" onClick={() => toggleSort('provider')}>Provider <SortArrow col="provider" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="sortable" onClick={() => toggleSort('status')}>Status <SortArrow col="status" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="sortable" onClick={() => toggleSort('verification_level')}>Verification <SortArrow col="verification_level" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th>Notes</th><th style={{ textAlign: 'right' }}>Actions</th>
+              </tr></thead>
               <tbody>
-                {attestations.map(a => (
+                {sortedAttestations.map(a => (
                   <tr key={a.attestation_id}>
                     <td className="id">{a.model_id}</td>
                     <td className="mono">{a.provider}</td>
@@ -274,6 +309,8 @@ function PoliciesView({ refresh }) {
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [sortCol, setSortCol] = useState('policy_name');
+  const [sortDir, setSortDir] = useState('asc');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -283,6 +320,28 @@ function PoliciesView({ refresh }) {
   }, [refresh]);
 
   useEffect(() => { load(); }, [load]);
+
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('asc'); }
+  };
+
+  const sortedPolicies = useMemo(() => {
+    return [...policies].sort((a, b) => {
+      let av, bv;
+      if (sortCol === 'policy_name') { av = (a.policy_name || '').toLowerCase(); bv = (b.policy_name || '').toLowerCase(); }
+      else if (sortCol === 'enforcement_level') { av = (a.enforcement_level || '').toLowerCase(); bv = (b.enforcement_level || '').toLowerCase(); }
+      else if (sortCol === 'rules') {
+        av = (a.rules || []).length + (a.prompt_rules || []).length + (a.rag_rules || []).length;
+        bv = (b.rules || []).length + (b.prompt_rules || []).length + (b.rag_rules || []).length;
+      }
+      else if (sortCol === 'status') { av = (a.status || '').toLowerCase(); bv = (b.status || '').toLowerCase(); }
+      else { av = (a.policy_name || '').toLowerCase(); bv = (b.policy_name || '').toLowerCase(); }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [policies, sortCol, sortDir]);
 
   const submit = async () => {
     if (!form.policy_name.trim()) return;
@@ -347,9 +406,15 @@ function PoliciesView({ refresh }) {
       ) : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Name</th><th>Enforcement</th><th>Rules</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+            <thead><tr>
+              <th className="sortable" onClick={() => toggleSort('policy_name')}>Name <SortArrow col="policy_name" sortCol={sortCol} sortDir={sortDir} /></th>
+              <th className="sortable" onClick={() => toggleSort('enforcement_level')}>Enforcement <SortArrow col="enforcement_level" sortCol={sortCol} sortDir={sortDir} /></th>
+              <th className="sortable" onClick={() => toggleSort('rules')}>Rules <SortArrow col="rules" sortCol={sortCol} sortDir={sortDir} /></th>
+              <th className="sortable" onClick={() => toggleSort('status')}>Status <SortArrow col="status" sortCol={sortCol} sortDir={sortDir} /></th>
+              <th style={{ textAlign: 'right' }}>Actions</th>
+            </tr></thead>
             <tbody>
-              {policies.map(p => {
+              {sortedPolicies.map(p => {
                 const ruleCount = (p.rules || []).length + (p.prompt_rules || []).length + (p.rag_rules || []).length;
                 return (
                   <tr key={p.policy_id}>
@@ -393,6 +458,8 @@ function BudgetsView({ refresh, health }) {
   const [form, setForm] = useState({ tenant_id: '', user: '', period: 'monthly', max_tokens: '' });
   const [loading, setLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [sortCol, setSortCol] = useState('tenant_id');
+  const [sortDir, setSortDir] = useState('asc');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -402,6 +469,25 @@ function BudgetsView({ refresh, health }) {
   }, [refresh]);
 
   useEffect(() => { load(); }, [load]);
+
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('asc'); }
+  };
+
+  const sortedBudgets = useMemo(() => {
+    return [...budgets].sort((a, b) => {
+      let av, bv;
+      if (sortCol === 'tenant_id') { av = (a.tenant_id || '').toLowerCase(); bv = (b.tenant_id || '').toLowerCase(); }
+      else if (sortCol === 'user') { av = (a.user || '').toLowerCase(); bv = (b.user || '').toLowerCase(); }
+      else if (sortCol === 'period') { av = (a.period || '').toLowerCase(); bv = (b.period || '').toLowerCase(); }
+      else if (sortCol === 'max_tokens') { av = a.max_tokens || 0; bv = b.max_tokens || 0; }
+      else { av = (a.tenant_id || '').toLowerCase(); bv = (b.tenant_id || '').toLowerCase(); }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [budgets, sortCol, sortDir]);
 
   const submit = async () => {
     const max = parseInt(form.max_tokens);
@@ -475,9 +561,15 @@ function BudgetsView({ refresh, health }) {
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Tenant</th><th>User</th><th>Period</th><th>Max Tokens</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+              <thead><tr>
+                <th className="sortable" onClick={() => toggleSort('tenant_id')}>Tenant <SortArrow col="tenant_id" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="sortable" onClick={() => toggleSort('user')}>User <SortArrow col="user" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="sortable" onClick={() => toggleSort('period')}>Period <SortArrow col="period" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="sortable" onClick={() => toggleSort('max_tokens')}>Max Tokens <SortArrow col="max_tokens" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
+              </tr></thead>
               <tbody>
-                {budgets.map(b => (
+                {sortedBudgets.map(b => (
                   <tr key={b.budget_id}>
                     <td className="mono">{b.tenant_id}</td>
                     <td className="mono">{b.user || '(all)'}</td>

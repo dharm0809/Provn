@@ -163,6 +163,7 @@ export default function Execution({ navigate, executionId, sessionId }) {
                   <span className={`badge ${te.tool_type === 'web_search' ? 'badge-gold' : 'badge-muted'}`}>{te.tool_type || 'function'}</span>
                   <span className={`badge ${te.source === 'gateway' ? 'badge-pass' : 'badge-muted'}`}>{te.source || '-'}</span>
                   {isErr && <span className="badge badge-fail">error</span>}
+                  {!isErr && (te.tool_type === 'web_search' || te.tool_name === 'web_search') && sources.length === 0 && <span className="badge badge-warn">no results</span>}
                   {te.duration_ms != null && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto', padding: '2px 8px', background: 'var(--bg-inset)', borderRadius: 3 }}>{te.duration_ms.toFixed(0)}ms</span>}
                 </div>
                 {inputDisplay && (

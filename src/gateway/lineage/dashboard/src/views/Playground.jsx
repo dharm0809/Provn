@@ -368,7 +368,7 @@ export default function Playground({ navigate }) {
         {/* Identity settings */}
         <div className="pg-identity-row">
           <div className="pg-field pg-field-inline">
-            <label className="pg-label">User ID</label>
+            <label className="pg-label" title="Identifies who sent this request in the audit trail">User ID</label>
             <input
               type="text"
               value={userId}
@@ -391,7 +391,10 @@ export default function Playground({ navigate }) {
 
         {/* System prompt */}
         <div className="pg-field">
-          <label className="pg-label">System Prompt <span style={{ opacity: 0.5 }}>(optional)</span></label>
+          <label className="pg-label">
+            System Prompt <span style={{ opacity: 0.5 }}>(optional)</span>
+            <span className="pg-hint">Sets the personality or role for the AI. Example: "You are a helpful legal assistant."</span>
+          </label>
           <textarea
             value={systemPrompt}
             onChange={e => setSystemPrompt(e.target.value)}
@@ -417,14 +420,22 @@ export default function Playground({ navigate }) {
         {/* Parameters + send */}
         <div className="pg-params-row">
           <div className="pg-param">
-            <label className="pg-label">Temperature</label>
+            <label className="pg-label">
+              Creativity
+              <span className="pg-hint">How random or creative the response should be. Low = focused and predictable. High = varied and creative.</span>
+            </label>
             <div className="pg-param-control">
+              <span className="pg-range-label">Precise</span>
               <input type="range" min="0" max="2" step="0.1" value={temperature} onChange={e => setTemperature(e.target.value)} className="pg-slider" />
+              <span className="pg-range-label">Creative</span>
               <span className="pg-param-value">{parseFloat(temperature).toFixed(1)}</span>
             </div>
           </div>
           <div className="pg-param">
-            <label className="pg-label">Max Tokens</label>
+            <label className="pg-label">
+              Response Length
+              <span className="pg-hint">Maximum number of words/tokens the model can generate. Higher = longer responses allowed.</span>
+            </label>
             <input
               type="number" min="1" max="128000" value={maxTokens}
               onChange={e => setMaxTokens(e.target.value)}

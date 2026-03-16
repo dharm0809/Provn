@@ -171,7 +171,16 @@ export default function Timeline({ navigate, sessionId }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                     {r.policy_result && <span className={`badge ${policyBadgeClass(r.policy_result)}`}>{r.policy_result}</span>}
                     {r.user && <span className="badge badge-identity">{r.user}</span>}
-                    {toolInfo.length > 0 && <span className="badge badge-gold">⚙ {toolInfo.map(t => t.tool_name || 'tool').join(', ')}</span>}
+                    {toolInfo.map((t, ti) => {
+                      const hasErr = t.is_error === true;
+                      const srcCount = (t.sources || []).length;
+                      const isSearch = t.tool_name === 'web_search' || t.tool_type === 'web_search';
+                      const cls = hasErr ? 'badge-fail' : (isSearch && srcCount === 0) ? 'badge-warn' : 'badge-gold';
+                      const suffix = isSearch
+                        ? (hasErr ? ' failed' : srcCount > 0 ? ` ·${srcCount}` : ' ·0')
+                        : '';
+                      return <span key={ti} className={`badge ${cls}`}>⚙ {t.tool_name || 'tool'}{suffix}</span>;
+                    })}
                     {(r.file_metadata && r.file_metadata.length > 0) && <span className="badge badge-file">📎 {r.file_metadata.length} file{r.file_metadata.length > 1 ? 's' : ''}</span>}
                     {tokens && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>{tokens} tokens</span>}
                     <span className="hash-gold">

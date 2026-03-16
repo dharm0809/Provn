@@ -1,7 +1,14 @@
 import { useState } from 'react';
-import { fetchAuthJSON } from '../api';
-
 const COMPLIANCE_API = '/v1/compliance';
+
+async function fetchJSON(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+  }
+  return resp.json();
+}
 const FRAMEWORKS = [
   { id: 'eu_ai_act', label: 'EU AI Act' },
   { id: 'nist', label: 'NIST AI RMF' },
@@ -33,7 +40,7 @@ export default function Compliance() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchAuthJSON(
+      const data = await fetchJSON(
         `${COMPLIANCE_API}/export?format=json&framework=${framework}&start=${start}&end=${end}`
       );
       setPreview(data);
@@ -49,12 +56,12 @@ export default function Compliance() {
     setDownloading(fmt);
     setError(null);
     try {
-      const key = sessionStorage.getItem('cp_api_key') || '';
       const url = `${COMPLIANCE_API}/export?format=${fmt}&framework=${framework}&start=${start}&end=${end}`;
-      const resp = await fetch(url, {
-        headers: key ? { 'X-API-Key': key } : {},
-      });
+      const resp = await fetch(url);
       if (!resp.ok) {
+        if (resp.status === 501) {
+          throw new Error(`${fmt.toUpperCase()} export is not available on this server (requires system libraries)`);
+        }
         const body = await resp.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${resp.status}`);
       }
@@ -129,13 +136,36 @@ export default function Compliance() {
             <p><strong>Models:</strong> {preview.summary.models_used.join(', ')}</p>
           )}
 
-          <p>
-            <strong>Chain Integrity:</strong>{' '}
-            {preview.chain_integrity?.all_valid
-              ? <span className="badge-compliant">ALL VALID</span>
-              : <span className="badge-error">INTEGRITY ISSUES</span>
-            }
-          </p>
+          {(() => {
+            const ci = preview.chain_integrity;
+            const total = ci?.sessions_verified ?? 0;
+            const invalid = (ci?.sessions || []).filter(s => !s.valid);
+            const valid = total - invalid.length;
+            return (
+              <div style={{ marginBottom: 16 }}>
+                <p>
+                  <strong>Chain Integrity:</strong>{' '}
+                  {ci?.all_valid
+                    ? <span className="badge-compliant">ALL VALID</span>
+                    : <span className="badge-error">{valid} / {total} VALID</span>
+                  }
+                </p>
+                {invalid.length > 0 && (
+                  <div className="card" style={{ marginTop: 8, padding: 12 }}>
+                    <div style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text-muted)', marginBottom: 6, letterSpacing: '1px', textTransform: 'uppercase' }}>
+                      {invalid.length} session{invalid.length > 1 ? 's' : ''} with issues
+                    </div>
+                    {invalid.map((s, i) => (
+                      <div key={i} style={{ fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--text-secondary)', marginBottom: 4 }}>
+                        <span style={{ color: 'var(--red)' }}>{s.session_id.slice(0, 12)}...</span>
+                        {' — '}{(s.errors || []).join('; ') || 'unknown error'}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <h3>Download</h3>
           <div className="compliance-downloads">

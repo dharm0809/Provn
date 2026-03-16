@@ -9,6 +9,8 @@ export default function Attempts({ navigate, params = {} }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
+  const [sortCol, setSortCol] = useState('timestamp');
+  const [sortDir, setSortDir] = useState('desc');
   const limit = 100;
   const offset = params.offset || 0;
 
@@ -25,16 +27,42 @@ export default function Attempts({ navigate, params = {} }) {
     })();
   }, [offset]);
 
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('desc'); }
+  };
+
+  const SortArrow = ({ col }) => (
+    <span className={`sort-arrow${sortCol === col ? ' active' : ''}`}>
+      {sortCol === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+    </span>
+  );
+
   const filtered = useMemo(() => {
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(a =>
-      (a.disposition || '').toLowerCase().includes(q) ||
-      (a.user || '').toLowerCase().includes(q) ||
-      (a.model_id || '').toLowerCase().includes(q) ||
-      (a.path || '').toLowerCase().includes(q)
-    );
-  }, [items, search]);
+    let list = items;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(a =>
+        (a.disposition || '').toLowerCase().includes(q) ||
+        (a.user || '').toLowerCase().includes(q) ||
+        (a.model_id || '').toLowerCase().includes(q) ||
+        (a.path || '').toLowerCase().includes(q)
+      );
+    }
+    list = [...list].sort((a, b) => {
+      let av, bv;
+      if (sortCol === 'disposition') { av = (a.disposition || '').toLowerCase(); bv = (b.disposition || '').toLowerCase(); }
+      else if (sortCol === 'user') { av = (a.user || '').toLowerCase(); bv = (b.user || '').toLowerCase(); }
+      else if (sortCol === 'model_id') { av = (a.model_id || '').toLowerCase(); bv = (b.model_id || '').toLowerCase(); }
+      else if (sortCol === 'path') { av = (a.path || '').toLowerCase(); bv = (b.path || '').toLowerCase(); }
+      else if (sortCol === 'status_code') { av = a.status_code || 0; bv = b.status_code || 0; }
+      else { av = a.timestamp || ''; bv = b.timestamp || ''; }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return list;
+  }, [items, search, sortCol, sortDir]);
 
   if (loading) return <div className="skeleton-block" style={{ height: 400 }} />;
   if (error) return <div className="error-card">Error: {error}</div>;
@@ -78,7 +106,12 @@ export default function Attempts({ navigate, params = {} }) {
             <table>
               <thead>
                 <tr>
-                  <th>Disposition</th><th>User</th><th>Model</th><th>Path</th><th>Status</th><th>Time</th>
+                  <th className="sortable" onClick={() => toggleSort('disposition')}>Disposition <SortArrow col="disposition" /></th>
+                  <th className="sortable" onClick={() => toggleSort('user')}>User <SortArrow col="user" /></th>
+                  <th className="sortable" onClick={() => toggleSort('model_id')}>Model <SortArrow col="model_id" /></th>
+                  <th className="sortable" onClick={() => toggleSort('path')}>Path <SortArrow col="path" /></th>
+                  <th className="sortable" onClick={() => toggleSort('status_code')}>Status <SortArrow col="status_code" /></th>
+                  <th className="sortable" onClick={() => toggleSort('timestamp')}>Time <SortArrow col="timestamp" /></th>
                 </tr>
               </thead>
               <tbody>
