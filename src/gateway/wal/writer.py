@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import gateway.util.json_utils as json
 import os
@@ -36,6 +37,9 @@ class WALWriter:
     enqueue_write_tool_event) push work onto a thread-safe queue processed by
     the dedicated writer thread using its own separate connection.
     """
+
+    _BATCH_MAX = 50
+    _BATCH_TIMEOUT = 0.01  # 10ms
 
     def __init__(self, db_path: str) -> None:
         self._path = db_path
@@ -139,20 +143,52 @@ class WALWriter:
         return self._thread_conn
 
     def _writer_loop(self) -> None:
-        """Process write operations from the queue in a single dedicated thread."""
+        """Process write operations from the queue in a single dedicated thread.
+
+        Batches up to _BATCH_MAX items (or _BATCH_TIMEOUT seconds) and issues
+        a single conn.commit() per batch — dramatically reducing fsync calls
+        under load (e.g. 1 commit per 50 writes instead of 50 commits).
+        """
         conn = self._ensure_thread_conn()
         while True:
+            # Block until at least one item arrives
             try:
                 item = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+
             if item is None:  # sentinel — graceful exit
                 break
-            fn, args = item
+
+            # We have at least one item; drain more up to BATCH_MAX / BATCH_TIMEOUT
+            batch: list[tuple[Any, tuple]] = [item]
+            deadline = time.monotonic() + self._BATCH_TIMEOUT
+            while len(batch) < self._BATCH_MAX:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    next_item = self._queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if next_item is None:  # sentinel mid-batch
+                    self._execute_batch(conn, batch)
+                    return  # exit after committing pending work
+                batch.append(next_item)
+
+            self._execute_batch(conn, batch)
+
+    def _execute_batch(self, conn: sqlite3.Connection, batch: list[tuple[Any, tuple]]) -> None:
+        """Execute a batch of (fn, args) writes and issue a single commit."""
+        for fn, args in batch:
             try:
                 fn(conn, *args)
             except Exception:
                 logger.error("WAL dedicated writer error", exc_info=True)
+        try:
+            conn.commit()
+        except Exception:
+            logger.error("WAL batch commit error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Inner write functions (accept an explicit conn; called from writer thread)
@@ -171,7 +207,6 @@ class WALWriter:
             "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
             (execution_id, record_json, now),
         )
-        conn.commit()
         logger.debug("WAL (thread) write execution_id=%s", execution_id)
 
     @staticmethod
@@ -194,7 +229,6 @@ class WALWriter:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None),
         )
-        conn.commit()
         logger.debug("WAL (thread) gateway_attempts request_id=%s disposition=%s", request_id, disposition)
 
     @staticmethod
@@ -204,7 +238,6 @@ class WALWriter:
             "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
             (event_id, json.dumps(record), datetime.now(timezone.utc).isoformat()),
         )
-        conn.commit()
         logger.debug("WAL (thread) write_tool_event event_id=%s", event_id)
 
     # ------------------------------------------------------------------

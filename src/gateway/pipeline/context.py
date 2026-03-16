@@ -84,8 +84,6 @@ class PipelineContext:
         self.audit_exporter: AuditExporter | None = None
         # B.4: Semantic cache (exact-match tier)
         self.semantic_cache: SemanticCache | None = None
-        # Stage C: gRPC governance sidecar server
-        self.grpc_server: Any | None = None
 
 
 _ctx = PipelineContext()

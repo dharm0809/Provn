@@ -109,10 +109,13 @@ class GenericAdapter(ProviderAdapter):
 
     async def parse_request(self, request: Request) -> ModelCall:
         body_bytes = await request.body()
-        try:
-            data = json.loads(body_bytes.decode("utf-8"))
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON body")
+        _cached = getattr(request.state, "_parsed_body", None)
+        data = _cached if isinstance(_cached, dict) else None
+        if data is None:
+            try:
+                data = json.loads(body_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                raise ValueError("Invalid JSON body")
 
         model_id = str(_json_path(data, self._model_path) or "")
         metadata: dict[str, Any] = {}

@@ -998,11 +998,6 @@ async def on_startup() -> None:
             from gateway.middleware.attachment_tracker import AttachmentNotificationCache
             ctx.attachment_cache = AttachmentNotificationCache()
             logger.info("Attachment tracking cache enabled")
-        # Stage C: gRPC governance sidecar
-        if settings.grpc_enabled:
-            from gateway.grpc.server import start_grpc_server
-            ctx.grpc_server = await start_grpc_server(settings, ctx)
-
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
     except Exception:
         logger.critical("Gateway startup FAILED — cleaning up partially initialized resources", exc_info=True)
@@ -1014,14 +1009,6 @@ async def on_shutdown() -> None:
     """Graceful shutdown: each step runs independently so one failure doesn't skip the rest."""
     ctx = get_pipeline_context()
     errors: list[str] = []
-
-    # Stage C: gRPC server shutdown (before other resources it may depend on)
-    if ctx.grpc_server:
-        try:
-            await ctx.grpc_server.stop(grace=5)
-        except Exception as e:
-            errors.append(f"grpc_server.stop: {e}")
-        ctx.grpc_server = None
 
     if ctx.http_client:
         try:

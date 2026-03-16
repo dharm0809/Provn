@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -34,7 +35,7 @@ class SessionChainTracker:
     def __init__(self, max_sessions: int = 10_000, ttl_seconds: int = 3600) -> None:
         self._max = max_sessions
         self._ttl = ttl_seconds
-        self._sessions: dict[str, SessionState] = {}
+        self._sessions: OrderedDict[str, SessionState] = OrderedDict()
         self._lock = asyncio.Lock()
 
     async def next_chain_values(self, session_id: str) -> tuple[int, str]:
@@ -46,6 +47,7 @@ class SessionChainTracker:
             state = self._sessions.get(session_id)
             if state is None:
                 return 0, _GENESIS_HASH
+            self._sessions.move_to_end(session_id)
             return state.last_sequence_number + 1, state.last_record_hash
 
     async def update(self, session_id: str, sequence_number: int, record_hash: str) -> None:
@@ -58,6 +60,7 @@ class SessionChainTracker:
                 last_record_hash=record_hash,
                 last_activity=now,
             )
+            self._sessions.move_to_end(session_id)
             if len(self._sessions) > self._max:
                 self._evict_locked(now)
 
@@ -70,10 +73,9 @@ class SessionChainTracker:
         ]
         for sid in to_delete:
             del self._sessions[sid]
-        # If still over limit, remove the least recently active
+        # If still over limit, pop from front (oldest in LRU order) — O(1)
         while len(self._sessions) > self._max:
-            oldest = min(self._sessions, key=lambda s: self._sessions[s].last_activity)
-            del self._sessions[oldest]
+            self._sessions.popitem(last=False)
 
     def active_session_count(self) -> int:
         return len(self._sessions)

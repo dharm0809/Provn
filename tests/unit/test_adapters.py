@@ -23,6 +23,7 @@ def _make_starlette_request(body: dict, headers: dict | None = None) -> MagicMoc
     raw = json.dumps(body).encode()
     req.body = AsyncMock(return_value=raw)
     req.headers = headers or {}
+    req.state._parsed_body = None
     return req
 
 

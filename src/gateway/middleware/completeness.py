@@ -58,10 +58,10 @@ async def completeness_middleware(request: Request, call_next) -> Response:
                         "execution_id": execution_id,
                         "user": user_id,
                     }),
-                    timeout=5.0,
+                    timeout=settings.completeness_timeout,
                 )
                 gateway_attempts_total.labels(disposition=disposition).inc()
             except asyncio.TimeoutError:
-                logger.warning("write_attempt timed out after 5s — skipping")
+                logger.warning("write_attempt timed out after %.1fs — skipping", settings.completeness_timeout)
             except Exception as e:
                 logger.warning("Failed to write gateway_attempt: %s", e)

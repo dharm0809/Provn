@@ -396,6 +396,10 @@ class Settings(BaseSettings):
     http_pool_max_connections: int = Field(default=100, description="Max HTTP connections in pool")
     http_pool_max_keepalive: int = Field(default=20, description="Max keepalive connections per host")
     http_keepalive_expiry: int = Field(default=30, description="Keepalive expiry in seconds")
+    completeness_timeout: float = Field(
+        default=2.0,
+        description="Timeout in seconds for completeness middleware storage writes",
+    )
 
     # Hedged requests (tail latency reduction)
     hedged_requests_enabled: bool = Field(default=False, description="Enable hedged cross-provider requests")
@@ -518,20 +522,6 @@ class Settings(BaseSettings):
             "When a request model matches model_pattern, a variant is selected by weight and "
             "the model field is rewritten. ab_variant + ab_original_model are stored in metadata."
         ),
-    )
-
-    # ── Stage C: gRPC sidecar ───────────────────────────────────────────────
-    grpc_enabled: bool = Field(
-        default=False,
-        description="Enable gRPC governance sidecar server (hybrid architecture)",
-    )
-    grpc_port: int = Field(
-        default=50051,
-        description="gRPC server listen port",
-    )
-    grpc_max_workers: int = Field(
-        default=10,
-        description="gRPC thread pool size (for non-async fallback paths)",
     )
 
     # Enterprise extension points (comma-separated Python dotted class paths)

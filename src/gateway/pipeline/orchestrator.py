@@ -48,6 +48,7 @@ from gateway.metrics.prometheus import (
     cache_hits, cache_misses,
 )
 from gateway.metrics.anomaly import latency_detector
+from cachetools import LRUCache
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ _AUDIT_ONLY_ATTESTATION_ID = "audit_only_no_attestation"
 # ── Adaptive Concurrency Limiters (Gradient2) ─────────────────────────────────
 # Per-provider concurrency limiters, created on first use.  Thread-safe for
 # asyncio (single writer, dict mutation is atomic in CPython).
-_concurrency_limiters: dict[str, ConcurrencyLimiter] = {}
+_concurrency_limiters: LRUCache = LRUCache(maxsize=100)
 
 
 def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
@@ -82,7 +83,7 @@ def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
 # wastes a retry on a model that has already been probed.  Thread-safe for
 # asyncio (single writer, dict mutation is atomic in CPython).
 
-_model_capabilities: dict[str, dict[str, bool]] = {}
+_model_capabilities: LRUCache = LRUCache(maxsize=500)
 # e.g.  {"gemma3:1b": {"supports_tools": False}, "qwen3:1.7b": {"supports_tools": True}}
 
 # PIISanitizer singleton — avoid recompiling regex patterns on every request.

@@ -76,8 +76,6 @@ Client
 Provider (OpenAI / Anthropic / Ollama / HuggingFace)
 ```
 
-Deploy with `docker compose -f deploy/docker-compose.hybrid.yml up`. See [Hybrid Architecture Plan](docs/plans/2026-03-14-hybrid-architecture-and-competitive-features.md) for design details and benchmarks.
-
 ---
 
 ## Quick Start
@@ -141,10 +139,9 @@ Open `http://localhost:8000/lineage/` for the audit dashboard.
 - Per-step pipeline timing in every execution record
 
 **Performance**
-- Hybrid Go/Python architecture — Go HTTP proxy with gRPC governance sidecar for maximum throughput
 - Parallelized pre-checks — policy, budget, and rate-limit evaluated concurrently via `asyncio.gather`
 - LRU content analysis cache (5000 entries) — identical content skips re-analysis
-- Batched SSE flushes (50ms intervals) in Go proxy streaming
+- uvloop + orjson for near-native async I/O and fast serialization
 - Async post-inference evaluation — response sent before governance completes (configurable)
 - Singleton pattern analyzers — regex patterns compiled once, reused across requests
 
@@ -205,12 +202,6 @@ python3 -m uvicorn src.gateway.main:app --reload --port 8000
 ```
 
 Requirements: Python 3.12+. Optional extras: `[redis]`, `[telemetry]`, `[auth]`.
-
-**Go proxy** (optional, for hybrid mode):
-```bash
-cd proxy && go build -o proxy . && ./proxy
-```
-Requires Go 1.21+. Configure via `PROXY_*` env vars (see `proxy/config/config.go`).
 
 ---
 

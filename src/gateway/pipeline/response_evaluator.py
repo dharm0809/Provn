@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from cachetools import LRUCache
+from cachetools import TTLCache
 from starlette.responses import JSONResponse
 
 from gateway.adapters.base import ModelResponse
@@ -43,9 +43,11 @@ class ContentBlockDetail:
         }
 
 # ---------------------------------------------------------------------------
-# Content analysis cache — SHA256-keyed LRU to prevent unbounded growth
+# Content analysis cache — SHA256-keyed TTL to prevent unbounded growth
+# and ensure stale verdicts are re-evaluated after policy hot-reloads.
 # ---------------------------------------------------------------------------
-_analysis_cache: LRUCache = LRUCache(maxsize=5000)
+_ANALYSIS_CACHE_TTL = 60  # seconds
+_analysis_cache: TTLCache = TTLCache(maxsize=5000, ttl=_ANALYSIS_CACHE_TTL)
 
 
 def clear_analysis_cache() -> None:
@@ -88,8 +90,8 @@ async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict
     """Run all analyzers on arbitrary text (tool outputs, injected content, etc.).
 
     Results are cached by SHA256 hash of *text* so repeated identical content
-    skips re-running analyzers.  Cache is bounded at 5000 entries (LRU) to
-    prevent unbounded memory growth.
+    skips re-running analyzers.  Cache is bounded at 5000 entries with a 60s
+    TTL to prevent unbounded memory growth and ensure stale verdicts expire.
 
     Returns a list of decision dicts -- same shape as analyzer_decisions in
     evaluate_post_inference.  Never raises; timeouts and errors are skipped

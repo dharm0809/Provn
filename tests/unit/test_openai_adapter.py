@@ -27,6 +27,7 @@ async def test_openai_adapter_parse_request():
     request.url = MagicMock(path="/v1/chat/completions")
     request.headers = {}
     request.method = "POST"
+    request.state._parsed_body = None
 
     call = await adapter.parse_request(request)
     assert call.provider == "openai"

@@ -19,6 +19,7 @@ dependencies = [
   "tenacity>=9.0",
   "pybreaker>=1.2",
   "orjson>=3.9",
+  "cachetools>=5.3",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +35,6 @@ search = ["ddgs>=7.0"]
 ocr = ["pytesseract>=0.3", "Pillow>=9.0"]
 signing = ["cryptography>=42.0"]
 compliance = ["weasyprint>=62.0", "jinja2>=3.1"]
-grpc = ["grpcio>=1.60", "grpcio-tools>=1.60"]
 dev = [
   "pytest>=8",
   "anyio[trio]>=4.0",
