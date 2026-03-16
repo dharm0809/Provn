@@ -178,6 +178,26 @@ When all three credentials are set, records go to Walacor backend AND local WAL 
 |----------|---------|-------------|
 | (no env vars) | — | Compliance export is always available at `/v1/compliance/export` when lineage is enabled. Supports `format=json|csv|pdf`, `framework=eu_ai_act|nist|soc2|iso42001`, `start=YYYY-MM-DD`, `end=YYYY-MM-DD`. PDF generation requires WeasyPrint + system pango/cairo libraries. |
 
+## Adaptive Gateway (Phase 23)
+
+Self-configuring intelligence layer — startup probes, request classification, model capability probing, identity validation, and resource monitoring.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WALACOR_STARTUP_PROBES_ENABLED` | true | Run startup probes at boot (provider health, disk space, routing validation) |
+| `WALACOR_PROVIDER_HEALTH_CHECK_ON_STARTUP` | true | Ping all configured providers during startup |
+| `WALACOR_CAPABILITY_PROBE_TTL_SECONDS` | 86400 | Re-probe model capabilities after this many seconds (0 = never re-probe) |
+| `WALACOR_IDENTITY_VALIDATION_ENABLED` | true | Cross-validate JWT sub claim against X-User-Id header; JWT wins on mismatch |
+| `WALACOR_DISK_MONITOR_ENABLED` | true | Monitor WAL disk space and log warnings when free space drops below threshold |
+| `WALACOR_DISK_MIN_FREE_PERCENT` | 5.0 | Minimum free disk percentage before warning (float) |
+| `WALACOR_RESOURCE_MONITOR_INTERVAL_SECONDS` | 60 | Background resource monitor check interval (seconds) |
+| `WALACOR_CUSTOM_STARTUP_PROBES` | (empty) | Comma-separated Python class paths for custom `StartupProbe` implementations |
+| `WALACOR_CUSTOM_REQUEST_CLASSIFIERS` | (empty) | Comma-separated Python class paths for custom `RequestClassifier` implementations |
+| `WALACOR_CUSTOM_IDENTITY_VALIDATORS` | (empty) | Comma-separated Python class paths for custom `IdentityValidator` implementations |
+| `WALACOR_CUSTOM_RESOURCE_MONITORS` | (empty) | Comma-separated Python class paths for custom `ResourceMonitor` implementations |
+
+All probes and monitors fail-open — a failed probe never blocks traffic.
+
 ## Prompt caching (Phase 28)
 
 | Variable | Default | Description |

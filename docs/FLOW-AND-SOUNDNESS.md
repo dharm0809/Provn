@@ -1,7 +1,7 @@
 # Gateway — Flow Diagrams & Soundness Analysis
 
 **Audience:** Engineering team
-**Generated against:** Phase 15 codebase (Redis + multi-model routing)
+**Generated against:** Phase 23 codebase (Redis + multi-model routing + lineage dashboard + embedded control plane + JWT/SSO + adaptive gateway)
 
 ---
 
