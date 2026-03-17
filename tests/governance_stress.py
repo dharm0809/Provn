@@ -1,16 +1,18 @@
-"""Comprehensive governance stress test — parallel requests to qwen3:4b + gemma3:1b.
+"""Comprehensive governance stress test.
 
 Sends ~90 requests across categories: general, reasoning, web search, creative,
 code generation, and Llama Guard safety probes (S1/S4/S9/S11).
 
 Usage:
     python tests/governance_stress.py
+    GATEWAY_URL=http://localhost:8002/v1/chat/completions GATEWAY_MODEL=qwen3:1.7b python tests/governance_stress.py
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,15 +23,16 @@ import aiohttp
 # Config
 # ---------------------------------------------------------------------------
 
-GATEWAY_URL = "http://localhost:8000/v1/chat/completions"
-API_KEY = "test-key-alpha"
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000/v1/chat/completions")
+API_KEY = os.environ.get("GATEWAY_API_KEY", "test-key-alpha")
 BATCH_SIZE = 6  # concurrent requests per batch (Ollama serialises internally)
 BATCH_DELAY = 1.0  # seconds between batches
 MAX_TOKENS_SHORT = 120
 MAX_TOKENS_LONG = 300
 
-BOTH = ["qwen3:4b", "gemma3:1b"]
-QWEN_ONLY = ["qwen3:4b"]
+_MODEL = os.environ.get("GATEWAY_MODEL", "qwen3:1.7b")
+BOTH = [_MODEL]
+QWEN_ONLY = [_MODEL]
 
 # ---------------------------------------------------------------------------
 # Questions
