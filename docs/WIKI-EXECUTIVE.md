@@ -371,7 +371,7 @@ Three targets are ready. No additional infrastructure is required beyond what is
 | Target | Files | Notes |
 |--------|-------|-------|
 | **Docker** | `deploy/Dockerfile`, `deploy/Dockerfile.fips` | Non-root; healthcheck built in; FIPS-140-2 image available |
-| **Docker Compose** | `deploy/docker-compose.yml` | `--profile redis` adds Redis alongside the gateway |
+| **Docker Compose** | `docker-compose.yml` | Single `docker compose up` starts Gateway + Ollama + OpenWebUI |
 | **Kubernetes** | `deploy/helm/` + `deploy/network-policies/` | PVC for WAL, readiness/liveness probes, egress network policy |
 
 Single command: `walacor-gateway` — port 8000.

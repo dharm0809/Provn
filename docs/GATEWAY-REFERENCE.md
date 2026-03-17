@@ -941,7 +941,7 @@ src/gateway/
 
 ### Docker Compose
 
-**File:** `deploy/docker-compose.yml`
+**File:** `docker-compose.yml`
 
 **Services:**
 - `gateway` — main ASGI app (uvicorn)

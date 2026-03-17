@@ -111,13 +111,7 @@ Brave and SerpAPI providers require `WALACOR_WEB_SEARCH_API_KEY`.
 From repo root:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build
+docker compose up --build
 ```
 
-With Ollama demo (pulls model, sends test request):
-
-```bash
-docker compose -f deploy/docker-compose.yml --profile demo up --build
-```
-
-Gateway listens on port 8002.
+This starts Gateway + Ollama + OpenWebUI. Gateway listens on port 8002, chat UI on port 3000.

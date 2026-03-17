@@ -1,0 +1,91 @@
+# Walacor Gateway — single command setup
+#
+#   docker compose up
+#
+# This starts Gateway + Ollama + OpenWebUI. Open http://localhost:3000 to chat.
+# Lineage dashboard at http://localhost:8002/lineage/
+#
+# Optional: copy .env.example to .env and customize settings.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8002:8000"
+    environment:
+      - WALACOR_GATEWAY_TENANT_ID=${WALACOR_GATEWAY_TENANT_ID:-dev-tenant}
+      - WALACOR_PROVIDER_OLLAMA_URL=http://ollama:11434
+      - WALACOR_GATEWAY_PROVIDER=${WALACOR_GATEWAY_PROVIDER:-ollama}
+      - WALACOR_GATEWAY_API_KEYS=${WALACOR_GATEWAY_API_KEYS:-}
+      - WALACOR_WAL_PATH=/var/walacor/wal
+      - WALACOR_SKIP_GOVERNANCE=${WALACOR_SKIP_GOVERNANCE:-false}
+      - WALACOR_TOOL_AWARE_ENABLED=${WALACOR_TOOL_AWARE_ENABLED:-true}
+      - WALACOR_WEB_SEARCH_ENABLED=${WALACOR_WEB_SEARCH_ENABLED:-true}
+      - WALACOR_THINKING_STRIP_ENABLED=${WALACOR_THINKING_STRIP_ENABLED:-true}
+      - WALACOR_LINEAGE_ENABLED=${WALACOR_LINEAGE_ENABLED:-true}
+      - WALACOR_CONTROL_PLANE_ENABLED=${WALACOR_CONTROL_PLANE_ENABLED:-true}
+      - WALACOR_LOG_LEVEL=${WALACOR_LOG_LEVEL:-INFO}
+      # Walacor backend (optional — leave empty to use local WAL only)
+      - WALACOR_SERVER=${WALACOR_SERVER:-}
+      - WALACOR_USERNAME=${WALACOR_USERNAME:-}
+      - WALACOR_PASSWORD=${WALACOR_PASSWORD:-}
+      # Cloud provider keys (optional)
+      - WALACOR_PROVIDER_OPENAI_KEY=${OPENAI_API_KEY:-}
+      - WALACOR_PROVIDER_ANTHROPIC_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - gateway-wal:/var/walacor/wal
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    volumes:
+      - webui-data:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URL=http://gateway:8000/v1
+      - OPENAI_API_KEY=${WALACOR_GATEWAY_API_KEYS:-dev-key}
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
+      - ENABLE_DIRECT_CONNECTIONS=false
+      - WEBUI_NAME=${WEBUI_NAME:-Walacor Chat}
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+volumes:
+  gateway-wal: {}
+  ollama_data: {}
+  webui-data: {}

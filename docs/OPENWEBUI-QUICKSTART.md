@@ -13,9 +13,7 @@ git clone https://github.com/your-org/walacor-gateway
 cd walacor-gateway/Gateway
 
 WALACOR_GATEWAY_API_KEYS=your-secret-key \
-docker compose -f deploy/docker-compose.yml \
-  --profile openwebui --profile ollama \
-  up -d
+docker compose up -d
 ```
 
 | Service | URL |

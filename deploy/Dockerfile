@@ -1,12 +1,10 @@
-# Build from repo root: docker build -f Gateway/deploy/Dockerfile .
-# Multi-stage: build then minimal runtime
+# Build: docker build -f deploy/Dockerfile .
+# Multi-stage: build wheel then minimal runtime
 FROM python:3.12-slim AS builder
 WORKDIR /build
-COPY walacor-core /build/walacor-core
-COPY Gateway /build/Gateway
+COPY . /build/gateway
 RUN pip install --no-cache-dir build && \
-    pip wheel --no-deps -w /wheels ./walacor-core && \
-    pip wheel --no-deps -w /wheels ./Gateway
+    pip wheel --no-deps -w /wheels ./gateway
 
 FROM python:3.12-slim AS runtime
 WORKDIR /app
