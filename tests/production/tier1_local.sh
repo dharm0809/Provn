@@ -4,15 +4,15 @@
 set -euo pipefail
 
 echo "=== Tier 1: Unit Tests ==="
-python3 -m pytest tests/unit/ -q --tb=short 2>&1 | tee /tmp/tier1_unit.txt
+python3.12 -m pytest tests/unit/ -q --tb=short 2>&1 | tee /tmp/tier1_unit.txt
 UNIT_RESULT=${PIPESTATUS[0]}
 
 echo ""
 echo "=== Tier 1: Compliance Tests ==="
-python3 -m pytest tests/compliance/ -q --tb=short 2>&1 | tee /tmp/tier1_compliance.txt
+python3.12 -m pytest tests/compliance/ -q --tb=short 2>&1 | tee /tmp/tier1_compliance.txt
 COMPLIANCE_RESULT=${PIPESTATUS[0]}
 
-python3 - <<'PYEOF'
+python3.12 - <<'PYEOF'
 import json, re, pathlib
 
 def parse_pytest_summary(path):

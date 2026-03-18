@@ -24,9 +24,9 @@ echo "==========================================="
 # ── Install Python deps if missing ──────────────────────────────────────────
 echo ""
 echo "[setup] Checking Python dependencies..."
-python3 -c "import aiohttp, requests" 2>/dev/null || {
+python3.12 -c "import aiohttp, requests" 2>/dev/null || {
     echo "  Installing aiohttp and requests..."
-    pip install --quiet aiohttp requests
+    python3.12 -m pip install --quiet aiohttp requests
 }
 echo "  Dependencies OK"
 
@@ -50,36 +50,36 @@ bash tests/production/tier1_local.sh || { echo "TIER 1 LOCAL GATE FAILED"; exit 
 # ── Tier 1: Audit Integrity (live) ───────────────────────────────────────────
 echo ""
 echo "=== TIER 1: Audit Integrity (live checks) ==="
-python3 tests/production/tier1_live.py || { echo "TIER 1 LIVE GATE FAILED"; exit 1; }
+python3.12 tests/production/tier1_live.py || { echo "TIER 1 LIVE GATE FAILED"; exit 1; }
 
 # ── Tier 2: Security Controls ────────────────────────────────────────────────
 echo ""
 echo "=== TIER 2: Security Controls ==="
-python3 tests/production/tier2_security.py || { echo "TIER 2 GATE FAILED"; exit 1; }
+python3.12 tests/production/tier2_security.py || { echo "TIER 2 GATE FAILED"; exit 1; }
 
 # ── Tier 3: Performance Baseline ─────────────────────────────────────────────
 echo ""
 echo "=== TIER 3: Performance Baseline ==="
 QUICK_FLAG="${QUICK:+--quick}"
-python3 tests/production/tier3_performance.py ${QUICK_FLAG:-} || { echo "TIER 3 GATE FAILED"; exit 1; }
+python3.12 tests/production/tier3_performance.py ${QUICK_FLAG:-} || { echo "TIER 3 GATE FAILED"; exit 1; }
 
 # ── Governance stress (populates sessions for Tier 5 chain audit) ─────────────
 echo ""
 echo "=== Pre-Tier 5: Governance Stress Run ==="
 GATEWAY_URL="http://$GATEWAY_IP:$GATEWAY_PORT/v1/chat/completions" \
 GATEWAY_MODEL="$GATEWAY_MODEL" \
-python3 tests/governance_stress.py 2>&1 | tee tests/artifacts/governance_stress_output.txt || true
+python3.12 tests/governance_stress.py 2>&1 | tee tests/artifacts/governance_stress_output.txt || true
 echo "  Stress run complete (failures above are non-blocking)"
 
 # ── Tier 4: Resilience ────────────────────────────────────────────────────────
 echo ""
 echo "=== TIER 4: Resilience ==="
-python3 tests/production/tier4_resilience.py || { echo "TIER 4 GATE FAILED"; exit 1; }
+python3.12 tests/production/tier4_resilience.py || { echo "TIER 4 GATE FAILED"; exit 1; }
 
 # ── Tier 5: Compliance Artifacts ──────────────────────────────────────────────
 echo ""
 echo "=== TIER 5: Compliance Artifacts ==="
-python3 tests/production/tier5_compliance.py || { echo "TIER 5 GATE FAILED"; exit 1; }
+python3.12 tests/production/tier5_compliance.py || { echo "TIER 5 GATE FAILED"; exit 1; }
 
 echo ""
 echo "==========================================="
