@@ -113,6 +113,11 @@ echo "[7/8] Starting gateway on port $GATEWAY_PORT..."
 
 export WALACOR_GATEWAY_TENANT_ID=dev-tenant
 export WALACOR_GATEWAY_PROVIDER=ollama
+
+# Walacor backend storage (dual-write: WAL + remote)
+export WALACOR_SERVER="${WALACOR_SERVER:-https://sandbox.walacor.com/api}"
+export WALACOR_USERNAME="${WALACOR_USERNAME:-}"
+export WALACOR_PASSWORD="${WALACOR_PASSWORD:-}"
 export WALACOR_PROVIDER_OLLAMA_URL=http://localhost:11434
 export WALACOR_SKIP_GOVERNANCE=false
 export WALACOR_TOOL_AWARE_ENABLED=true

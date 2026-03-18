@@ -50,10 +50,31 @@ async def lineage_session_timeline(request: Request) -> JSONResponse:
         records = reader.get_session_timeline(session_id)
         if not records:
             return JSONResponse({"error": "Session not found", "session_id": session_id}, status_code=404)
+        records = [_enrich_execution_record(r) for r in records]
         return JSONResponse({"session_id": session_id, "records": records, "count": len(records)})
     except Exception as e:
         logger.error("lineage_session_timeline error: %s", e, exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _enrich_execution_record(record: dict) -> dict:
+    """Enrich execution record with derived fields for API consumers.
+
+    - model_id: fallback from model_attestation_id if missing
+    - content_analysis: promote from metadata.analyzer_decisions to top level
+    """
+    # model_id fallback: extract from "self-attested:model_name" format
+    if not record.get("model_id"):
+        att_id = record.get("model_attestation_id", "")
+        if isinstance(att_id, str) and att_id.startswith("self-attested:"):
+            record["model_id"] = att_id[len("self-attested:"):]
+
+    # Promote content analysis from metadata to top level for easy access
+    meta = record.get("metadata") or {}
+    if not record.get("content_analysis") and meta.get("analyzer_decisions"):
+        record["content_analysis"] = meta["analyzer_decisions"]
+
+    return record
 
 
 async def lineage_execution(request: Request) -> JSONResponse:
@@ -66,6 +87,7 @@ async def lineage_execution(request: Request) -> JSONResponse:
         record = reader.get_execution(execution_id)
         if record is None:
             return JSONResponse({"error": "Execution not found", "execution_id": execution_id}, status_code=404)
+        record = _enrich_execution_record(record)
         tool_events = reader.get_tool_events(execution_id)
         return JSONResponse({"record": record, "tool_events": tool_events})
     except Exception as e:

@@ -243,10 +243,12 @@ def test_pii_detection():
             if records:
                 rec = records[0]
                 # Check for content_analysis or analyzer_decisions in record
+                meta = rec.get("metadata") or {}
                 has_analysis = (
                     rec.get("content_analysis") is not None
                     or rec.get("analyzer_decisions") is not None
-                    or rec.get("metadata", {}).get("content_analysis") is not None
+                    or meta.get("analyzer_decisions") is not None
+                    or meta.get("content_analysis") is not None
                     or rec.get("response_policy_decisions") is not None
                 )
                 check("Content analysis ran on response",
