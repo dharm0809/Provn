@@ -72,20 +72,16 @@ def chat(messages, model=None, **kwargs):
 
 
 def tool_request(session_id: str, prompt: str, max_tokens: int = 2048) -> requests.Response:
-    """POST via gateway with system message encouraging tool use.
+    """POST via gateway with explicit tool definitions.
 
-    Uses high max_tokens because qwen3 thinking models consume tokens for
-    reasoning before (potentially) emitting a tool_calls response.
+    Sends tools directly in the body (matching the pre-flight approach that
+    works) rather than relying on gateway auto-injection.
     """
     return requests.post(CHAT_URL, json={
         "model": TOOL_MODEL,
-        "messages": [
-            {"role": "system", "content":
-                "You have access to a web_search tool. "
-                "When the user asks you to search or look up anything, you MUST call "
-                "the web_search function. Do not answer from memory."},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [_TOOL_DEF],
+        "stream": False,
         "max_tokens": max_tokens,
     }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
 
