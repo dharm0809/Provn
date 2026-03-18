@@ -89,10 +89,14 @@ async def lineage_execution(request: Request) -> JSONResponse:
             return JSONResponse({"error": "Execution not found", "execution_id": execution_id}, status_code=404)
         record = _enrich_execution_record(record)
         tool_events = reader.get_tool_events(execution_id)
-        # Top-level convenience fields for API consumers
+        # Keep "record" wrapper for dashboard compat + spread top-level for API consumers
         return JSONResponse({
-            **record,
+            "record": record,
             "tool_events": tool_events,
+            # Top-level convenience fields (same data, easier access)
+            "model_id": record.get("model_id"),
+            "content_analysis": record.get("content_analysis"),
+            "execution_id": record.get("execution_id"),
         })
     except Exception as e:
         logger.error("lineage_execution error: %s", e, exc_info=True)
