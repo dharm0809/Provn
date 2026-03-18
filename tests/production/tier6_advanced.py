@@ -325,17 +325,23 @@ def test_tool_content_analysis():
 
 def test_mcp_registry():
     health = get_health()
-    r = requests.get(f"{BASE_URL}/v1/tools", headers=HEADERS, timeout=10)
-    if r.status_code == 404:
-        skip("MCP registry /v1/tools", "endpoint not exposed — registry is internal")
-    elif r.status_code == 200:
-        tools = r.json()
-        check("/v1/tools endpoint accessible", True, f"{len(tools)} tools registered")
-    else:
-        check("/v1/tools returns non-500", r.status_code != 500, f"got {r.status_code}")
 
-    check("Gateway healthy (MCP registry init succeeded)",
+    # Verify gateway started successfully (tool registry init is part of startup)
+    check("Gateway healthy (registry init succeeded)",
           health.get("status") in ("ok", "healthy"), str(health.get("status")))
+
+    # Verify model_capabilities shows supports_tools=True (proves tool injection works)
+    caps = health.get("model_capabilities", {})
+    has_tool_model = any(
+        v.get("supports_tools") or v.get("supportstools")
+        for v in caps.values()
+    ) if isinstance(caps, dict) else False
+    check("Model capabilities show tool support",
+          has_tool_model, f"capabilities={list(caps.keys())}")
+
+    # Verify pre-flight tool call proved registry has web_search registered
+    check("Tool registry has web_search (proved by pre-flight)",
+          _TOOLS_WORK, "pre-flight tool call succeeded")
 
 
 # ── 7. Web search sources captured ───────────────────────────────────────────
