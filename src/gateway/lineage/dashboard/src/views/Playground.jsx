@@ -259,12 +259,15 @@ export default function Playground({ navigate }) {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let rawAccumulator = '';  // full raw response for JSON fallback
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        rawAccumulator += chunk;
+        buffer += chunk;
         const lines = buffer.split('\n');
         buffer = lines.pop(); // keep incomplete line in buffer
 
@@ -279,13 +282,27 @@ export default function Playground({ navigate }) {
         }
       }
 
-      // Process any remaining buffer
+      // Process any remaining buffer (SSE)
       if (buffer.trim() && buffer.trim() !== 'data: [DONE]') {
         const delta = parseSseDelta(buffer.trim());
         if (delta) {
           fullContent += delta;
           setResponse(fullContent);
         }
+      }
+
+      // Fallback: gateway may return plain JSON instead of SSE
+      // (thinking models buffer <think> tokens → non-streaming JSON response)
+      if (!fullContent) {
+        const raw = (rawAccumulator + buffer).trim();
+        try {
+          const json = JSON.parse(raw);
+          const msg = json?.choices?.[0]?.message;
+          if (msg?.content) {
+            fullContent = msg.content;
+            setResponse(fullContent);
+          }
+        } catch {}
       }
 
       setStreaming(false);
