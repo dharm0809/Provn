@@ -47,8 +47,9 @@ _TOOL_DEF = {
     },
 }
 
-# Module-level flag: set by preflight_tool_check()
-_TOOLS_WORK = False
+# Set by preflight — the session_id of the ONE successful tool call
+_TOOL_SESSION: str = ""
+_TOOLS_WORK: bool = False
 
 
 def check(name: str, passed: bool, detail: str = "") -> None:
@@ -60,30 +61,6 @@ def check(name: str, passed: bool, detail: str = "") -> None:
 def skip(name: str, reason: str) -> None:
     print(f"  [SKIP] {name}: {reason}")
     RESULTS.append({"name": name, "passed": True, "detail": f"skipped: {reason}"})
-
-
-def chat(messages, model=None, **kwargs):
-    return requests.post(CHAT_URL, json={
-        "model": model or TOOL_MODEL,
-        "messages": messages,
-        "max_tokens": kwargs.get("max_tokens", 200),
-        **{k: v for k, v in kwargs.items() if k != "max_tokens"},
-    }, headers=HEADERS, timeout=120)
-
-
-def tool_request(session_id: str, prompt: str, max_tokens: int = 2048) -> requests.Response:
-    """POST via gateway with explicit tool definitions.
-
-    Sends tools directly in the body (matching the pre-flight approach that
-    works) rather than relying on gateway auto-injection.
-    """
-    return requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "tools": [_TOOL_DEF],
-        "stream": False,
-        "max_tokens": max_tokens,
-    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
 
 
 def get_health() -> dict:
@@ -109,56 +86,45 @@ def _check_tool_response(r: requests.Response) -> tuple[bool, str]:
     return False, f"finish_reason={fr}, content={content!r}"
 
 
-def _check_lineage_for_tools(session_id: str) -> bool:
-    """Check if a session has tool events in its execution records."""
+def _find_tool_events(session_id: str) -> list[dict]:
+    """Find all tool events for a session by checking execution records."""
     sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
     if sr.status_code != 200:
-        return False
+        return []
     sessions = sr.json().get("sessions", [])
     match = next((s for s in sessions if s.get("session_id") == session_id), None)
     if not match:
-        return False
+        return []
 
-    # Check tool_names in session listing
-    if "web_search" in str(match.get("tool_names", "")):
-        return True
-
-    # Check execution detail for tool events
     sid = match["session_id"]
     er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
     if er.status_code != 200:
-        return False
+        return []
+
+    all_events = []
     for rec in er.json().get("records", []):
         exec_id = rec.get("execution_id") or rec.get("id")
         if not exec_id:
             continue
         er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
         if er2.status_code == 200:
-            if er2.json().get("tool_events"):
-                return True
-    return False
+            events = er2.json().get("tool_events", [])
+            all_events.extend(events)
+    return all_events
 
 
-# ── 0. Pre-flight: diagnose tool support at Ollama level ─────────────────────
+# ── 0. Pre-flight: one tool call, reused by all tool tests ───────────────────
 
 def preflight_tool_check() -> bool:
-    """Test tool calling directly against Ollama (bypasses gateway).
+    """Make ONE tool call through the gateway. All tool tests reuse this session."""
+    global _TOOLS_WORK, _TOOL_SESSION
 
-    This isolates model behavior from gateway behavior:
-    - If Ollama returns tool_calls → model supports tools, gateway should too
-    - If Ollama does NOT → model limitation, tool tests should skip
-    """
-    global _TOOLS_WORK
-
-    # ── Step 1: Direct Ollama test ───────────────────────────────────────
+    # ── Step 1: Direct Ollama (verify model supports tools) ──────────
     print("  [DIAG] Step 1: Testing tool calls directly against Ollama...")
-    ollama_tools = False
     try:
         r = requests.post(_OLLAMA_URL, json={
             "model": TOOL_MODEL,
-            "messages": [
-                {"role": "user", "content": "Search for: test"},
-            ],
+            "messages": [{"role": "user", "content": "Search for: test"}],
             "tools": [_TOOL_DEF],
             "stream": False,
         }, timeout=120)
@@ -167,80 +133,56 @@ def preflight_tool_check() -> bool:
             print(f"  [DIAG]   Ollama: PASS — {detail}")
         else:
             print(f"  [DIAG]   Ollama: model did NOT call tools — {detail}")
+            print(f"  [DIAG]   {TOOL_MODEL} does not support tools. Try llama3.1:8b")
+            return False
     except requests.ConnectionError:
         print(f"  [DIAG]   Cannot reach Ollama at {_OLLAMA_URL}")
-        print(f"  [DIAG]   (port 11434 not mapped? trying gateway only)")
-
-    if not ollama_tools:
-        print(f"  [DIAG]   {TOOL_MODEL} does not emit tool_calls in Ollama.")
-        print(f"  [DIAG]   Tool-dependent tests (1/2/5/7) will SKIP.")
-        print(f"  [DIAG]   To enable: pull a tool-calling model like llama3.1:8b")
-        _TOOLS_WORK = False
         return False
 
-    # ── Step 2: Send tools EXPLICITLY through gateway (same body as step 1)
-    # This isolates: is the gateway blocking tool calls, or just not injecting them?
-    print("  [DIAG] Step 2: Sending explicit tools through gateway...")
-    gw_session = str(uuid.uuid4())
-    r = requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content": "Search for: test"}],
-        "tools": [_TOOL_DEF],
-        "stream": False,
-    }, headers={**HEADERS, "X-Session-Id": gw_session}, timeout=120)
-
-    if r.status_code != 200:
-        print(f"  [DIAG]   Explicit tools: got {r.status_code}")
-        # Retry once
-        time.sleep(5)
-        gw_session = str(uuid.uuid4())
+    # ── Step 2: ONE tool call through gateway (explicit tools in body) ─
+    print("  [DIAG] Step 2: Making one tool call through the gateway...")
+    _TOOL_SESSION = str(uuid.uuid4())
+    for attempt in range(1, 4):
         r = requests.post(CHAT_URL, json={
             "model": TOOL_MODEL,
             "messages": [{"role": "user", "content": "Search for: test"}],
             "tools": [_TOOL_DEF],
             "stream": False,
-        }, headers={**HEADERS, "X-Session-Id": gw_session}, timeout=120)
-
-    if r.status_code != 200:
-        print(f"  [DIAG]   Explicit tools failed: {r.status_code}")
-        _TOOLS_WORK = False
+        }, headers={**HEADERS, "X-Session-Id": _TOOL_SESSION}, timeout=120)
+        if r.status_code == 200:
+            break
+        print(f"  [DIAG]   Attempt {attempt}: got {r.status_code}, retrying...")
+        _TOOL_SESSION = str(uuid.uuid4())
+        time.sleep(5)
+    else:
+        print(f"  [DIAG]   All attempts failed")
         return False
 
-    body = r.json()
-    choice = body.get("choices", [{}])[0]
-    fr = choice.get("finish_reason", "")
-    tc = choice.get("message", {}).get("tool_calls", [])
-    content = (choice.get("message", {}).get("content") or "")[:120]
-
-    # Gateway active tool loop consumes tool_calls → finish_reason=stop + search content
-    # If we see content mentioning search, the tool loop ran successfully
-    print(f"  [DIAG]   finish_reason={fr}, tool_calls={len(tc)}, content={content!r}")
+    content = (r.json().get("choices", [{}])[0]
+               .get("message", {}).get("content") or "")[:120]
+    print(f"  [DIAG]   Response: {content!r}")
 
     time.sleep(3)  # WAL write is async
-    gw_tools = _check_lineage_for_tools(gw_session)
-    if gw_tools:
-        print(f"  [DIAG]   Gateway: PASS — tool events found in lineage")
+
+    events = _find_tool_events(_TOOL_SESSION)
+    if events:
+        print(f"  [DIAG]   Gateway: PASS — {len(events)} tool events in lineage")
+        _TOOLS_WORK = True
     elif any(kw in content.lower() for kw in ("search", "result", "found", "no result")):
         print(f"  [DIAG]   Gateway: PASS — response indicates tool execution")
-        gw_tools = True
-    elif fr == "tool_calls" or tc:
-        # Gateway did NOT consume tool_calls (no active tool loop?) — still proves tools work
-        print(f"  [DIAG]   Gateway: PASS — model emitted tool_calls (not consumed by gateway)")
-        gw_tools = True
+        _TOOLS_WORK = True
     else:
-        print(f"  [DIAG]   Gateway: tools not detected")
+        print(f"  [DIAG]   Gateway: no tool events detected")
 
-    _TOOLS_WORK = gw_tools
-    return gw_tools
+    return _TOOLS_WORK
 
 
 def _require_tools(name: str) -> bool:
-    """Guard for tool-dependent tests. Returns True if test should run."""
     if TOOL_MODEL == "qwen3:1.7b":
         skip(name, "qwen3:1.7b doesn't support tools — upgrade to qwen3:4b")
         return False
     if not _TOOLS_WORK:
-        skip(name, f"{TOOL_MODEL} does not emit tool_calls (see pre-flight)")
+        skip(name, f"{TOOL_MODEL}: tools not working (see pre-flight)")
         return False
     return True
 
@@ -248,113 +190,59 @@ def _require_tools(name: str) -> bool:
 # ── 1. Web search tool invocation ────────────────────────────────────────────
 
 def test_web_search_invocation():
-    """Send a prompt that triggers web search and verify tool was called."""
+    """Verify tool was called — uses the pre-flight session (no extra DDG calls)."""
     if not _require_tools("Web search invocation"):
         return
 
-    session_id = str(uuid.uuid4())
-    r = tool_request(session_id,
-        "Use the web_search tool right now. Search for 'artificial intelligence' "
-        "and report what the search returns.")
-
-    check("Web search request returns 200", r.status_code == 200, f"got {r.status_code}")
-    if r.status_code != 200:
-        return
-
-    time.sleep(3)  # WAL write async
-
-    # Find our session in lineage
     sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
     if sr.status_code != 200:
-        check("Session found after web search", False, "lineage sessions unavailable")
+        check("Session found after web search", False, "lineage unavailable")
         return
 
     sessions = sr.json().get("sessions", [])
-    match = next((s for s in sessions if s.get("session_id") == session_id), None)
+    match = next((s for s in sessions if s.get("session_id") == _TOOL_SESSION), None)
     check("Web search session found in lineage", match is not None,
-          f"session_id={session_id[:8]}...")
+          f"session_id={_TOOL_SESSION[:8]}...")
 
     if match:
-        has_tools = _check_lineage_for_tools(session_id)
+        events = _find_tool_events(_TOOL_SESSION)
         check("Tool event recorded (web_search executed)",
-              has_tools, "checked session + execution detail")
+              len(events) > 0, f"{len(events)} tool events")
 
 
 # ── 2. Tool event audit integrity ─────────────────────────────────────────────
 
 def test_tool_event_audit():
-    """After a tool call, verify the execution record has properly hashed tool events."""
+    """Verify tool events have SHA3-512 hashes — uses pre-flight session."""
     if not _require_tools("Tool event audit"):
         return
 
-    session_id = str(uuid.uuid4())
-    r = tool_request(session_id,
-        "Call the web_search tool with query 'machine learning'. "
-        "Summarize the first result in one sentence.")
+    events = _find_tool_events(_TOOL_SESSION)
+    check("Tool events present in execution record",
+          len(events) > 0, f"{len(events)} tool events")
 
-    check("Tool audit request returns 200", r.status_code == 200, f"got {r.status_code}")
-    if r.status_code != 200:
-        return
+    hashes_ok = False
+    for te in events:
+        ih = te.get("input_hash", "")
+        oh = te.get("output_hash", "")
+        if len(ih) == 128 and len(oh) == 128:
+            hashes_ok = True
+            break
 
-    time.sleep(3)
-
-    # Find execution with tool events
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
-    if sr.status_code != 200:
-        return
-    sessions = sr.json().get("sessions", [])
-    match = next((s for s in sessions if s.get("session_id") == session_id), None)
-    if not match:
-        check("Tool audit: session found", False, "session not in lineage")
-        return
-
-    # Get execution detail
-    sid = match["session_id"]
-    er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
-    if er.status_code != 200:
-        check("Tool audit: execution detail accessible", False, f"got {er.status_code}")
-        return
-
-    records = er.json().get("records", [])
-    tool_events_found = False
-    hashes_present = False
-
-    for rec in records:
-        exec_id = rec.get("execution_id") or rec.get("id")
-        if not exec_id:
-            continue
-        er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
-        if er2.status_code == 200:
-            tool_events = er2.json().get("tool_events", [])
-            if tool_events:
-                tool_events_found = True
-                # Verify SHA3-512 hashes are present (128 hex chars)
-                for te in tool_events:
-                    ih = te.get("input_hash", "")
-                    oh = te.get("output_hash", "")
-                    if len(ih) == 128 and len(oh) == 128:
-                        hashes_present = True
-                        break
-
-    check("Tool events present in execution record", tool_events_found,
-          "tool_events array non-empty")
     check("Tool event SHA3-512 hashes present (128 hex chars)",
-          hashes_present or not tool_events_found,
+          hashes_ok or len(events) == 0,
           "input_hash and output_hash verified")
 
 
 # ── 3. Multi-turn conversation integrity ──────────────────────────────────────
 
 def test_multi_turn_integrity():
-    """Multi-turn conversation where content builds across messages — chain must stay valid."""
     session_id = str(uuid.uuid4())
-
     turns = [
         "My name is Alice. Remember that.",
         "What is 5 + 7?",
         "What is my name?",
     ]
-
     for i, content in enumerate(turns):
         r = requests.post(CHAT_URL, json={
             "model": TOOL_MODEL,
@@ -366,8 +254,6 @@ def test_multi_turn_integrity():
         time.sleep(1)
 
     time.sleep(3)
-
-    # Verify chain is still valid after 3 turns
     sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
     if sr.status_code == 200:
         sessions = sr.json().get("sessions", [])
@@ -378,8 +264,7 @@ def test_multi_turn_integrity():
                   rv.status_code == 200 and rv.json().get("valid", False),
                   str(rv.json()) if rv.status_code == 200 else f"got {rv.status_code}")
             rc = match.get("record_count", 0)
-            check("All 3 turns recorded in session",
-                  rc >= 3, f"record_count={rc}")
+            check("All 3 turns recorded in session", rc >= 3, f"record_count={rc}")
         else:
             check("Multi-turn session found in lineage", False,
                   f"session_id={session_id[:8]}...")
@@ -388,16 +273,12 @@ def test_multi_turn_integrity():
 # ── 4. File/image attachment mid-conversation ─────────────────────────────────
 
 def test_attachment_handling():
-    """Send a base64 image in a message — verify the request is handled and attempt recorded."""
-    # 1x1 white PNG (smallest valid PNG)
     tiny_png_b64 = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
     )
-
     pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
     pre_count = pre.json().get("total", 0) if pre.status_code == 200 else 0
 
-    # Send multimodal message with image
     r = requests.post(CHAT_URL, json={
         "model": TOOL_MODEL,
         "messages": [{
@@ -412,8 +293,6 @@ def test_attachment_handling():
         "max_tokens": 20,
     }, headers=HEADERS, timeout=90)
 
-    # Gateway may return 200 (model handles it) or 422 (model doesn't support vision)
-    # Either way — no crash and attempt record written
     check("Attachment request handled (no 500)", r.status_code != 500,
           f"got {r.status_code}")
     check("Attachment request response is JSON", _is_json(r.text))
@@ -428,62 +307,24 @@ def test_attachment_handling():
 # ── 5. Tool output content analysis ──────────────────────────────────────────
 
 def test_tool_content_analysis():
-    """Verify content_analysis field is populated on tool events (indirect injection detection)."""
+    """Check content_analysis field on tool events — uses pre-flight session."""
     if not _require_tools("Tool content analysis"):
         return
 
-    session_id = str(uuid.uuid4())
-    r = tool_request(session_id,
-        "Use web_search to look up 'neural network definition'. "
-        "Return one sentence from the results.")
-
-    if r.status_code != 200:
-        skip("Tool content analysis", f"request failed with {r.status_code}")
+    events = _find_tool_events(_TOOL_SESSION)
+    if not events:
+        skip("Tool content analysis", "no tool events found")
         return
 
-    time.sleep(3)
-
-    # Check tool events for content_analysis field
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
-    if sr.status_code != 200:
-        return
-    sessions = sr.json().get("sessions", [])
-    match = next((s for s in sessions if s.get("session_id") == session_id), None)
-    if not match:
-        skip("Tool content analysis", "session not found")
-        return
-
-    sid = match["session_id"]
-    er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
-    if er.status_code != 200:
-        return
-
-    for rec in er.json().get("records", []):
-        exec_id = rec.get("execution_id") or rec.get("id")
-        if not exec_id:
-            continue
-        er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
-        if er2.status_code == 200:
-            tool_events = er2.json().get("tool_events", [])
-            if tool_events:
-                has_analysis = any(
-                    te.get("content_analysis") is not None for te in tool_events
-                )
-                check("Tool events have content_analysis field",
-                      has_analysis,
-                      f"{len(tool_events)} tool events checked")
-                return
-
-    skip("Tool content analysis", "no tool events found")
+    has_analysis = any(te.get("content_analysis") is not None for te in events)
+    check("Tool events have content_analysis field",
+          has_analysis, f"{len(events)} tool events checked")
 
 
 # ── 6. MCP registry health ────────────────────────────────────────────────────
 
 def test_mcp_registry():
-    """Verify the tool registry is initialized (MCP infra is up even if no servers configured)."""
     health = get_health()
-
-    # Check /v1/tools endpoint if it exists
     r = requests.get(f"{BASE_URL}/v1/tools", headers=HEADERS, timeout=10)
     if r.status_code == 404:
         skip("MCP registry /v1/tools", "endpoint not exposed — registry is internal")
@@ -493,65 +334,34 @@ def test_mcp_registry():
     else:
         check("/v1/tools returns non-500", r.status_code != 500, f"got {r.status_code}")
 
-    # Verify gateway startup didn't fail due to MCP issues (health is up = registry init OK)
-    check("Gateway healthy (MCP registry init succeeded)", health.get("status") in ("ok", "healthy"),
-          str(health.get("status")))
+    check("Gateway healthy (MCP registry init succeeded)",
+          health.get("status") in ("ok", "healthy"), str(health.get("status")))
 
 
 # ── 7. Web search sources captured ───────────────────────────────────────────
 
 def test_web_search_sources():
-    """Verify that web search results include source URLs in tool events."""
+    """Check source URLs in tool events — uses pre-flight session."""
     if not _require_tools("Web search sources"):
         return
 
-    session_id = str(uuid.uuid4())
-    r = tool_request(session_id,
-        "Call web_search with query 'Linux kernel'. "
-        "Briefly describe what the search result says.")
-
-    if r.status_code != 200:
-        skip("Web search sources", f"request failed {r.status_code}")
+    events = _find_tool_events(_TOOL_SESSION)
+    if not events:
+        skip("Web search sources", "no tool events found")
         return
 
-    time.sleep(3)
+    for te in events:
+        sources = te.get("sources") or []
+        if sources:
+            check("Web search sources captured in tool event",
+                  len(sources) > 0, f"{len(sources)} sources")
+            check("Sources have URL field",
+                  any("url" in str(s) or "href" in str(s) for s in sources),
+                  str(sources[0])[:80])
+            return
 
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
-    if sr.status_code != 200:
-        return
-    sessions = sr.json().get("sessions", [])
-    match = next((s for s in sessions if s.get("session_id") == session_id), None)
-    if not match:
-        skip("Web search sources", "session not found")
-        return
-
-    sid = match["session_id"]
-    er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
-    if er.status_code != 200:
-        return
-
-    for rec in er.json().get("records", []):
-        exec_id = rec.get("execution_id") or rec.get("id")
-        if not exec_id:
-            continue
-        er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
-        if er2.status_code == 200:
-            tool_events = er2.json().get("tool_events", [])
-            for te in tool_events:
-                sources = te.get("sources") or []
-                if sources:
-                    check("Web search sources captured in tool event",
-                          len(sources) > 0, f"{len(sources)} sources")
-                    check("Sources have URL field",
-                          any("url" in str(s) or "href" in str(s) for s in sources),
-                          str(sources[0])[:80])
-                    return
-            if tool_events:
-                # Tool was called but no sources — DDG may not return them for all queries
-                skip("Web search sources", "tool called but no sources (DDG limitation)")
-                return
-
-    skip("Web search sources", "no tool events found")
+    # DDG "test" query may return no sources (empty results is valid)
+    skip("Web search sources", "tool called but no sources (DDG returned empty for 'test')")
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -576,7 +386,7 @@ def main():
     else:
         print()
 
-    # Pre-flight: test tool calling directly against Ollama
+    # Pre-flight: ONE tool call, reused by all tool tests
     if TOOL_MODEL != "qwen3:1.7b":
         print("[0/7] Pre-flight tool invocation check")
         preflight_tool_check()
