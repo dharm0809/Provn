@@ -273,12 +273,23 @@ def test_multi_turn_integrity():
 # ── 4. File/image attachment mid-conversation ─────────────────────────────────
 
 def test_attachment_handling():
+    """Send a base64 image and verify the full attachment audit trail."""
+    import base64 as b64mod
+    import hashlib
+
+    # 1x1 red PNG (smallest valid PNG with known content)
     tiny_png_b64 = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
     )
+    # Compute expected SHA3-512 of the raw image bytes
+    raw_bytes = b64mod.b64decode(tiny_png_b64)
+    expected_hash = hashlib.sha3_512(raw_bytes).hexdigest()
+    expected_size = len(raw_bytes)
+
     pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
     pre_count = pre.json().get("total", 0) if pre.status_code == 200 else 0
 
+    session_id = str(uuid.uuid4())
     r = requests.post(CHAT_URL, json={
         "model": TOOL_MODEL,
         "messages": [{
@@ -290,18 +301,65 @@ def test_attachment_handling():
                 }},
             ]
         }],
-        "max_tokens": 20,
-    }, headers=HEADERS, timeout=90)
+        "max_tokens": 50,
+    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=90)
 
     check("Attachment request handled (no 500)", r.status_code != 500,
           f"got {r.status_code}")
     check("Attachment request response is JSON", _is_json(r.text))
 
-    time.sleep(2)
+    time.sleep(3)
+
+    # Completeness: attempt record written
     post = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
     post_count = post.json().get("total", 0) if post.status_code == 200 else 0
     check("Attempt record written for attachment request",
           post_count > pre_count, f"before={pre_count}, after={post_count}")
+
+    # Check execution record for multimodal metadata
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    if sr.status_code == 200:
+        sessions = sr.json().get("sessions", [])
+        match = next((s for s in sessions if s.get("session_id") == session_id), None)
+        if match:
+            er = requests.get(f"{LINEAGE_URL}/sessions/{session_id}", timeout=10)
+            if er.status_code == 200:
+                records = er.json().get("records", [])
+                if records:
+                    rec = records[0]
+                    # Check multimodal flags in metadata
+                    meta = rec.get("metadata") or {}
+                    check("Execution record has multimodal flag",
+                          meta.get("has_multimodal_input") is True,
+                          f"has_multimodal_input={meta.get('has_multimodal_input')}")
+                    check("Multimodal input count = 1",
+                          meta.get("multimodal_input_count") == 1,
+                          f"count={meta.get('multimodal_input_count')}")
+
+    # Check attachment metadata via lineage API
+    ar = requests.get(f"{LINEAGE_URL}/attachments",
+                      params={"session_id": session_id}, timeout=10)
+    if ar.status_code == 200:
+        attachments = ar.json().get("attachments", [])
+        if attachments:
+            att = attachments[0]
+            check("Attachment SHA3-512 hash recorded",
+                  att.get("hash_sha3_512") == expected_hash,
+                  f"expected={expected_hash[:16]}... got={str(att.get('hash_sha3_512', ''))[:16]}...")
+            check("Attachment mimetype is image/png",
+                  att.get("mimetype") == "image/png",
+                  f"mimetype={att.get('mimetype')}")
+            check("Attachment size recorded",
+                  att.get("size_bytes") == expected_size,
+                  f"expected={expected_size}, got={att.get('size_bytes')}")
+        else:
+            skip("Attachment metadata in lineage",
+                 "no file_metadata in execution record (adapter may not extract)")
+    elif ar.status_code == 404:
+        skip("Attachment lineage endpoint", "endpoint not available")
+    else:
+        check("Attachment lineage endpoint accessible",
+              False, f"got {ar.status_code}")
 
 
 # ── 5. Tool output content analysis ──────────────────────────────────────────
