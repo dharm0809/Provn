@@ -38,6 +38,13 @@ def skip(name: str, reason: str) -> None:
     RESULTS.append({"name": name, "passed": True, "detail": f"skipped: {reason}"})
 
 
+_TOOL_SYSTEM = (
+    "You have access to a web_search tool. "
+    "When the user asks you to search or look up anything, you MUST call "
+    "the web_search tool — never answer search requests from memory."
+)
+
+
 def chat(messages, model=None, **kwargs):
     return requests.post(CHAT_URL, json={
         "model": model or TOOL_MODEL,
@@ -45,6 +52,18 @@ def chat(messages, model=None, **kwargs):
         "max_tokens": kwargs.get("max_tokens", 200),
         **{k: v for k, v in kwargs.items() if k != "max_tokens"},
     }, headers=HEADERS, timeout=120)
+
+
+def tool_request(session_id: str, prompt: str, max_tokens: int = 200) -> requests.Response:
+    """POST a chat request with a system message that forces web_search invocation."""
+    return requests.post(CHAT_URL, json={
+        "model": TOOL_MODEL,
+        "messages": [
+            {"role": "system", "content": _TOOL_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": max_tokens,
+    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
 
 
 def get_health() -> dict:
@@ -72,17 +91,9 @@ def test_web_search_invocation():
         return
 
     session_id = str(uuid.uuid4())
-    r = chat([{"role": "user", "content":
-        "Search the web: What is the Python programming language? Give a brief answer."}],
-        session_id=None)
-
-    # Pass session_id via header
-    r = requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content":
-            "Search the web: What is the Python programming language?"}],
-        "max_tokens": 200,
-    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
+    r = tool_request(session_id,
+        "Use the web_search tool right now. Search for 'artificial intelligence' "
+        "and report what the search returns.")
 
     check("Web search request returns 200", r.status_code == 200, f"got {r.status_code}")
     if r.status_code != 200:
@@ -117,12 +128,9 @@ def test_tool_event_audit():
         return
 
     session_id = str(uuid.uuid4())
-    r = requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content":
-            "Look up: What is machine learning? Brief answer."}],
-        "max_tokens": 150,
-    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
+    r = tool_request(session_id,
+        "Call the web_search tool with query 'machine learning'. "
+        "Summarize the first result in one sentence.", max_tokens=150)
 
     check("Tool audit request returns 200", r.status_code == 200, f"got {r.status_code}")
     if r.status_code != 200:
@@ -267,12 +275,9 @@ def test_tool_content_analysis():
         return
 
     session_id = str(uuid.uuid4())
-    r = requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content":
-            "Search for: What is artificial intelligence?"}],
-        "max_tokens": 150,
-    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
+    r = tool_request(session_id,
+        "Use web_search to look up 'neural network definition'. "
+        "Return one sentence from the results.", max_tokens=150)
 
     if r.status_code != 200:
         skip("Tool content analysis", f"request failed with {r.status_code}")
@@ -344,12 +349,9 @@ def test_web_search_sources():
         return
 
     session_id = str(uuid.uuid4())
-    r = requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content":
-            "Search the web for: What is the Linux kernel?"}],
-        "max_tokens": 150,
-    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=120)
+    r = tool_request(session_id,
+        "Call web_search with query 'Linux kernel'. "
+        "Briefly describe what the search result says.", max_tokens=150)
 
     if r.status_code != 200:
         skip("Web search sources", f"request failed {r.status_code}")
