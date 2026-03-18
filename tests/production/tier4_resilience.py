@@ -139,8 +139,11 @@ def test_stream_safety():
     }, headers=HEADERS, stream=True, timeout=90)
 
     check("Streaming request → 200", r.status_code == 200, f"got {r.status_code}")
-    chunks = sum(1 for line in r.iter_lines(decode_unicode=True)
-                 if line and line.startswith("data: ") and line != "data: [DONE]")
+    # Consume raw bytes and split manually — more reliable than iter_lines() with chunked SSE
+    raw = b"".join(r.iter_content(chunk_size=None))
+    text = raw.decode("utf-8", errors="replace")
+    chunks = sum(1 for line in text.split("\n")
+                 if line.startswith("data: ") and line.strip() != "data: [DONE]")
     check("Streaming has multiple SSE chunks", chunks > 1, f"{chunks} chunks")
 
     time.sleep(3)  # WAL write is async — wait for stream background task
