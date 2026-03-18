@@ -1754,6 +1754,17 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         # Expose user_id for completeness middleware
         request.state.walacor_user_id = caller_identity.user_id
 
+    # ── Audit content classification ─────────────────────────────────────────
+    # Extract structured question/context from the messages array.
+    # OpenWebUI plugin classifies at source (preferred); gateway fallback for others.
+    try:
+        from gateway.middleware.audit_classifier import classify_request
+        _body = body_dict if isinstance(body_dict, dict) else {}
+        audit_class = classify_request(_body)
+        extra["walacor_audit"] = audit_class
+    except Exception:
+        logger.debug("Audit classifier skipped", exc_info=True)
+
     call = dataclasses.replace(call, metadata={**call.metadata, **extra})
 
     # ── B.9: A/B model testing — rewrite model before adapter resolution ──────
