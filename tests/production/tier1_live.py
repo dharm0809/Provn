@@ -12,6 +12,7 @@ API response shapes (from lineage/api.py + reader.py):
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 
 import requests
@@ -55,6 +56,7 @@ def test_completeness():
     r = chat("Say hello.")
     check("Valid request returns 200", r.status_code == 200, f"got {r.status_code}")
 
+    time.sleep(2)  # WAL write happens in finally block after response is sent
     post = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
     post_total = post.json().get("total", 0) if post.status_code == 200 else 0
     check("Attempt record written after request",
