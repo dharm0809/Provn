@@ -63,7 +63,7 @@ def chat(content: str, session_id: str | None = None,
         "max_tokens": max_tokens,
         "stream": stream,
     }, headers=h, timeout=120, stream=stream)
-    if r.status_code in (403, 401, 422) and not stream:
+    if r.status_code in (403, 401, 422, 500) and not stream:
         body = r.text[:200]
         print(f"    [DIAG] {r.status_code} body: {body}")
     return r

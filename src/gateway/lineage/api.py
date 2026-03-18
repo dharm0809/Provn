@@ -89,7 +89,11 @@ async def lineage_execution(request: Request) -> JSONResponse:
             return JSONResponse({"error": "Execution not found", "execution_id": execution_id}, status_code=404)
         record = _enrich_execution_record(record)
         tool_events = reader.get_tool_events(execution_id)
-        return JSONResponse({"record": record, "tool_events": tool_events})
+        # Top-level convenience fields for API consumers
+        return JSONResponse({
+            **record,
+            "tool_events": tool_events,
+        })
     except Exception as e:
         logger.error("lineage_execution error: %s", e, exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
