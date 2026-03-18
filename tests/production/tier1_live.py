@@ -2,7 +2,12 @@
 """Tier 1 live integrity checks — session chain, WAL, lineage API, completeness.
 
 Run ON the EC2 instance from ~/Gateway:
-    python tests/production/tier1_live.py
+    python3.12 tests/production/tier1_live.py
+
+API response shapes (from lineage/api.py + reader.py):
+  GET /v1/lineage/sessions  → {"sessions": [{"session_id": ..., ...}], "limit": N, "offset": N}
+  GET /v1/lineage/attempts  → {"items": [...], "stats": {...}, "total": N}
+  GET /v1/lineage/verify/{session_id} → {"valid": bool, ...}
 """
 from __future__ import annotations
 
@@ -43,17 +48,17 @@ def test_health():
 
 
 def test_completeness():
-    """Every request must produce an attempt record."""
+    """Every request must produce an attempt record — check via total count."""
     pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
-    pre_count = len(pre.json()) if pre.status_code == 200 else 0
+    pre_total = pre.json().get("total", 0) if pre.status_code == 200 else 0
 
     r = chat("Say hello.")
     check("Valid request returns 200", r.status_code == 200, f"got {r.status_code}")
 
     post = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
-    post_count = len(post.json()) if post.status_code == 200 else 0
-    check("Attempt record written after request", post_count > pre_count,
-          f"before={pre_count}, after={post_count}")
+    post_total = post.json().get("total", 0) if post.status_code == 200 else 0
+    check("Attempt record written after request",
+          post_total > pre_total, f"before={pre_total}, after={post_total}")
 
 
 def test_session_chain():
@@ -71,22 +76,22 @@ def test_session_chain():
     if r.status_code != 200:
         return
 
-    sessions = r.json()
+    sessions = r.json().get("sessions", [])
     match = next((s for s in sessions if s.get("session_id") == session_id), None)
     check("Our session found in lineage", match is not None, f"session_id={session_id[:8]}...")
 
     if match:
-        sid = match.get("id") or match.get("session_id")
+        sid = match["session_id"]
         rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=10)
         check("Chain verify endpoint returns 200", rv.status_code == 200, f"got {rv.status_code}")
         if rv.status_code == 200:
             v = rv.json()
-            valid = v.get("valid") or v.get("chain_valid") or v.get("result") == "valid"
-            check("Session chain is cryptographically valid", bool(valid), str(v))
+            valid = bool(v.get("valid") or v.get("chain_valid") or v.get("result") == "valid")
+            check("Session chain is cryptographically valid", valid, str(v))
 
 
 def test_lineage_endpoints():
-    """All 5 lineage endpoints return 200."""
+    """All lineage endpoints return 200."""
     for name, url in [
         ("sessions", f"{LINEAGE_URL}/sessions"),
         ("attempts", f"{LINEAGE_URL}/attempts"),
@@ -95,23 +100,24 @@ def test_lineage_endpoints():
         r = requests.get(url, timeout=10)
         check(f"Lineage /{name} → 200", r.status_code == 200, f"got {r.status_code}")
 
-    # execution detail — need a real execution ID
+    # execution detail — need a real session_id first
     r = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
-    if r.status_code == 200 and r.json():
-        s = r.json()[0]
-        exec_id = s.get("last_execution_id") or s.get("id")
-        if exec_id:
-            r2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
-            check("Lineage /executions/{id} → 200", r2.status_code == 200)
+    if r.status_code == 200:
+        sessions = r.json().get("sessions", [])
+        if sessions:
+            sid = sessions[0]["session_id"]
+            r2 = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
+            check("Lineage /sessions/{id} timeline → 200", r2.status_code == 200,
+                  f"got {r2.status_code}")
 
 
 def test_wal():
-    r = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
     if r.status_code == 200:
-        count = len(r.json())
-        check("WAL has session records", count > 0, f"{count} sessions")
+        total = r.json().get("total", 0)
+        check("WAL has attempt records", total > 0, f"{total} total")
     else:
-        check("WAL accessible via lineage", False, f"got {r.status_code}")
+        check("WAL accessible via attempts endpoint", False, f"got {r.status_code}")
 
 
 def test_metrics():

@@ -62,13 +62,13 @@ def test_chain_audit():
     if r.status_code != 200:
         return
 
-    sessions = r.json()
+    sessions = r.json().get("sessions", [])
     check("≥10 sessions available (run governance_stress.py first if 0)",
           len(sessions) >= 10, f"{len(sessions)} sessions")
 
     audit = {"total": 0, "valid": 0, "invalid": 0, "results": []}
     for s in sessions[:50]:
-        sid = s.get("id") or s.get("session_id")
+        sid = s.get("session_id")
         if not sid:
             continue
         rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=10)
