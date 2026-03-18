@@ -35,18 +35,39 @@ def _tenant(request: Request) -> str:
 # ── Cache refresh helpers ─────────────────────────────────────
 
 def _refresh_attestation_cache() -> None:
-    """Repopulate attestation cache from DB after mutation."""
+    """Repopulate attestation cache from DB after mutation.
+
+    Preserves auto-attested models that may only exist in cache (not DB)
+    to prevent CRUD operations from accidentally de-attesting active models.
+    """
     ctx = get_pipeline_context()
     settings = get_settings()
     store = ctx.control_store
     if store is None or ctx.attestation_cache is None:
         return
     tenant_id = settings.gateway_tenant_id
+
+    # Snapshot auto-attested entries before clearing — these may not be in the DB
+    # if they were attested at request time but the DB write didn't persist yet.
+    preserved = {}
+    for key, entry in list(ctx.attestation_cache._cache.items()):
+        if getattr(entry, "verification_level", "") in ("self_attested", "auto_attested"):
+            preserved[key] = entry
+
     ctx.attestation_cache.clear()
     proofs = store.get_attestation_proofs(tenant_id)
     for p in proofs:
         ctx.attestation_cache.set_from_proof(p.get("provider", "ollama"), p)
-    logger.info("Attestation cache refreshed: %d entries", len(proofs))
+
+    # Restore auto-attested entries that weren't repopulated from DB
+    restored = 0
+    for key, entry in preserved.items():
+        if ctx.attestation_cache._cache.get(key) is None:
+            ctx.attestation_cache._cache[key] = entry
+            restored += 1
+
+    logger.info("Attestation cache refreshed: %d from DB, %d auto-attested preserved",
+                len(proofs), restored)
     # Invalidate /v1/models cache so OpenWebUI picks up changes immediately
     try:
         from gateway.models_api import _invalidate_models_cache

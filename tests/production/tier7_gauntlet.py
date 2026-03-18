@@ -57,12 +57,16 @@ def chat(content: str, session_id: str | None = None,
         h["X-Session-Id"] = session_id
     if extra_headers:
         h.update(extra_headers)
-    return requests.post(CHAT_URL, json={
+    r = requests.post(CHAT_URL, json={
         "model": model or TOOL_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": max_tokens,
         "stream": stream,
     }, headers=h, timeout=120, stream=stream)
+    if r.status_code in (403, 401, 422) and not stream:
+        body = r.text[:200]
+        print(f"    [DIAG] {r.status_code} body: {body}")
+    return r
 
 
 def get_attempt_count() -> int:
