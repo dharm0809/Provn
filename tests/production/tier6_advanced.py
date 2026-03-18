@@ -39,9 +39,10 @@ def skip(name: str, reason: str) -> None:
 
 
 _TOOL_SYSTEM = (
+    "/no_think\n"
     "You have access to a web_search tool. "
     "When the user asks you to search or look up anything, you MUST call "
-    "the web_search tool — never answer search requests from memory."
+    "the web_search function. Do not answer from memory."
 )
 
 
@@ -55,7 +56,7 @@ def chat(messages, model=None, **kwargs):
 
 
 def tool_request(session_id: str, prompt: str, max_tokens: int = 200) -> requests.Response:
-    """POST a chat request with a system message that forces web_search invocation."""
+    """POST with /no_think (disables qwen3 reasoning) + system message forcing tool use."""
     return requests.post(CHAT_URL, json={
         "model": TOOL_MODEL,
         "messages": [
@@ -79,6 +80,40 @@ def web_search_enabled() -> bool:
         tools = r.json()
         return any("web_search" in str(t) for t in tools)
     # Fallback: check health for tool-aware mode
+    return False
+
+
+# ── 0. Pre-flight: verify tool injection works ───────────────────────────────
+
+def preflight_tool_check() -> bool:
+    """Send a simple tool request and check if the model emits finish_reason=tool_calls.
+
+    Returns True if tools are working, False otherwise.
+    """
+    r = tool_request(str(uuid.uuid4()),
+        "Call the web_search function with query 'test'.", max_tokens=50)
+    if r.status_code != 200:
+        print(f"  [DIAG] Pre-flight request failed: {r.status_code}")
+        return False
+
+    body = r.json()
+    choices = body.get("choices", [])
+    if not choices:
+        print(f"  [DIAG] No choices in response")
+        return False
+
+    msg = choices[0].get("message", {})
+    fr = choices[0].get("finish_reason", "")
+    tc = msg.get("tool_calls", [])
+    content = (msg.get("content") or "")[:120]
+
+    if tc or fr == "tool_calls":
+        print(f"  [DIAG] Pre-flight PASSED — model emitted tool_calls (finish_reason={fr})")
+        return True
+
+    print(f"  [DIAG] Pre-flight: model did NOT call tools (finish_reason={fr})")
+    print(f"  [DIAG]   content preview: {content}")
+    print(f"  [DIAG]   Hint: qwen3 thinking mode may block tool calls.")
     return False
 
 
@@ -417,6 +452,15 @@ def main():
         print("  WARNING: qwen3:1.7b has limited tool support.")
         print("  Run with GATEWAY_MODEL=qwen3:4b for full tool coverage.\n")
     else:
+        print()
+
+    # Pre-flight: verify model actually emits tool_calls
+    tools_work = False
+    if TOOL_MODEL != "qwen3:1.7b":
+        print("[0/7] Pre-flight tool invocation check")
+        tools_work = preflight_tool_check()
+        check("Pre-flight: model calls tools via gateway",
+              tools_work, "required for tests 1/2/5/7")
         print()
 
     print("[1/7] Web search invocation"); test_web_search_invocation()
