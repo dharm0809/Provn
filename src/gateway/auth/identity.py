@@ -18,23 +18,31 @@ class CallerIdentity:
     source: str = "header_unverified"  # "jwt" (trusted) or "header_unverified" (advisory only)
 
 
-def resolve_identity_from_headers(request: Request) -> CallerIdentity | None:
-    """Extract caller identity from well-known request headers.
+def resolve_identity_from_headers(request: Request, body_metadata: dict | None = None) -> CallerIdentity | None:
+    """Extract caller identity from headers, body metadata, or connection info.
 
-    Checks generic headers first (X-User-Id, X-User-Email, X-User-Roles, X-Team-Id),
-    then falls back to OpenWebUI-specific headers (X-OpenWebUI-User-Name,
-    X-OpenWebUI-User-Id, X-OpenWebUI-User-Email, X-OpenWebUI-User-Role).
-
-    Returns None if no identity headers are present.
+    Priority: headers → body metadata (OpenWebUI plugin) → client IP.
+    NEVER returns None — every request gets an identity for audit trail.
     """
-    # User ID: generic → OpenWebUI-User-Name → OpenWebUI-User-Id
+    # User ID: generic headers → OpenWebUI headers
     user_id = (
         (request.headers.get("x-user-id") or "").strip()
         or (request.headers.get("x-openwebui-user-name") or "").strip()
         or (request.headers.get("x-openwebui-user-id") or "").strip()
     )
+
+    # Fallback: body metadata from OpenWebUI governance pipeline
+    source = "header_unverified"
+    if not user_id and body_metadata:
+        user_id = (body_metadata.get("openwebui_user_id") or "").strip()
+        if user_id:
+            source = "openwebui_metadata"
+
+    # Fallback: client IP (always available)
     if not user_id:
-        return None
+        client = request.client
+        user_id = f"anonymous@{client.host}" if client else "anonymous"
+        source = "anonymous"
 
     # Email: generic → OpenWebUI
     email = (
@@ -58,5 +66,5 @@ def resolve_identity_from_headers(request: Request) -> CallerIdentity | None:
         email=email,
         roles=roles,
         team=team,
-        source="header_unverified",
+        source=source,
     )

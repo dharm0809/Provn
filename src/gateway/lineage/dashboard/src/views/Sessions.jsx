@@ -163,20 +163,20 @@ export default function Sessions({ navigate, params = {} }) {
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           {user ? (
-                            <span style={{ fontSize: 11, color: 'var(--gold)', fontWeight: 600 }}>
+                            <span style={{ fontSize: 13, color: 'var(--gold)', fontWeight: 600 }}>
                               {'👤 '}{user}
                             </span>
                           ) : isSystemTask ? (
-                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>⚙ system task</span>
+                            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>⚙ system task</span>
                           ) : null}
                           <span className="copy-wrap" style={{ marginLeft: 'auto' }}>
-                            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{formatSessionId(s.session_id)}</span>
+                            <span className="mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{formatSessionId(s.session_id)}</span>
                             <CopyBtn text={s.session_id} />
                           </span>
                         </div>
                         {question && (
                           <div style={{
-                            fontSize: 13,
+                            fontSize: 14,
                             color: 'var(--text-primary)',
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
@@ -192,7 +192,7 @@ export default function Sessions({ navigate, params = {} }) {
                     <td style={{ fontFamily: 'var(--mono)', fontWeight: 600, textAlign: 'center' }}>
                       {turns}
                     </td>
-                    <td className="mono" style={{ color: 'var(--text-secondary)', fontSize: 12 }}>
+                    <td className="mono" style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
                       {displayModel(s.model)}
                     </td>
                     <td>
@@ -212,17 +212,17 @@ export default function Sessions({ navigate, params = {} }) {
                             if (source === 'gateway') { icon = name === 'web_search' ? '🔍' : '⚙'; badgeClass = 'badge badge-gold'; }
                             else if (source === 'mcp') { icon = '🔌'; badgeClass = 'badge badge-blue'; }
                             else { icon = '⚙'; badgeClass = 'badge badge-gold'; }
-                            return <span key={name} className={badgeClass} style={{ fontSize: 10 }} title={name}>{icon} {name}</span>;
+                            return <span key={name} className={badgeClass} style={{ fontSize: 12 }} title={name}>{icon} {name}</span>;
                           });
                         })()}
-                        {hasRag && <span className="badge badge-blue" style={{ fontSize: 10 }} title="RAG context detected">📎 RAG</span>}
+                        {hasRag && <span className="badge badge-blue" style={{ fontSize: 12 }} title="RAG context detected">📎 RAG</span>}
                         {hasFiles && <span className="badge" style={{ fontSize: 10, background: 'var(--bg-hover)', color: 'var(--text-secondary)' }} title="Files attached">📄 files</span>}
                         {!tools.length && !hasRag && !hasFiles && (
                           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>—</span>
                         )}
                       </div>
                     </td>
-                    <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
                       {timeAgo(s.last_activity)}
                     </td>
                   </tr>

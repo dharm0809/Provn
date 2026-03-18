@@ -1739,8 +1739,22 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     msg_id = request.headers.get("x-openwebui-message-id")
     if msg_id:
         extra["message_id"] = msg_id
-    # Merge caller identity from middleware (JWT or header-based)
+    # Merge caller identity from middleware (JWT or header-based).
+    # Second-pass: if middleware didn't resolve identity (no headers),
+    # try body metadata (OpenWebUI plugin injects user info there).
     caller_identity = getattr(request.state, "caller_identity", None)
+    if caller_identity is None or caller_identity.source == "anonymous":
+        try:
+            from gateway.auth.identity import resolve_identity_from_headers
+            _body_meta = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
+            if not isinstance(_body_meta, dict):
+                _body_meta = None
+            resolved = resolve_identity_from_headers(request, body_metadata=_body_meta)
+            if resolved and (caller_identity is None or resolved.source != "anonymous"):
+                caller_identity = resolved
+                request.state.caller_identity = resolved
+        except Exception:
+            pass
     if caller_identity is not None:
         if not extra.get("user"):
             extra["user"] = caller_identity.user_id

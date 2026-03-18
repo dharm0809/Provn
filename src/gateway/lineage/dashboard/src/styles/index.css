@@ -597,7 +597,7 @@ body::before {
 
 /* ── Tables ── */
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
 th {
   text-align: left;
   padding: 7px 10px;
