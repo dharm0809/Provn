@@ -13,6 +13,8 @@ import sys
 import time
 import uuid
 
+
+
 import requests
 
 sys.path.insert(0, "tests/production")
@@ -71,7 +73,7 @@ def test_baseline():
 
 def test_ollama_down():
     pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
-    pre_count = len(pre.json()) if pre.status_code == 200 else 0
+    pre_count = pre.json().get("total", 0) if pre.status_code == 200 else 0
 
     print("  Stopping Ollama...")
     docker("stop ollama")
@@ -83,9 +85,9 @@ def test_ollama_down():
     check("Error response not 200 (not a fake success)", r.status_code in (502, 503, 504, 500, 422),
           f"got {r.status_code}")
 
-    time.sleep(2)
+    time.sleep(2)  # WAL write is async — wait for finally block to complete
     post = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
-    post_count = len(post.json()) if post.status_code == 200 else 0
+    post_count = post.json().get("total", 0) if post.status_code == 200 else 0
     check("Attempt record written even when Ollama is down",
           post_count > pre_count, f"before={pre_count}, after={post_count}")
 
@@ -105,7 +107,7 @@ def test_gateway_restart():
     check("Request before gateway restart succeeds", r.status_code == 200)
 
     pre = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
-    pre_count = len(pre.json()) if pre.status_code == 200 else 0
+    pre_count = len(pre.json().get("sessions", [])) if pre.status_code == 200 else 0
 
     print("  Restarting gateway container...")
     docker("restart gateway")
@@ -115,7 +117,7 @@ def test_gateway_restart():
     check("Gateway healthy after restart", healthy)
 
     post = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
-    post_count = len(post.json()) if post.status_code == 200 else 0
+    post_count = len(post.json().get("sessions", [])) if post.status_code == 200 else 0
     check("Session records preserved across restart",
           post_count >= pre_count, f"before={pre_count}, after={post_count}")
 
@@ -127,7 +129,7 @@ def test_gateway_restart():
 
 def test_stream_safety():
     pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
-    pre_count = len(pre.json()) if pre.status_code == 200 else 0
+    pre_count = pre.json().get("total", 0) if pre.status_code == 200 else 0
 
     r = requests.post(CHAT_URL, json={
         "model": MODEL,
@@ -137,13 +139,13 @@ def test_stream_safety():
     }, headers=HEADERS, stream=True, timeout=90)
 
     check("Streaming request → 200", r.status_code == 200, f"got {r.status_code}")
-    chunks = sum(1 for line in r.iter_lines()
-                 if line and line.startswith(b"data: ") and line != b"data: [DONE]")
+    chunks = sum(1 for line in r.iter_lines(decode_unicode=True)
+                 if line and line.startswith("data: ") and line != "data: [DONE]")
     check("Streaming has multiple SSE chunks", chunks > 1, f"{chunks} chunks")
 
-    time.sleep(3)
+    time.sleep(3)  # WAL write is async — wait for stream background task
     post = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
-    post_count = len(post.json()) if post.status_code == 200 else 0
+    post_count = post.json().get("total", 0) if post.status_code == 200 else 0
     check("Attempt record written after stream completes",
           post_count > pre_count, f"before={pre_count}, after={post_count}")
 
