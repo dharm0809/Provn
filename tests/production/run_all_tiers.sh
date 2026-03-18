@@ -81,6 +81,12 @@ echo ""
 echo "=== TIER 5: Compliance Artifacts ==="
 python3.12 tests/production/tier5_compliance.py || { echo "TIER 5 GATE FAILED"; exit 1; }
 
+# ── Tier 6: Advanced Features (web search, tool audit, attachments, MCP) ──────
+echo ""
+echo "=== TIER 6: Advanced Features ==="
+echo "  Note: Set GATEWAY_MODEL=qwen3:4b for full tool coverage (some tests skip on 1.7b)"
+python3.12 tests/production/tier6_advanced.py || { echo "TIER 6 GATE FAILED"; exit 1; }
+
 echo ""
 echo "==========================================="
 echo "  ALL TIERS PASSED — LAUNCH READY"
