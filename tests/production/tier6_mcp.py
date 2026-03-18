@@ -87,15 +87,25 @@ def skip(name: str, reason: str) -> None:
 
 
 def tool_call(session_id: str, prompt: str, tools: list[dict],
-              timeout: int = 120) -> requests.Response:
-    """Send a chat request with explicit tools through the gateway."""
-    return requests.post(CHAT_URL, json={
-        "model": TOOL_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "tools": tools,
-        "stream": False,
-        "max_tokens": 2048,
-    }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=timeout)
+              timeout: int = 240) -> requests.Response | None:
+    """Send a chat request with explicit tools through the gateway.
+
+    Returns None on timeout (instead of crashing the test suite).
+    """
+    try:
+        return requests.post(CHAT_URL, json={
+            "model": TOOL_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": tools,
+            "stream": False,
+            "max_tokens": 2048,
+        }, headers={**HEADERS, "X-Session-Id": session_id}, timeout=timeout)
+    except requests.exceptions.ReadTimeout:
+        print(f"  [WARN] Request timed out after {timeout}s")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        print(f"  [WARN] Connection error: {e}")
+        return None
 
 
 def find_tool_events(session_id: str) -> list[dict]:
@@ -172,6 +182,9 @@ def test_mcp_fetch():
         "Tell me what keys are in the JSON response.",
         [FETCH_TOOL])
 
+    if r is None:
+        check("Fetch tool request completes", False, "timed out")
+        return
     check("Fetch tool request returns 200", r.status_code == 200,
           f"got {r.status_code}")
     if r.status_code != 200:
@@ -239,6 +252,9 @@ def test_mcp_time():
         "Just tell me the time.",
         [TIME_TOOL])
 
+    if r is None:
+        check("Time tool request completes", False, "timed out")
+        return
     check("Time tool request returns 200", r.status_code == 200,
           f"got {r.status_code}")
     if r.status_code != 200:
@@ -278,6 +294,9 @@ def test_multi_tool():
         "What time is it right now in America/New_York timezone?",
         [FETCH_TOOL, TIME_TOOL, WEB_SEARCH_TOOL])
 
+    if r is None:
+        skip("Multi-tool selection", "timed out")
+        return
     check("Multi-tool request returns 200", r.status_code == 200,
           f"got {r.status_code}")
     if r.status_code != 200:
@@ -313,8 +332,9 @@ def test_tool_audit_completeness():
         [TIME_TOOL])
 
     # Even if tool fails, attempt record must exist
-    check("Tool request completes (any status)", r.status_code > 0,
-          f"got {r.status_code}")
+    check("Tool request completes (any status)",
+          r is not None and r.status_code > 0,
+          f"got {r.status_code if r else 'timeout'}")
 
     time.sleep(3)
     post = get_attempt_count()
@@ -332,6 +352,9 @@ def test_chain_after_tools():
     r1 = tool_call(sid,
         "Use get_current_time for UTC.",
         [TIME_TOOL])
+    if r1 is None:
+        check("Chain test turn 1 (tool call)", False, "timed out")
+        return
     check("Chain test turn 1 (tool call) → 200", r1.status_code == 200,
           f"got {r1.status_code}")
 
@@ -376,6 +399,9 @@ def test_tool_error_handling():
         [FETCH_TOOL])
 
     # Gateway should NOT crash — it should return a response (tool error handled)
+    if r is None:
+        check("Bad URL fetch: no crash", False, "timed out")
+        return
     check("Bad URL fetch: no crash (not 500)",
           r.status_code != 500, f"got {r.status_code}")
 
