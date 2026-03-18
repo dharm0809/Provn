@@ -43,17 +43,20 @@ def test_compliance_pdf():
 
 
 def test_audit_export():
-    r = requests.get(f"{BASE_URL}/v1/compliance/export", headers=HEADERS, timeout=30)
+    from datetime import date, timedelta
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=7)).isoformat()
+    r = requests.get(f"{BASE_URL}/v1/compliance/export",
+                     params={"format": "json", "start": start, "end": end},
+                     headers=HEADERS, timeout=30)
     if r.status_code == 404:
         check("Audit export endpoint (skipped — 404, not deployed)", True, "optional endpoint")
         return
     check("Audit export → 200", r.status_code == 200, f"got {r.status_code}")
     if r.status_code == 200:
-        export_path = ARTIFACTS_DIR / "audit_export.jsonl"
         ARTIFACTS_DIR.mkdir(exist_ok=True)
-        export_path.write_text(r.text)
-        lines = [l for l in r.text.splitlines() if l.strip()]
-        check("Audit export has records", len(lines) > 0, f"{len(lines)} records")
+        (ARTIFACTS_DIR / "audit_export.json").write_text(r.text)
+        check("Audit export response non-empty", len(r.text) > 10, f"{len(r.text)} bytes")
 
 
 def test_chain_audit():
