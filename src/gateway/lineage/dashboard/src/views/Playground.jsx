@@ -3,6 +3,18 @@ import { getExecution } from '../api';
 import { displayModel, verdictBadgeClass } from '../utils';
 
 
+function generateUUID() {
+  // generateUUID() requires secure context (HTTPS or localhost).
+  // Fallback for plain HTTP deployments.
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    try { return generateUUID(); } catch {}
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
 function getApiKey() {
   return sessionStorage.getItem('cp_api_key') || '';
 }
@@ -119,8 +131,8 @@ export default function Playground({ navigate }) {
   const [userId, setUserId] = useState('playground-user');
 
   // Session ID — new UUID on mount and on clear
-  const [sessionIdA, setSessionIdA] = useState(() => crypto.randomUUID());
-  const [sessionIdB, setSessionIdB] = useState(() => crypto.randomUUID());
+  const [sessionIdA, setSessionIdA] = useState(() => generateUUID());
+  const [sessionIdB, setSessionIdB] = useState(() => generateUUID());
 
   // Model A state
   const [responseA, setResponseA] = useState('');
@@ -173,8 +185,8 @@ export default function Playground({ navigate }) {
     setGovRecordA(null); setGovRecordB(null);
     setStreamingA(false); setStreamingB(false);
     setLoadingA(false); setLoadingB(false);
-    setSessionIdA(crypto.randomUUID());
-    setSessionIdB(crypto.randomUUID());
+    setSessionIdA(generateUUID());
+    setSessionIdB(generateUUID());
   }, []);
 
   const sendRequest = useCallback(async (
