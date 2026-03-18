@@ -112,13 +112,17 @@ def evaluate_policies(
 
         for rule in policy_record.get("rules", []):
             actual = _resolve_field(attestation_context, rule["field"])
-            passed = _evaluate_rule(
+            condition_met = _evaluate_rule(
                 rule.get("operator", "equals"),
                 actual,
                 rule["value"],
                 rule.get("case_sensitive", True),
             )
-            if not passed:
+            action = rule.get("action", "allow")
+            # deny rules: block when condition MATCHES (blacklist)
+            # allow rules: block when condition DOESN'T match (whitelist)
+            rule_failed = condition_met if action == "deny" else not condition_met
+            if rule_failed:
                 all_pass = False
                 rule_details["failed_field"] = rule["field"]
                 rule_details["expected"] = rule["value"]

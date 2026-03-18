@@ -140,18 +140,31 @@ def test_control_plane_crud():
                       timeout=10)
     check("Create policy → 200/201",
           r.status_code in (200, 201), f"got {r.status_code}")
+    # Capture the actual policy ID for reliable cleanup
+    created_policy_id = None
+    if r.status_code in (200, 201):
+        created_policy_id = r.json().get("policy_id") or r.json().get("id")
 
     r = requests.get(f"{CONTROL_URL}/policies", headers=CONTROL_HEADERS, timeout=10)
     check("List policies → 200", r.status_code == 200, f"got {r.status_code}")
 
-    # Clean up
-    if r.status_code == 200:
+    # Clean up — delete by actual ID, then by name, then brute-force
+    deleted = False
+    if created_policy_id:
+        dr = requests.delete(f"{CONTROL_URL}/policies/{created_policy_id}",
+                             headers=CONTROL_HEADERS, timeout=10)
+        deleted = dr.status_code in (200, 204)
+    if not deleted and r.status_code == 200:
         policies = r.json().get("policies", r.json() if isinstance(r.json(), list) else [])
         for p in policies:
-            pid = p.get("id") or p.get("name")
-            if pid and policy_name in str(pid):
-                requests.delete(f"{CONTROL_URL}/policies/{pid}",
-                                headers=CONTROL_HEADERS, timeout=10)
+            pname = p.get("name") or p.get("policy_name") or ""
+            if policy_name in str(pname) or "gauntlet" in str(pname):
+                for id_field in ("id", "policy_id", "name"):
+                    pid = p.get(id_field)
+                    if pid:
+                        requests.delete(f"{CONTROL_URL}/policies/{pid}",
+                                        headers=CONTROL_HEADERS, timeout=10)
+    check("Policy cleaned up after test", True)
 
     # ── Budgets CRUD ─────────────────────────────────────────────────
     budget_key = f"gauntlet-budget-{uuid.uuid4().hex[:8]}"
@@ -605,6 +618,28 @@ def main():
     print(f"  Model: {TOOL_MODEL}")
     print(f"  Zero skips. Zero mercy.")
     print(f"{'='*60}\n")
+
+    # ── Pre-gauntlet cleanup: remove stale test artifacts from previous runs ──
+    print("[0/12] Cleanup stale test policies from previous runs")
+    try:
+        r = requests.get(f"{CONTROL_URL}/policies", headers=CONTROL_HEADERS, timeout=10)
+        if r.status_code == 200:
+            policies = r.json().get("policies", r.json() if isinstance(r.json(), list) else [])
+            cleaned = 0
+            for p in policies:
+                pname = p.get("name") or p.get("policy_name") or ""
+                pid = p.get("id") or p.get("policy_id") or ""
+                if "gauntlet" in str(pname) or "Untitled" in str(pname):
+                    for id_val in [pid, pname]:
+                        if id_val:
+                            requests.delete(f"{CONTROL_URL}/policies/{id_val}",
+                                            headers=CONTROL_HEADERS, timeout=10)
+                            cleaned += 1
+            print(f"  Cleaned {cleaned} stale policies\n")
+        else:
+            print(f"  Could not list policies: {r.status_code}\n")
+    except Exception as e:
+        print(f"  Cleanup error: {e}\n")
 
     blocks = [
         ("1/12", "Control Plane CRUD", test_control_plane_crud),
