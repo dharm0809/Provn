@@ -1924,3 +1924,17 @@ th.sortable .sort-arrow {
 }
 th.sortable:hover .sort-arrow,
 th.sortable .sort-arrow.active { opacity: 1; color: var(--gold); }
+
+/* ── Pagination ── */
+.pagination { display: flex; gap: 2px; align-items: center; }
+.pagination-btn {
+  min-width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-muted); font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: all 0.12s;
+  font-family: var(--mono);
+}
+.pagination-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border); }
+.pagination-btn.active { background: var(--gold-dim); color: var(--gold); border-color: var(--gold); font-weight: 700; }
+.pagination-ellipsis { color: var(--text-muted); padding: 0 4px; font-size: 12px; }

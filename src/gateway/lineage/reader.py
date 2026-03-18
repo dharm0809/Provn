@@ -54,6 +54,10 @@ class LineageReader:
                 s.last_activity,
                 s.model,
                 s.user,
+                s.user_question,
+                s.has_rag_context,
+                s.has_files,
+                s.request_type,
                 COALESCE(t.tool_names, '') AS tool_names,
                 COALESCE(t.tool_details, '') AS tool_details
             FROM (
@@ -66,7 +70,11 @@ class LineageReader:
                     MAX(json_extract(record_json, '$.timestamp')) AS last_activity,
                     COALESCE(json_extract(record_json, '$.model_id'),
                              json_extract(record_json, '$.model_attestation_id')) AS model,
-                    json_extract(record_json, '$.user') AS user
+                    json_extract(record_json, '$.user') AS user,
+                    json_extract(record_json, '$.metadata.walacor_audit.user_question') AS user_question,
+                    json_extract(record_json, '$.metadata.walacor_audit.has_rag_context') AS has_rag_context,
+                    json_extract(record_json, '$.metadata.walacor_audit.has_files') AS has_files,
+                    json_extract(record_json, '$.metadata.request_type') AS request_type
                 FROM wal_records
                 WHERE json_extract(record_json, '$.session_id') IS NOT NULL
                   AND json_extract(record_json, '$.event_type') IS NULL
@@ -94,6 +102,16 @@ class LineageReader:
             (limit, offset),
         )
         return [dict(row) for row in cur.fetchall()]
+
+    def count_sessions(self) -> int:
+        """Count total distinct sessions in WAL."""
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            "SELECT COUNT(DISTINCT json_extract(record_json, '$.session_id')) FROM wal_records "
+            "WHERE json_extract(record_json, '$.session_id') IS NOT NULL "
+            "AND json_extract(record_json, '$.event_type') IS NULL"
+        )
+        return cur.fetchone()[0] or 0
 
     def get_session_timeline(self, session_id: str) -> list[dict]:
         """Return all execution records for a session, ordered by sequence_number."""

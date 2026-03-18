@@ -34,7 +34,8 @@ async def lineage_sessions(request: Request) -> JSONResponse:
     offset = int(request.query_params.get("offset", "0"))
     try:
         sessions = reader.list_sessions(limit=limit, offset=offset)
-        return JSONResponse({"sessions": sessions, "limit": limit, "offset": offset})
+        total = reader.count_sessions() if hasattr(reader, 'count_sessions') else len(sessions)
+        return JSONResponse({"sessions": sessions, "total": total, "limit": limit, "offset": offset})
     except Exception as e:
         logger.error("lineage_sessions error: %s", e, exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
