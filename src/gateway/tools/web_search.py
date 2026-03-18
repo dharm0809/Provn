@@ -91,8 +91,13 @@ class WebSearchTool:
             for r in results
             if r.get("url")
         ]
+        try:
+            content = json.dumps({"query": query, "results": results}, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Web search result serialization failed: %s", exc)
+            content = json.dumps({"query": query, "error": str(exc)})
         return ToolResult(
-            content=json.dumps({"query": query, "results": results}, ensure_ascii=False),
+            content=content,
             is_error=False,
             duration_ms=duration_ms,
             sources=sources,

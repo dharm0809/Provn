@@ -1458,9 +1458,16 @@ async def _route_tool_strategy(
             interactions=interactions, iterations=0, error=None,
         )
     if tool_strategy == "active" and ctx.tool_registry and model_response.has_pending_tool_calls:
-        call, model_response, loop_err, interactions, iters, final_http = await _run_active_tool_loop(
-            adapter, call, request, model_response, ctx, settings, provider
-        )
+        try:
+            call, model_response, loop_err, interactions, iters, final_http = await _run_active_tool_loop(
+                adapter, call, request, model_response, ctx, settings, provider
+            )
+        except Exception:
+            logger.error("Active tool loop failed — falling back to original response", exc_info=True)
+            return _ToolStrategyResult(
+                call=call, model_response=model_response,
+                interactions=[], iterations=0, error=None,
+            )
         return _ToolStrategyResult(
             call=call, model_response=model_response,
             interactions=interactions, iterations=iters, error=loop_err,
