@@ -113,6 +113,36 @@ def _check_tool_response(r: requests.Response) -> tuple[bool, str]:
     return False, f"finish_reason={fr}, content={content!r}"
 
 
+def _check_lineage_for_tools(session_id: str) -> bool:
+    """Check if a session has tool events in its execution records."""
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    if sr.status_code != 200:
+        return False
+    sessions = sr.json().get("sessions", [])
+    match = next((s for s in sessions if s.get("session_id") == session_id), None)
+    if not match:
+        return False
+
+    # Check tool_names in session listing
+    if "web_search" in str(match.get("tool_names", "")):
+        return True
+
+    # Check execution detail for tool events
+    sid = match["session_id"]
+    er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
+    if er.status_code != 200:
+        return False
+    for rec in er.json().get("records", []):
+        exec_id = rec.get("execution_id") or rec.get("id")
+        if not exec_id:
+            continue
+        er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
+        if er2.status_code == 200:
+            if er2.json().get("tool_events"):
+                return True
+    return False
+
+
 # ── 0. Pre-flight: diagnose tool support at Ollama level ─────────────────────
 
 def preflight_tool_check() -> bool:
@@ -153,14 +183,32 @@ def preflight_tool_check() -> bool:
         return False
 
     # ── Step 2: Same test through gateway ────────────────────────────────
-    print("  [DIAG] Step 2: Testing tool calls through the gateway...")
-    r = tool_request(str(uuid.uuid4()), "Search for: test")
-    gw_tools, detail = _check_tool_response(r)
+    # The gateway's active tool loop handles tool_calls internally:
+    #   1. Receives finish_reason=tool_calls from Ollama
+    #   2. Executes web_search
+    #   3. Sends results back to model
+    #   4. Returns FINAL answer (finish_reason=stop) to client
+    # So we check the lineage audit trail for tool events, not the response.
+    print("  [DIAG] Step 2: Testing tool execution through the gateway...")
+    gw_session = str(uuid.uuid4())
+    r = tool_request(gw_session, "Search for: artificial intelligence")
+    if r.status_code != 200:
+        print(f"  [DIAG]   Gateway request failed: {r.status_code}")
+        _TOOLS_WORK = False
+        return False
+
+    content = (r.json().get("choices", [{}])[0]
+               .get("message", {}).get("content") or "")[:120]
+    print(f"  [DIAG]   Response: {content!r}")
+
+    time.sleep(3)  # WAL write is async
+
+    gw_tools = _check_lineage_for_tools(gw_session)
     if gw_tools:
-        print(f"  [DIAG]   Gateway: PASS — {detail}")
+        print(f"  [DIAG]   Gateway: PASS — tool events found in lineage")
     else:
-        print(f"  [DIAG]   Gateway: tools NOT forwarded — {detail}")
-        print(f"  [DIAG]   Ollama works but gateway doesn't → gateway bug")
+        print(f"  [DIAG]   Gateway: no tool events in lineage")
+        print(f"  [DIAG]   Tool loop may have run but events not written")
 
     _TOOLS_WORK = gw_tools
     return gw_tools
@@ -207,10 +255,9 @@ def test_web_search_invocation():
           f"session_id={session_id[:8]}...")
 
     if match:
-        tool_names = match.get("tool_names", "")
-        check("Tool event recorded in session (web_search called)",
-              "web_search" in str(tool_names),
-              f"tool_names='{tool_names}'")
+        has_tools = _check_lineage_for_tools(session_id)
+        check("Tool event recorded (web_search executed)",
+              has_tools, "checked session + execution detail")
 
 
 # ── 2. Tool event audit integrity ─────────────────────────────────────────────
