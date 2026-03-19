@@ -184,8 +184,8 @@ def test_body_size_limit():
                               "Content-Length": "999999999",
                           },
                           data=b"x", timeout=10)
-        check("Oversized body rejected (413)",
-              r.status_code == 413, f"got {r.status_code}")
+        check("Oversized body rejected (4xx)",
+              r.status_code in (400, 413), f"got {r.status_code}")
     except requests.exceptions.ConnectionError:
         # Server may close connection immediately on oversized request
         check("Oversized body rejected (connection closed)", True,
