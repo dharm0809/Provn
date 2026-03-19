@@ -18,13 +18,18 @@ echo ""
 
 # Step 1: Send a math question to qwen3:4b (thinking model)
 echo "[1/3] Sending request to qwen3:4b..."
+MODEL="${GATEWAY_MODEL:-qwen3:4b}"
 SESSION_ID="thinking-test-$(date +%s)"
+
+echo "  Model: $MODEL"
+echo "  (Use GATEWAY_MODEL=qwen3:4b for thinking model test)"
+echo ""
 
 RESPONSE=$(curl -s -X POST "$BASE/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: $KEY" \
     -H "X-Session-Id: $SESSION_ID" \
-    -d "{\"model\":\"qwen3:4b\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 17 times 23?\"}],\"max_tokens\":500}")
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 17 times 23?\"}],\"max_tokens\":500}")
 
 echo "$RESPONSE" | python3.12 -c "
 import sys, json
