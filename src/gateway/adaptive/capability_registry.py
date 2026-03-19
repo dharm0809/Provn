@@ -23,6 +23,8 @@ class ModelCapability(NamedTuple):
     model_type: str = "chat"  # chat, reasoning, embedding, code
     probed_at: float = 0.0
     probe_count: int = 0
+    # Adaptive timeout: observed latencies (last N requests)
+    observed_latencies: tuple[float, ...] = ()
 
 
 class CapabilityRegistry:
@@ -58,15 +60,44 @@ class CapabilityRegistry:
         self._cache[model_id] = updated
         logger.info("Model capability recorded: %s = %s", model_id, dict(updated._asdict()))
 
-    def get_timeout(self, model_id: str, default: float = 60.0) -> float:
+    def record_latency(self, model_id: str, latency_seconds: float) -> None:
+        """Record an observed request latency for adaptive timeout calculation."""
         cap = self._cache.get(model_id)
         if not cap:
+            return
+        # Keep last 20 observations
+        latencies = cap.observed_latencies[-19:] + (latency_seconds,)
+        self._cache[model_id] = cap._replace(observed_latencies=latencies)
+
+    def get_timeout(self, model_id: str, default: float = 120.0) -> float:
+        """Adaptive timeout: P95 of observed latencies * 2.5, with floor and ceiling.
+
+        - First request (no data): use generous default (model may need to load)
+        - After 3+ observations: adapt to actual model speed
+        - Fast model (3B, 2s avg) → ~10s timeout
+        - Slow model (14B CPU, 40s avg) → ~120s timeout
+        - Reasoning model: 2x multiplier on top
+        """
+        cap = self._cache.get(model_id)
+        if not cap or len(cap.observed_latencies) < 3:
+            # Not enough data — use generous default for cold start
+            if cap and cap.model_type == "reasoning":
+                return default * 2.0
             return default
+
+        latencies = sorted(cap.observed_latencies)
+        p95_idx = max(0, int(len(latencies) * 0.95) - 1)
+        p95 = latencies[p95_idx]
+
+        # Timeout = P95 * 2.5 (headroom for variance)
+        adaptive = p95 * 2.5
+
+        # Model type multiplier
         if cap.model_type == "reasoning":
-            return default * 2.0
-        if cap.model_type == "embedding":
-            return default * 0.5
-        return default
+            adaptive *= 1.5
+
+        # Floor: never below 10s, ceiling: never above 300s
+        return max(10.0, min(300.0, adaptive))
 
     def get_stale_models(self) -> list[str]:
         return [mid for mid, cap in self._cache.items() if self._is_stale(cap)]

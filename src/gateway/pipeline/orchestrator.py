@@ -2070,6 +2070,9 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
     forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)
     latency_detector.record(provider, fwd_rtt)
+    # Adaptive timeout: record observed latency for this model
+    if ctx.capability_registry and call.model_id and http_response.status_code < 500:
+        ctx.capability_registry.record_latency(call.model_id, fwd_rtt)
 
     # B.7: Merge input analysis results into audit metadata (informational; not enforcement)
     if _input_analysis:
