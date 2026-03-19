@@ -915,11 +915,15 @@ async def on_startup() -> None:
                 ctx.control_store.seed_default_content_policies()
         _init_semantic_cache(settings, ctx)
         _init_load_balancer(settings, ctx)
-        # Warn if control plane is active but no API keys are configured
+        # Auto-generate API key if control plane is active but no keys configured
         if settings.control_plane_enabled and not settings.api_keys_list:
+            import secrets
+            auto_key = f"wgk-{secrets.token_urlsafe(32)}"
+            settings.api_keys_list = [auto_key]
             logger.warning(
-                "SECURITY: Control plane is enabled but WALACOR_GATEWAY_API_KEYS is empty — "
-                "control plane mutations (attestations, policies, budgets) are accessible without authentication"
+                "SECURITY: Control plane enabled without API keys. "
+                "Auto-generated key: %s — set WALACOR_GATEWAY_API_KEYS to use your own.",
+                auto_key,
             )
         # Phase 23: Startup probes (provider health, disk, routing)
         if settings.startup_probes_enabled:
