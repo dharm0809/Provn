@@ -8,8 +8,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+_ALLOWED_CLASS_PREFIXES = ("gateway.", "walacor.")
+
 def load_custom_class(dotted_path: str) -> type:
-    """Import a class by dotted path, e.g. 'mycompany.probes.DatadogProbe'."""
+    """Load a custom class by dotted path, restricted to allowed packages."""
+    if not any(dotted_path.startswith(p) for p in _ALLOWED_CLASS_PREFIXES):
+        raise ValueError(
+            f"Custom class '{dotted_path}' not allowed — must start with one of: {_ALLOWED_CLASS_PREFIXES}"
+        )
     module_path, class_name = dotted_path.rsplit(".", 1)
     module = importlib.import_module(module_path)
     return getattr(module, class_name)

@@ -123,8 +123,8 @@ async def control_list_attestations(request: Request) -> JSONResponse:
         rows = store.list_attestations(tenant_id)
         return JSONResponse({"attestations": rows, "count": len(rows)})
     except Exception as e:
-        logger.error("control_list_attestations error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_list_attestations error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_upsert_attestation(request: Request) -> JSONResponse:
@@ -140,8 +140,8 @@ async def control_upsert_attestation(request: Request) -> JSONResponse:
         _refresh_attestation_cache()
         return JSONResponse(result, status_code=200)
     except Exception as e:
-        logger.error("control_upsert_attestation error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_upsert_attestation error", exc_info=True)
+        return JSONResponse({"error": "Invalid attestation data"}, status_code=400)
 
 
 async def control_delete_attestation(request: Request) -> JSONResponse:
@@ -155,8 +155,8 @@ async def control_delete_attestation(request: Request) -> JSONResponse:
             _refresh_attestation_cache()
         return JSONResponse({"deleted": deleted})
     except Exception as e:
-        logger.error("control_delete_attestation error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_delete_attestation error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Policy endpoints ──────────────────────────────────────────
@@ -170,8 +170,8 @@ async def control_list_policies(request: Request) -> JSONResponse:
         rows = store.list_policies(tenant_id)
         return JSONResponse({"policies": rows, "count": len(rows)})
     except Exception as e:
-        logger.error("control_list_policies error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_list_policies error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_create_policy(request: Request) -> JSONResponse:
@@ -187,8 +187,8 @@ async def control_create_policy(request: Request) -> JSONResponse:
         _refresh_policy_cache()
         return JSONResponse(result, status_code=201)
     except Exception as e:
-        logger.error("control_create_policy error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_create_policy error", exc_info=True)
+        return JSONResponse({"error": "Invalid policy data"}, status_code=400)
 
 
 async def control_update_policy(request: Request) -> JSONResponse:
@@ -203,8 +203,8 @@ async def control_update_policy(request: Request) -> JSONResponse:
             _refresh_policy_cache()
         return JSONResponse({"updated": updated})
     except Exception as e:
-        logger.error("control_update_policy error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_update_policy error", exc_info=True)
+        return JSONResponse({"error": "Invalid policy data"}, status_code=400)
 
 
 async def control_delete_policy(request: Request) -> JSONResponse:
@@ -218,8 +218,8 @@ async def control_delete_policy(request: Request) -> JSONResponse:
             _refresh_policy_cache()
         return JSONResponse({"deleted": deleted})
     except Exception as e:
-        logger.error("control_delete_policy error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_delete_policy error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Budget endpoints ──────────────────────────────────────────
@@ -233,8 +233,8 @@ async def control_list_budgets(request: Request) -> JSONResponse:
         rows = store.list_budgets(tenant_id)
         return JSONResponse({"budgets": rows, "count": len(rows)})
     except Exception as e:
-        logger.error("control_list_budgets error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_list_budgets error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_upsert_budget(request: Request) -> JSONResponse:
@@ -250,8 +250,8 @@ async def control_upsert_budget(request: Request) -> JSONResponse:
         _refresh_budget_tracker()
         return JSONResponse(result, status_code=200)
     except Exception as e:
-        logger.error("control_upsert_budget error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_upsert_budget error", exc_info=True)
+        return JSONResponse({"error": "Invalid budget data"}, status_code=400)
 
 
 async def control_delete_budget(request: Request) -> JSONResponse:
@@ -265,8 +265,8 @@ async def control_delete_budget(request: Request) -> JSONResponse:
             _refresh_budget_tracker()
         return JSONResponse({"deleted": deleted})
     except Exception as e:
-        logger.error("control_delete_budget error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_delete_budget error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Content Policies ──────────────────────────────────────────────────────────
@@ -343,8 +343,8 @@ async def control_list_pricing(request: Request) -> JSONResponse:
         rows = store.list_model_pricing()
         return JSONResponse({"pricing": rows, "count": len(rows)})
     except Exception as e:
-        logger.error("control_list_pricing error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_list_pricing error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_upsert_pricing(request: Request) -> JSONResponse:
@@ -358,8 +358,8 @@ async def control_upsert_pricing(request: Request) -> JSONResponse:
         result = store.upsert_model_pricing(body)
         return JSONResponse(result, status_code=200)
     except Exception as e:
-        logger.error("control_upsert_pricing error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_upsert_pricing error", exc_info=True)
+        return JSONResponse({"error": "Invalid pricing data"}, status_code=400)
 
 
 async def control_delete_pricing(request: Request) -> JSONResponse:
@@ -371,8 +371,8 @@ async def control_delete_pricing(request: Request) -> JSONResponse:
         deleted = store.delete_model_pricing(pricing_id)
         return JSONResponse({"deleted": deleted})
     except Exception as e:
-        logger.error("control_delete_pricing error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_delete_pricing error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Status endpoint ───────────────────────────────────────────
@@ -510,8 +510,8 @@ async def control_discover_models(request: Request) -> JSONResponse:
 
         return JSONResponse({"models": discovered, "count": len(discovered)})
     except Exception as e:
-        logger.error("control_discover_models error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_discover_models error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Key-Policy Assignment endpoints ──────────────────────────
@@ -526,8 +526,8 @@ async def control_get_key_policies(request: Request) -> JSONResponse:
         policy_ids = store.get_key_policies(key_hash)
         return JSONResponse({"api_key_hash": key_hash, "policy_ids": policy_ids})
     except Exception as e:
-        logger.error("control_get_key_policies error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_get_key_policies error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_set_key_policies(request: Request) -> JSONResponse:
@@ -544,8 +544,8 @@ async def control_set_key_policies(request: Request) -> JSONResponse:
         store.set_key_policies(key_hash, policy_ids)
         return JSONResponse({"api_key_hash": key_hash, "policy_ids": policy_ids, "status": "updated"})
     except Exception as e:
-        logger.error("control_set_key_policies error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_set_key_policies error", exc_info=True)
+        return JSONResponse({"error": "Invalid key policy data"}, status_code=400)
 
 
 async def control_remove_key_policy(request: Request) -> JSONResponse:
@@ -561,8 +561,8 @@ async def control_remove_key_policy(request: Request) -> JSONResponse:
             return JSONResponse({"error": "Assignment not found"}, status_code=404)
         return JSONResponse({"api_key_hash": key_hash, "policy_id": policy_id, "status": "removed"})
     except Exception as e:
-        logger.error("control_remove_key_policy error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_remove_key_policy error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_list_key_policy_assignments(request: Request) -> JSONResponse:
@@ -574,8 +574,8 @@ async def control_list_key_policy_assignments(request: Request) -> JSONResponse:
         assignments = store.list_key_policy_assignments()
         return JSONResponse({"assignments": assignments, "count": len(assignments)})
     except Exception as e:
-        logger.error("control_list_key_policy_assignments error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_list_key_policy_assignments error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Key-Tool Permission endpoints ─────────────────────────────
@@ -594,8 +594,8 @@ async def control_get_key_tools(request: Request) -> JSONResponse:
             "unrestricted": allowed is None,
         })
     except Exception as e:
-        logger.error("control_get_key_tools error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_get_key_tools error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def control_set_key_tools(request: Request) -> JSONResponse:
@@ -612,8 +612,8 @@ async def control_set_key_tools(request: Request) -> JSONResponse:
         store.set_allowed_tools(key_hash, tool_names)
         return JSONResponse({"api_key_hash": key_hash, "allowed_tools": tool_names, "status": "updated"})
     except Exception as e:
-        logger.error("control_set_key_tools error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.error("control_set_key_tools error", exc_info=True)
+        return JSONResponse({"error": "Invalid tool permission data"}, status_code=400)
 
 
 async def control_remove_key_tool(request: Request) -> JSONResponse:
@@ -629,8 +629,8 @@ async def control_remove_key_tool(request: Request) -> JSONResponse:
             return JSONResponse({"error": "Permission not found"}, status_code=404)
         return JSONResponse({"api_key_hash": key_hash, "tool_name": tool_name, "status": "removed"})
     except Exception as e:
-        logger.error("control_remove_key_tool error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("control_remove_key_tool error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── Policy Template endpoints ─────────────────────────────────
@@ -667,8 +667,8 @@ async def control_apply_template(request: Request) -> JSONResponse:
     try:
         data = json.loads(path.read_text())
     except Exception as exc:
-        logger.error("control_apply_template: failed to parse %s: %s", path.name, exc)
-        return JSONResponse({"error": f"Template file could not be parsed: {exc}"}, status_code=500)
+        logger.error("control_apply_template: failed to parse %s", path.name, exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
     settings = get_settings()
     tenant_id = request.query_params.get("tenant_id", settings.gateway_tenant_id or "")
@@ -685,9 +685,10 @@ async def control_apply_template(request: Request) -> JSONResponse:
             store.create_policy(policy_data)
             created.append(policy_data.get("policy_id") or policy_data.get("policy_name", "?"))
         except Exception as exc:
+            logger.error("control_apply_template: policy creation failed", exc_info=True)
             errors.append({
                 "policy": policy.get("policy_id", policy.get("policy_name", "?")),
-                "error": str(exc),
+                "error": "Failed to create policy",
             })
 
     if created:

@@ -315,7 +315,9 @@ def _inject_caller_role(att_ctx: dict, request) -> None:
     """Inject caller_role into attestation context for policy evaluation."""
     caller_identity = getattr(request.state, "caller_identity", None)
     if caller_identity is not None and caller_identity.roles:
-        att_ctx["caller_role"] = caller_identity.roles[0]
+        # Only use verified identity (JWT) for policy decisions — unverified headers are audit-only
+        if caller_identity.source == "jwt":
+            att_ctx["caller_role"] = caller_identity.roles[0]
 
 
 async def _peek_model_id(request: Request) -> str:

@@ -23,7 +23,7 @@ class TestLoadCustomClass:
         assert cls is StartupProbe
 
     def test_load_custom_class_invalid_module(self):
-        with pytest.raises(ModuleNotFoundError):
+        with pytest.raises(ValueError, match="not allowed"):
             load_custom_class("nonexistent.module.SomeClass")
 
     def test_load_custom_class_invalid_class(self):
