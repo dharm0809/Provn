@@ -330,6 +330,14 @@ class Settings(BaseSettings):
         default="",
         description="JSON array of MCP server configs, or path to a JSON file. Required for active strategy.",
     )
+    mcp_allowed_commands: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of additional commands allowed for MCP stdio transport. "
+            "Default allowlist: python, python3, python3.12, node, npx, uvx. "
+            "Example: 'deno,bun' to also allow deno and bun."
+        ),
+    )
     web_search_enabled: bool = Field(
         default=False,
         description=(

@@ -9,11 +9,63 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ── Security: MCP stdio subprocess hardening ─────────────────────────────────
+
+_DEFAULT_ALLOWED_COMMANDS = {"python", "python3", "python3.12", "node", "npx", "uvx"}
+
+_SENSITIVE_ENV_PATTERNS = ("KEY", "SECRET", "PASSWORD", "TOKEN", "CREDENTIAL")
+
+
+def _validate_stdio_command(config: "MCPServerConfig", extra_allowed: set[str] | None = None) -> None:
+    """Validate MCP stdio command against allowlist.
+
+    Raises ValueError if the command base name is not in the allowed set.
+    """
+    if config.transport != "stdio":
+        return
+    allowed = _DEFAULT_ALLOWED_COMMANDS | (extra_allowed or set())
+    cmd_base = Path(config.command or "").name
+    if cmd_base not in allowed:
+        logger.error(
+            "MCP stdio command rejected: command='%s' base='%s' allowed=%s server='%s'",
+            config.command, cmd_base, sorted(allowed), config.name,
+        )
+        raise ValueError(
+            f"MCP stdio command '{config.command}' (base: '{cmd_base}') "
+            f"not in allowed commands: {sorted(allowed)}. "
+            f"Add to WALACOR_MCP_ALLOWED_COMMANDS to extend."
+        )
+    logger.warning(
+        "MCP stdio command validated: command='%s' base='%s' server='%s'",
+        config.command, cmd_base, config.name,
+    )
+
+
+def _sanitize_subprocess_env(config_env: dict[str, str] | None) -> dict[str, str]:
+    """Remove sensitive env vars from MCP subprocess environment.
+
+    If config_env is provided, it is used as the base; otherwise os.environ is
+    copied.  In both cases, any key whose uppercase form contains a sensitive
+    pattern (KEY, SECRET, PASSWORD, TOKEN, CREDENTIAL) is stripped.
+    """
+    base = dict(config_env) if config_env else dict(os.environ)
+    sanitized = {k: v for k, v in base.items()
+                 if not any(p in k.upper() for p in _SENSITIVE_ENV_PATTERNS)}
+    removed = set(base.keys()) - set(sanitized.keys())
+    if removed:
+        logger.warning(
+            "Stripped %d sensitive env var(s) from MCP subprocess: %s",
+            len(removed), sorted(removed),
+        )
+    return sanitized
 
 
 @dataclass
@@ -56,8 +108,9 @@ class MCPClient:
     lifecycle management.
     """
 
-    def __init__(self, config: MCPServerConfig) -> None:
+    def __init__(self, config: MCPServerConfig, extra_allowed_commands: set[str] | None = None) -> None:
         self._config = config
+        self._extra_allowed = extra_allowed_commands
         self._session: Any = None
         self._ctx_read: Any = None   # async context manager for the transport
         self._tools: list[ToolDefinition] = []
@@ -77,10 +130,16 @@ class MCPClient:
             ) from exc
 
         if self._config.transport == "stdio":
+            # Security: validate command against allowlist BEFORE spawning
+            _validate_stdio_command(self._config, extra_allowed=self._extra_allowed)
+
+            # Security: strip sensitive env vars from subprocess
+            safe_env = _sanitize_subprocess_env(self._config.env)
+
             params = StdioServerParameters(
                 command=self._config.command,
                 args=self._config.args,
-                env=self._config.env,
+                env=safe_env,
             )
             self._ctx_read = stdio_client(params)
         elif self._config.transport == "http":

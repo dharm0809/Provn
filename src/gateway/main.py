@@ -585,7 +585,13 @@ async def _init_tool_registry(settings, ctx) -> None:
     if not configs:
         logger.info("tool_aware_enabled=True but no MCP server configs found — tool registry not started")
         return
-    ctx.tool_registry = ToolRegistry(configs)
+
+    # Parse extra allowed commands from config
+    extra_cmds: set[str] | None = None
+    if settings.mcp_allowed_commands:
+        extra_cmds = {c.strip() for c in settings.mcp_allowed_commands.split(",") if c.strip()}
+
+    ctx.tool_registry = ToolRegistry(configs, extra_allowed_commands=extra_cmds)
     await ctx.tool_registry.startup()
     logger.info(
         "Tool registry ready: %d server(s), %d tool(s) — %s",

@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 class ToolRegistry:
     """Unified facade over one or more MCP server connections."""
 
-    def __init__(self, servers: list[MCPServerConfig]) -> None:
+    def __init__(self, servers: list[MCPServerConfig], extra_allowed_commands: set[str] | None = None) -> None:
         self._servers = servers
+        self._extra_allowed_commands = extra_allowed_commands
         self._clients: dict[str, MCPClient] = {}   # server_name → client
         self._tool_map: dict[str, MCPClient] = {}  # tool_name   → owning client
 
@@ -33,7 +34,7 @@ class ToolRegistry:
         conflicts: list[str] = []
         for config in self._servers:
             try:
-                client = MCPClient(config)
+                client = MCPClient(config, extra_allowed_commands=self._extra_allowed_commands)
                 await client.connect()
                 self._clients[config.name] = client
                 for tool in client.get_tools():
