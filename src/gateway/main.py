@@ -1027,7 +1027,7 @@ async def on_startup() -> None:
         if settings.control_plane_enabled and not settings.api_keys_list:
             import secrets
             auto_key = f"wgk-{secrets.token_urlsafe(32)}"
-            settings.api_keys_list = [auto_key]
+            settings.gateway_api_keys = auto_key
             logger.warning(
                 "SECURITY: Control plane enabled without API keys. "
                 "Auto-generated key: %s — set WALACOR_GATEWAY_API_KEYS to use your own.",
