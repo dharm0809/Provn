@@ -396,6 +396,7 @@ class Settings(BaseSettings):
         return bool(self.walacor_server and self.walacor_username and self.walacor_password)
 
     # Network tuning
+    max_request_body_mb: float = Field(default=50.0, description="Max request body size in MB (0 = unlimited)")
     provider_timeout: float = Field(default=60.0, description="Provider HTTP request timeout in seconds")
     provider_connect_timeout: float = Field(default=10.0, description="Provider connection timeout in seconds")
     provider_max_connections: int = Field(default=200, description="Max concurrent provider connections")

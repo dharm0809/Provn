@@ -19,8 +19,15 @@ def get_api_key_from_request(request: Request) -> str | None:
 
 
 def _constant_time_key_check(key: str, api_keys_list: list[str]) -> bool:
-    """Check if key matches any configured key using constant-time comparison."""
-    return any(hmac.compare_digest(key, valid_key) for valid_key in api_keys_list)
+    """Check if key matches any configured key using constant-time comparison.
+
+    Iterates ALL keys to avoid leaking which index matched via timing.
+    """
+    result = False
+    for valid_key in api_keys_list:
+        if hmac.compare_digest(key, valid_key):
+            result = True
+    return result
 
 
 def require_api_key_if_configured(request: Request, api_keys_list: list[str]) -> JSONResponse | None:

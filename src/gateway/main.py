@@ -144,6 +144,20 @@ def _cross_validate_identity(request: Request, settings) -> None:
         request.state.identity_warnings = val_result.warnings
 
 
+async def body_size_middleware(request: Request, call_next):
+    """Reject requests whose Content-Length exceeds max_request_body_mb (H5)."""
+    settings = get_settings()
+    if settings.max_request_body_mb > 0:
+        cl = request.headers.get("content-length")
+        max_bytes = int(settings.max_request_body_mb * 1024 * 1024)
+        if cl and int(cl) > max_bytes:
+            return JSONResponse(
+                {"error": f"Request body too large (max {settings.max_request_body_mb}MB)"},
+                status_code=413,
+            )
+    return await call_next(request)
+
+
 async def api_key_middleware(request: Request, call_next):
     """When WALACOR_GATEWAY_API_KEYS is set, require valid API key on proxy routes.
 
@@ -1298,6 +1312,8 @@ def create_app() -> Starlette:
     app.middleware("http")(cors_middleware)
     # Security headers (XSS, clickjack, MIME-sniff) on every response; CSP on /lineage/ only.
     app.middleware("http")(security_headers_middleware)
+    # Body size limit runs outside auth so oversized requests are rejected early (H5).
+    app.middleware("http")(body_size_middleware)
     # api_key runs inside completeness so denied_auth attempts are always recorded.
     app.middleware("http")(api_key_middleware)
     # Token rate limiter runs inside api_key (auth already checked) but outside
