@@ -149,7 +149,7 @@ async def api_key_middleware(request: Request, call_next):
 
     Supports auth_mode: 'api_key' (default), 'jwt', or 'both'.
     """
-    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage", "/v1/lineage", "/v1/compliance")):
+    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage/", "/v1/compliance")):
         return await call_next(request)
     settings = get_settings()
     mode = settings.auth_mode
