@@ -188,9 +188,9 @@ async def api_key_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# CORS headers for browser clients (e.g. gateway-chat.html loaded from file://).
-_CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
+# CORS headers shared across all responses (methods, allowed headers, expose headers, max-age).
+# Access-Control-Allow-Origin is set dynamically by _get_cors_headers() based on config.
+_CORS_BASE_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": (
         "Content-Type, Authorization, X-API-Key, "
@@ -208,12 +208,46 @@ _CORS_HEADERS = {
 }
 
 
+def _get_cors_headers(request: Request) -> dict[str, str]:
+    """Build CORS headers with a dynamic Access-Control-Allow-Origin.
+
+    - cors_allowed_origins=""   -> no Allow-Origin header (same-origin only)
+    - cors_allowed_origins="*"  -> wildcard (explicit opt-in, backward compat)
+    - cors_allowed_origins="https://a.example.com,https://b.example.com"
+        -> reflect the request Origin if it matches; omit otherwise.
+    """
+    settings = get_settings()
+    configured = settings.cors_allowed_origins.strip()
+
+    if not configured:
+        # Same-origin only: return base headers without Allow-Origin.
+        return dict(_CORS_BASE_HEADERS)
+
+    if configured == "*":
+        return {**_CORS_BASE_HEADERS, "Access-Control-Allow-Origin": "*"}
+
+    # Check if the request Origin matches any configured origin.
+    request_origin = (request.headers.get("origin") or "").strip()
+    if not request_origin:
+        return dict(_CORS_BASE_HEADERS)
+
+    allowed = {o.strip().rstrip("/") for o in configured.split(",") if o.strip()}
+    if request_origin.rstrip("/") in allowed:
+        headers = {**_CORS_BASE_HEADERS, "Access-Control-Allow-Origin": request_origin}
+        # Vary on Origin so caches don't mix up per-origin responses.
+        headers["Vary"] = "Origin"
+        return headers
+
+    # Origin not in allowlist: omit Allow-Origin (browser blocks the response).
+    return dict(_CORS_BASE_HEADERS)
+
+
 async def cors_middleware(request: Request, call_next):
     """Handle CORS preflight (OPTIONS) and add CORS headers to responses."""
     if request.method == "OPTIONS":
-        return Response(status_code=200, headers=_CORS_HEADERS)
+        return Response(status_code=200, headers=_get_cors_headers(request))
     response = await call_next(request)
-    for key, value in _CORS_HEADERS.items():
+    for key, value in _get_cors_headers(request).items():
         response.headers[key] = value
     return response
 

@@ -420,6 +420,9 @@ class Settings(BaseSettings):
     retry_max_attempts: int = Field(default=3, description="Max forward retry attempts on transient errors")
     disk_degraded_threshold: float = Field(default=0.8, description="WAL disk usage threshold (0-1) for degraded status")
 
+    # CORS
+    cors_allowed_origins: str = Field(default="", description="Comma-separated CORS origins (empty = same-origin only, * = allow all)")
+
     # Server
     gateway_host: str = Field(default="0.0.0.0", description="Bind host for uvicorn")
     gateway_port: int = Field(default=8000, description="Bind port for uvicorn")
