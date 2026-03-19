@@ -998,6 +998,14 @@ async def on_startup() -> None:
                 ctx.control_store.seed_default_content_policies()
         _init_semantic_cache(settings, ctx)
         _init_load_balancer(settings, ctx)
+        # JWT configuration validation warnings
+        if settings.auth_mode in ("jwt", "both"):
+            if not settings.jwt_issuer:
+                logger.warning("SECURITY: auth_mode=%s but jwt_issuer not set — any JWT issuer will be accepted", settings.auth_mode)
+            if not settings.jwt_audience:
+                logger.warning("SECURITY: auth_mode=%s but jwt_audience not set — any JWT audience will be accepted", settings.auth_mode)
+            if settings.jwt_secret and len(settings.jwt_secret) < 32:
+                logger.error("SECURITY: jwt_secret is too short (%d chars) — use at least 32 characters for HS256", len(settings.jwt_secret))
         # Auto-generate API key if control plane is active but no keys configured
         if settings.control_plane_enabled and not settings.api_keys_list:
             import secrets

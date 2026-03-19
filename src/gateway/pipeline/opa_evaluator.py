@@ -42,8 +42,14 @@ async def query_opa(
         logger.warning("OPA returned unexpected result type: %s", type(result))
         return True, "opa_unexpected_result"
     except httpx.HTTPStatusError as e:
-        logger.warning("OPA returned HTTP %s: %s", e.response.status_code, e)
+        logger.error("OPA returned HTTP %s: %s", e.response.status_code, e, exc_info=True)
+        from gateway.config import get_settings
+        if get_settings().opa_fail_closed:
+            return False, "opa_unavailable_blocked"
         return True, "opa_unavailable"
     except Exception as e:
-        logger.warning("OPA query failed (fail-open): %s", e)
+        logger.error("OPA query failed: %s", e, exc_info=True)
+        from gateway.config import get_settings
+        if get_settings().opa_fail_closed:
+            return False, "opa_unavailable_blocked"
         return True, "opa_unavailable"

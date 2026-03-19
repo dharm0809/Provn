@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import stat
 import time
 
 import gateway.util.json_utils as json
@@ -97,8 +98,13 @@ class WALWriter:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self._path)
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA synchronous=FULL")
             conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA secure_delete=ON")
+            # Enforce 0600 file permissions (owner read/write only)
+            db_path = Path(self._path)
+            if db_path.exists():
+                os.chmod(str(db_path), stat.S_IRUSR | stat.S_IWUSR)
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS wal_records (
                     execution_id  TEXT    PRIMARY KEY,
@@ -280,8 +286,13 @@ class WALWriter:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self._path, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA synchronous=FULL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA secure_delete=ON")
+            # Enforce 0600 file permissions (owner read/write only)
+            db_path = Path(self._path)
+            if db_path.exists():
+                os.chmod(str(db_path), stat.S_IRUSR | stat.S_IWUSR)
             self._conn.execute(
                 """CREATE TABLE IF NOT EXISTS wal_records (
                     execution_id  TEXT    PRIMARY KEY,

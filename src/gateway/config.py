@@ -238,6 +238,10 @@ class Settings(BaseSettings):
         default="/v1/data/walacor/gateway/allow",
         description="OPA decision document path.",
     )
+    opa_fail_closed: bool = Field(
+        default=False,
+        description="Block requests when OPA is unavailable (fail-closed)",
+    )
 
     # Mode
     enforcement_mode: Literal["enforced", "audit_only"] = Field(default="enforced")
