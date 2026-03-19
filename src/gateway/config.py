@@ -189,8 +189,8 @@ class Settings(BaseSettings):
     token_rate_limit_scope: str = Field(default="user", description="Rate limit scope: user, key, tenant, global")
 
     # Phase 26: Rate limiting
-    rate_limit_enabled: bool = Field(default=False, description="Enable request rate limiting")
-    rate_limit_rpm: int = Field(default=60, description="Requests per minute limit")
+    rate_limit_enabled: bool = Field(default=True, description="Enable request rate limiting")
+    rate_limit_rpm: int = Field(default=120, description="Requests per minute limit")
     rate_limit_per_model: bool = Field(default=True, description="Rate limit per user+model (vs per user only)")
 
     # Phase 26: Alerting
@@ -322,6 +322,10 @@ class Settings(BaseSettings):
     tool_max_iterations: int = Field(
         default=10,
         description="Max tool-call loop iterations for the active strategy (guard against infinite loops)",
+    )
+    tool_loop_total_timeout_ms: int = Field(
+        default=120_000,
+        description="Total wall-clock timeout for all tool loop iterations (ms)",
     )
     tool_execution_timeout_ms: int = Field(
         default=30_000,

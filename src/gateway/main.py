@@ -22,6 +22,7 @@ from gateway.pipeline.context import get_pipeline_context
 from gateway.health import health_response, metrics_response
 from gateway.auth.api_key import require_api_key_if_configured
 from gateway.middleware.completeness import completeness_middleware
+from gateway.middleware.ip_rate_limiter import IPRateLimiter
 from gateway.lineage.api import (
     lineage_sessions,
     lineage_session_timeline,
@@ -158,6 +159,9 @@ async def body_size_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_ip_limiter = IPRateLimiter()
+
+
 async def api_key_middleware(request: Request, call_next):
     """When WALACOR_GATEWAY_API_KEYS is set, require valid API key on proxy routes.
 
@@ -165,6 +169,17 @@ async def api_key_middleware(request: Request, call_next):
     """
     if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage/", "/v1/compliance")):
         return await call_next(request)
+
+    # Pre-auth per-IP rate limiting (before any auth check)
+    if request.url.path.startswith("/v1/"):
+        client_ip = request.client.host if request.client else "unknown"
+        if not _ip_limiter.check(client_ip):
+            return JSONResponse(
+                {"error": "Rate limit exceeded"},
+                status_code=429,
+                headers={"Retry-After": "60"},
+            )
+
     settings = get_settings()
     mode = settings.auth_mode
 
@@ -982,6 +997,8 @@ async def on_startup() -> None:
         _init_session_chain(settings, ctx)
         if settings.rate_limit_enabled:
             _init_rate_limiter(settings, ctx)
+        else:
+            logger.warning("SECURITY: Rate limiting is DISABLED — enable WALACOR_RATE_LIMIT_ENABLED=true for production")
         if settings.tool_aware_enabled and settings.mcp_servers_json:
             await _init_tool_registry(settings, ctx)
         if settings.tool_aware_enabled and settings.web_search_enabled:
@@ -1093,6 +1110,13 @@ async def on_startup() -> None:
             from gateway.middleware.attachment_tracker import AttachmentNotificationCache
             ctx.attachment_cache = AttachmentNotificationCache()
             logger.info("Attachment tracking cache enabled")
+        logger.info(
+            "Gateway config: tenant=%s provider=%s auth_mode=%s enforcement=%s "
+            "tool_aware=%s web_search=%s rate_limit=%s",
+            settings.gateway_tenant_id, settings.gateway_provider, settings.auth_mode,
+            settings.enforcement_mode, settings.tool_aware_enabled,
+            settings.web_search_enabled, settings.rate_limit_enabled,
+        )
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
     except Exception:
         logger.critical("Gateway startup FAILED — cleaning up partially initialized resources", exc_info=True)

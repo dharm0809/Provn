@@ -728,6 +728,30 @@ async def _execute_one_tool(
             sources=getattr(result, "sources", None),
         )
 
+    # Heuristic check for indirect prompt injection patterns in tool output
+    _injection_detected = False
+    if not result.is_error and result.content:
+        _injection_patterns = [
+            "ignore previous instructions",
+            "ignore all previous",
+            "disregard your instructions",
+            "you are now",
+            "new instructions:",
+            "system prompt:",
+            "override:",
+            "<system>",
+        ]
+        content_lower = result.content if isinstance(result.content, str) else str(result.content)
+        content_lower = content_lower.lower()
+        for pattern in _injection_patterns:
+            if pattern in content_lower:
+                logger.warning(
+                    "Potential indirect prompt injection in tool output: tool=%s pattern='%s'",
+                    tc.tool_name, pattern,
+                )
+                _injection_detected = True
+                break
+
     try:
         tool_calls_total.labels(provider=provider, tool_type=tc.tool_type, source="gateway").inc()
     except Exception:
@@ -751,10 +775,13 @@ async def _execute_one_tool(
             output_content = f"[Tool output blocked by content policy: {top['category']}]"
             is_error = True
 
+    _meta: dict = {"iteration": iteration, "duration_ms": duration_ms, "is_error": is_error}
+    if _injection_detected:
+        _meta["injection_warning"] = True
     enriched = ToolInteraction(
         tool_id=tc.tool_id, tool_type=tc.tool_type, tool_name=tc.tool_name,
         input_data=tc.input_data, output_data=output_content, sources=result.sources,
-        metadata={"iteration": iteration, "duration_ms": duration_ms, "is_error": is_error},
+        metadata=_meta,
     )
     return enriched, {"tool_call_id": tc.tool_id, "content": output_content}
 
@@ -777,11 +804,13 @@ async def _run_active_tool_loop(
     current_call = call
     current_model = model_response
     final_http_resp: Response | None = None
+    loop_deadline = time.perf_counter() + (settings.tool_loop_total_timeout_ms / 1000.0)
 
     while (
         current_model.has_pending_tool_calls
         and current_model.tool_interactions
         and iterations < settings.tool_max_iterations
+        and time.perf_counter() < loop_deadline
     ):
         iterations += 1
         pending = current_model.tool_interactions
@@ -802,6 +831,9 @@ async def _run_active_tool_loop(
         final_http_resp = http_resp
         if http_resp.status_code >= 500:
             return current_call, current_model, http_resp, all_interactions, iterations, None
+
+    if time.perf_counter() >= loop_deadline:
+        logger.warning("Tool loop wall-clock timeout reached (%.0fms)", settings.tool_loop_total_timeout_ms)
 
     if iterations > 0:
         try:
