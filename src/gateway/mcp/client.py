@@ -145,6 +145,9 @@ class MCPClient:
         elif self._config.transport == "http":
             if not self._config.url:
                 raise ValueError(f"MCP server '{self._config.name}': url is required for HTTP transport")
+            # Security: block SSRF — reject URLs resolving to private/internal IPs
+            from gateway.security.url_validator import validate_outbound_url
+            validate_outbound_url(self._config.url)
             self._ctx_read = sse_client(self._config.url)
         else:
             raise ValueError(f"MCP server '{self._config.name}': unknown transport '{self._config.transport}'")
