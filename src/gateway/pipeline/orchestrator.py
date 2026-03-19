@@ -141,9 +141,26 @@ async def _forward_with_resilience(adapter, call, request):
     cb_reg = ctx.circuit_breakers
     lb = ctx.load_balancer
 
-    # No resilience layer configured — plain forward
+    # No resilience layer configured — plain forward with timeout handling
     if not lb:
-        resp, mr = await forward(adapter, call, request)
+        try:
+            resp, mr = await forward(adapter, call, request)
+        except Exception as fwd_exc:
+            # Catch httpx.ReadTimeout and other transport errors — return 504 not 500
+            exc_name = type(fwd_exc).__name__
+            if "Timeout" in exc_name or "ReadTimeout" in exc_name:
+                logger.error("Provider timeout for %s: %s (increase WALACOR_PROVIDER_TIMEOUT)", call.model_id, fwd_exc)
+                return Response(
+                    content=json.dumps({"error": f"Provider timeout — model '{call.model_id}' did not respond in time. It may be loading into memory (retry in 30s)."}),
+                    status_code=504,
+                    headers={"Content-Type": "application/json", "Retry-After": "30"},
+                ), ModelResponse(content="", provider_request_id="", model_hash=""), False
+            logger.error("Provider forward error for %s: %s", call.model_id, fwd_exc, exc_info=True)
+            return Response(
+                content=json.dumps({"error": "Provider unavailable"}),
+                status_code=502,
+                headers={"Content-Type": "application/json"},
+            ), ModelResponse(content="", provider_request_id="", model_hash=""), False
         if cb_reg and resp.status_code < 400:
             cb_reg.record_success(call.model_id)
         elif cb_reg and resp.status_code >= 500:

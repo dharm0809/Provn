@@ -410,7 +410,7 @@ class Settings(BaseSettings):
 
     # Network tuning
     max_request_body_mb: float = Field(default=50.0, description="Max request body size in MB (0 = unlimited)")
-    provider_timeout: float = Field(default=60.0, description="Provider HTTP request timeout in seconds")
+    provider_timeout: float = Field(default=120.0, description="Provider HTTP request timeout in seconds (120s default for CPU inference + thinking models)")
     provider_connect_timeout: float = Field(default=10.0, description="Provider connection timeout in seconds")
     provider_max_connections: int = Field(default=200, description="Max concurrent provider connections")
     provider_max_keepalive: int = Field(default=50, description="Max keepalive provider connections")
