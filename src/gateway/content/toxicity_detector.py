@@ -23,8 +23,9 @@ _DEFAULT_CATEGORIES: list[tuple[str, list[str]]] = [
 ]
 
 
-def _compile_category(terms: list[str]) -> re.Pattern[str]:
-    return re.compile("|".join(terms), re.IGNORECASE)
+def _compile_category(terms: list[str], *, escape: bool = False) -> re.Pattern[str]:
+    joined = "|".join(re.escape(t) for t in terms) if escape else "|".join(terms)
+    return re.compile(joined, re.IGNORECASE)
 
 
 class ToxicityDetector(ContentAnalyzer):
@@ -47,7 +48,7 @@ class ToxicityDetector(ContentAnalyzer):
         ]
         if extra_terms:
             self._categories.append(
-                ("custom_deny_list", _compile_category(extra_terms))
+                ("custom_deny_list", _compile_category(extra_terms, escape=True))
             )
         self._block_categories: set[str] = {"child_safety"}
         self._warn_categories: set[str] = {"self_harm_indicator", "violence_instruction"}
@@ -63,7 +64,7 @@ class ToxicityDetector(ContentAnalyzer):
         """Replace the custom deny list at runtime (e.g. after policy sync)."""
         self._categories = [c for c in self._categories if c[0] != "custom_deny_list"]
         if terms:
-            self._categories.append(("custom_deny_list", _compile_category(terms)))
+            self._categories.append(("custom_deny_list", _compile_category(terms, escape=True)))
 
     @property
     def timeout_ms(self) -> int:

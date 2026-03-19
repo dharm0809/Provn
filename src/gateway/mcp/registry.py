@@ -147,7 +147,9 @@ def parse_mcp_server_configs(json_str: str) -> list[MCPServerConfig]:
 
     # If it doesn't start with [ or { treat as a file path
     if not raw.startswith(("[", "{")):
-        path = Path(raw)
+        path = Path(raw).resolve()
+        if path.suffix != ".json":
+            raise ValueError(f"MCP server config file must have .json extension: {path}")
         if not path.exists():
             logger.warning("MCP servers JSON file not found: '%s'", raw)
             return []

@@ -33,6 +33,16 @@ class SyncClient:
         self._attestation_cache = attestation_cache
         self._policy_cache = policy_cache
         self._api_key = api_key
+        if (
+            self._base
+            and self._base.startswith("http://")
+            and "localhost" not in self._base
+            and "127.0.0.1" not in self._base
+        ):
+            logger.warning(
+                "SECURITY: Control plane URL '%s' uses HTTP — API key transmitted in cleartext. Use HTTPS in production.",
+                self._base,
+            )
         self._last_attestation_sync: datetime | None = None
         self._last_policy_sync: datetime | None = None
         self._session: httpx.AsyncClient | None = None

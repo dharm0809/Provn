@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 
 
 class SlidingWindowRateLimiter:
     """In-memory sliding window counter for RPM rate limiting."""
 
     def __init__(self):
-        self._windows: dict[str, list[float]] = {}
+        self._windows: OrderedDict[str, list[float]] = OrderedDict()
+
+    def _evict_oldest(self):
+        """Evict oldest entries when window dict exceeds 10k keys to bound memory."""
+        while len(self._windows) > 10_000:
+            self._windows.popitem(last=False)
 
     async def check(self, key: str, limit: int, window_seconds: int | float = 60) -> tuple[bool, int]:
         """Check if request is within rate limit.
 
         Returns (allowed, remaining_count).
         """
+        self._evict_oldest()
         now = time.monotonic()
         cutoff = now - window_seconds
 

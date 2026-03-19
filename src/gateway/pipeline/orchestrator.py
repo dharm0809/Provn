@@ -713,6 +713,21 @@ async def _execute_one_tool(
         timeout_ms=settings.tool_execution_timeout_ms,
     )
     duration_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
+
+    # Truncate oversized tool output to prevent memory/token exhaustion
+    if result.content and len(result.content) > settings.tool_max_output_bytes:
+        logger.warning(
+            "Tool %s output truncated: %d > %d bytes",
+            tc.tool_name, len(result.content), settings.tool_max_output_bytes,
+        )
+        from gateway.mcp.client import ToolResult as _ToolResult
+        result = _ToolResult(
+            content=result.content[:settings.tool_max_output_bytes] + "\n[TRUNCATED]",
+            is_error=result.is_error,
+            duration_ms=getattr(result, "duration_ms", None),
+            sources=getattr(result, "sources", None),
+        )
+
     try:
         tool_calls_total.labels(provider=provider, tool_type=tc.tool_type, source="gateway").inc()
     except Exception:

@@ -7,6 +7,7 @@ import logging
 import uuid
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -322,6 +323,10 @@ class Settings(BaseSettings):
         default=30_000,
         description="Per-tool execution timeout in ms (active strategy)",
     )
+    tool_max_output_bytes: int = Field(
+        default=1_048_576,
+        description="Max tool output size in bytes (default 1MB)",
+    )
     tool_content_analysis_enabled: bool = Field(
         default=True,
         description="Run content analyzers on tool inputs/outputs (active strategy)",
@@ -592,6 +597,22 @@ class Settings(BaseSettings):
                     "WALACOR_GATEWAY_TENANT_ID and WALACOR_CONTROL_PLANE_URL are required "
                     "when skip_governance is False, control_plane_enabled is False, "
                     "and Walacor storage is not configured"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_provider_urls(self) -> "Settings":
+        for field_name in (
+            "provider_openai_url",
+            "provider_anthropic_url",
+            "provider_ollama_url",
+            "provider_huggingface_url",
+            "generic_upstream_url",
+        ):
+            url = getattr(self, field_name, "") or ""
+            if url and urlparse(url).scheme not in ("http", "https", ""):
+                raise ValueError(
+                    f"{field_name} must use http or https scheme, got: {url}"
                 )
         return self
 

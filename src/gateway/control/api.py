@@ -660,7 +660,9 @@ async def control_apply_template(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Control plane not available"}, status_code=503)
 
     template_name = request.path_params["name"]
-    path = _TEMPLATES_DIR / f"{template_name}.json"
+    path = (_TEMPLATES_DIR / f"{template_name}.json").resolve()
+    if not str(path).startswith(str(_TEMPLATES_DIR.resolve())):
+        return JSONResponse({"error": "Invalid template name"}, status_code=400)
     if not path.exists():
         return JSONResponse({"error": f"Template '{template_name}' not found"}, status_code=404)
 
