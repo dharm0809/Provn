@@ -218,6 +218,35 @@ async def cors_middleware(request: Request, call_next):
     return response
 
 
+# Security response headers — applied to ALL responses (XSS / clickjack / MIME-sniff protection).
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+# CSP is only relevant for HTML pages served by the lineage dashboard, not API responses.
+_LINEAGE_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'"
+)
+
+
+async def security_headers_middleware(request: Request, call_next):
+    """Append security headers to every response; add CSP for /lineage/ paths."""
+    response = await call_next(request)
+    for key, value in _SECURITY_HEADERS.items():
+        response.headers[key] = value
+    if request.url.path.startswith("/lineage/"):
+        response.headers["Content-Security-Policy"] = _LINEAGE_CSP
+    return response
+
+
 async def _root_redirect(request: Request):
     return RedirectResponse(url="/lineage/", status_code=302)
 
@@ -1227,6 +1256,8 @@ def create_app() -> Starlette:
     # Middleware order: last registered = outermost (first to run).
     # CORS first so OPTIONS preflight succeeds for browser clients.
     app.middleware("http")(cors_middleware)
+    # Security headers (XSS, clickjack, MIME-sniff) on every response; CSP on /lineage/ only.
+    app.middleware("http")(security_headers_middleware)
     # api_key runs inside completeness so denied_auth attempts are always recorded.
     app.middleware("http")(api_key_middleware)
     # Token rate limiter runs inside api_key (auth already checked) but outside
