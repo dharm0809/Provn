@@ -83,6 +83,7 @@ jobs:
           context: .
           file: deploy/Dockerfile
           push: true
+          no-cache: true
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
