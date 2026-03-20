@@ -133,10 +133,12 @@ jobs:
             # 2. Pull latest image
             docker pull "$IMAGE"
 
-            # 3. Restart with new image
+            # 3. Persist image reference and restart
             cd ~/Gateway
+            sed -i '/^GATEWAY_IMAGE=/d' .env 2>/dev/null || true
+            echo "GATEWAY_IMAGE=$IMAGE" >> .env
             docker compose down gateway
-            GATEWAY_IMAGE="$IMAGE" docker compose up -d --no-build --force-recreate gateway
+            docker compose up -d --no-build --force-recreate gateway
 
             # 4. Health check
             echo "Waiting for gateway to start..."

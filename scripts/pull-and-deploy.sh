@@ -35,7 +35,9 @@ cd ~/Gateway
 docker compose down gateway
 
 echo "[4/5] Starting gateway with new image..."
-GATEWAY_IMAGE="$IMAGE" docker compose up -d --no-build --force-recreate gateway
+sed -i '/^GATEWAY_IMAGE=/d' .env 2>/dev/null || true
+echo "GATEWAY_IMAGE=$IMAGE" >> .env
+docker compose up -d --no-build --force-recreate gateway
 
 echo "[5/5] Waiting for healthy..."
 for i in $(seq 1 30); do
