@@ -8,12 +8,11 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE: ghcr.io/dharm0809/walacor-gateway
+  ECR_REPOSITORY: provn-gateway
 
 jobs:
   # ═══════════════════════════════════════════════════
-  # Stage 1: Lint + Unit Tests
+  # Stage 1: Unit Tests
   # ═══════════════════════════════════════════════════
   test:
     name: Test
@@ -38,78 +37,118 @@ jobs:
         run: echo "Unit tests completed"
 
   # ═══════════════════════════════════════════════════
-  # Stage 2: Build Docker Image
+  # Stage 2: Build & Push to AWS ECR
   # ═══════════════════════════════════════════════════
   build:
-    name: Build
+    name: Build & Push to ECR
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     permissions:
       contents: read
-      packages: write
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
+      full_image: ${{ steps.tag.outputs.full_image }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ghcr.io
-          username: dharm0809
-          password: ${{ secrets.GITHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set image tag
         id: tag
         env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           SHA: ${{ github.sha }}
         run: |
           SHORT_SHA=$(echo "$SHA" | cut -c1-7)
           echo "tag=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "full_image=$ECR_REGISTRY/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build and push to ECR
         uses: docker/build-push-action@v6
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
         with:
           context: .
           file: deploy/Dockerfile
           push: true
           tags: |
-            ghcr.io/dharm0809/walacor-gateway:latest
-            ghcr.io/dharm0809/walacor-gateway:${{ steps.tag.outputs.tag }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
 
       - name: Confirm push
         env:
+          FULL_IMAGE: ${{ steps.tag.outputs.full_image }}
           TAG: ${{ steps.tag.outputs.tag }}
-        run: echo "Pushed $IMAGE:latest and $IMAGE:$TAG"
+        run: echo "Pushed $FULL_IMAGE:latest and $FULL_IMAGE:$TAG"
 
   # ═══════════════════════════════════════════════════
   # Stage 3: Deploy to EC2
-  # Requires: EC2_HOST, EC2_USER, EC2_DEPLOY_KEY secrets
-  # Uses a DEPLOY-ONLY key (not personal SSH key)
-  # Set up "production" environment with manual approval
+  # Requires: EC2_HOST, EC2_USER, EC2_DEPLOY_KEY,
+  #           AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+  #           AWS_REGION, AWS_ACCOUNT_ID
   # ═══════════════════════════════════════════════════
   deploy:
-    name: Deploy
+    name: Deploy to EC2
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: production
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
 
     steps:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_DEPLOY_KEY }}
           port: 22
+          envs: AWS_ACCOUNT_ID,AWS_REGION
           script: |
+            set -e
+
+            ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            IMAGE="$ECR_REGISTRY/provn-gateway:latest"
+
+            echo "=== Deploy Gateway from ECR ==="
+
+            # 1. Login to ECR
+            aws ecr get-login-password --region "$AWS_REGION" | \
+              docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+            # 2. Pull latest image
+            docker pull "$IMAGE"
+
+            # 3. Restart with new image
             cd ~/Gateway
-            git pull origin main
-            docker pull ghcr.io/dharm0809/walacor-gateway:latest
+            export GATEWAY_IMAGE="$IMAGE"
             docker compose down gateway
             docker compose up -d
-            sleep 20
-            curl -sf http://localhost:8002/health && echo "DEPLOY OK" || echo "DEPLOY FAILED"
+
+            # 4. Health check
+            echo "Waiting for gateway to start..."
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:8002/health > /dev/null 2>&1; then
+                echo "DEPLOY OK — Gateway healthy"
+                curl -s http://localhost:8002/health | python3 -m json.tool | head -5
+                exit 0
+              fi
+              sleep 3
+            done
+
+            echo "DEPLOY FAILED — gateway not healthy after 90s"
+            docker compose logs gateway --tail=20
+            exit 1

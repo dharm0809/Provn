@@ -5,6 +5,8 @@
 .env.*.local
 *.key
 *.pem
+*.csv
+AWS/
 secrets/
 
 # --- Python ---
