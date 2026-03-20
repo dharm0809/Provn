@@ -11,7 +11,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 RUN useradd --create-home --uid 1000 app
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
+RUN pip install --no-cache-dir /wheels/*.whl duckduckgo-search && rm -rf /wheels
 RUN mkdir -p /var/walacor/wal && chown app:app /var/walacor/wal
 USER app
 EXPOSE 8000
