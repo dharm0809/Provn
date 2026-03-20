@@ -133,11 +133,19 @@ jobs:
             # 2. Pull latest image
             docker pull "$IMAGE"
 
-            # 3. Update repo and restart with ECR image
+            # 3. Ensure docker-compose uses ECR image
             cd ~/Gateway
-            git pull origin main
+
+            # Add image field if missing from docker-compose.yml
+            if ! grep -q 'GATEWAY_IMAGE' docker-compose.yml; then
+              sed -i '/^  gateway:/a\    image: ${GATEWAY_IMAGE:-}' docker-compose.yml
+            fi
+
+            # Persist GATEWAY_IMAGE in .env
             sed -i '/^GATEWAY_IMAGE=/d' .env 2>/dev/null || true
             echo "GATEWAY_IMAGE=$IMAGE" >> .env
+
+            # 4. Restart with new image
             docker compose down gateway
             docker compose up -d --no-build --force-recreate gateway
 
