@@ -136,7 +136,7 @@ jobs:
             # 3. Restart with new image
             cd ~/Gateway
             docker compose down gateway
-            GATEWAY_IMAGE="$IMAGE" docker compose up -d --no-build
+            GATEWAY_IMAGE="$IMAGE" docker compose up -d --no-build --force-recreate gateway
 
             # 4. Health check
             echo "Waiting for gateway to start..."
