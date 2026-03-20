@@ -1,11 +1,11 @@
-# Walacor Gateway — Overview
+# Provn — Overview
 
 ## What it is
 
-A security and audit proxy that sits between your application and any AI model. Your app talks to the gateway exactly like it talks to OpenAI. The gateway handles attestation, policy enforcement, and audit logging — then forwards the request to the actual model.
+A security and audit proxy that sits between your application and any AI model. Your app talks to Provn exactly like it talks to OpenAI. The gateway handles attestation, policy enforcement, content analysis, and audit logging — then forwards the request to the actual model.
 
 ```
-Your App  →  Walacor Gateway  →  LLM (OpenAI / Anthropic / Ollama / LM Studio)
+Your App  →  Provn Gateway  →  LLM (OpenAI / Anthropic / Ollama / any provider)
 ```
 
 No code changes required in your application.
@@ -17,11 +17,15 @@ No code changes required in your application.
 Every request produces one audit record containing:
 
 - The **prompt** and **response** (full text, sent to Walacor backend which hashes on ingest)
+- **Thinking content** — reasoning chain from thinking models (qwen3), stored separately from the clean response
 - The **provider's own request ID** — the ID the model assigned to that specific exchange
 - The **model hash** — a cryptographic fingerprint of the model weights (available for local models like Ollama)
-- Policy result, timestamp, tenant, session chain values
+- **Tool events** — every tool call (web search, MCP, fetch) with SHA3-512 hashes on input/output
+- **Content analysis** — PII detection, toxicity scoring, Llama Guard verdicts per request
+- **Caller identity** — who made the request (JWT claims, headers, or client IP)
+- Policy result, timestamp, tenant, session chain values, latency, token counts
 
-Records are written to a local SQLite WAL first (crash-safe), then delivered to the control plane asynchronously.
+Records are dual-written to a local SQLite WAL (crash-safe, encrypted, 0600 permissions) and the Walacor backend.
 
 ---
 
@@ -29,61 +33,58 @@ Records are written to a local SQLite WAL first (crash-safe), then delivered to 
 
 | Check | What happens on failure |
 |---|---|
-| **Model attestation** | Request blocked — model must be registered with the control plane |
-| **Pre-request policy** | Request blocked — policy rules evaluated before forwarding |
-| **Response content** | Response blocked — PII and toxicity checks before returning to caller |
+| **Model attestation** | Request blocked — model must be registered or auto-attested |
+| **Pre-request policy** | Request blocked — policy rules evaluated (deny/allow semantics) |
+| **Response content** | Response blocked — PII, toxicity, Llama Guard, DLP, Prompt Guard checks |
 | **Token budget** | Request blocked — per-tenant spend limit enforced |
+| **Rate limiting** | Request throttled — per-key and per-IP limits (default 120 RPM) |
 | **WAL backpressure** | Request blocked — protects against unbounded disk growth during outages |
+| **Request body size** | Request rejected (413) — default 50MB limit |
 
 Set `WALACOR_ENFORCEMENT_MODE=audit_only` to log violations without blocking (useful for baseline measurement before going live).
 
 ---
 
-## Supported models
+## Recommended models
 
-| Provider | How to connect |
-|---|---|
-| OpenAI | Set `WALACOR_PROVIDER_OPENAI_KEY` |
-| Anthropic Claude | Set `WALACOR_PROVIDER_ANTHROPIC_KEY` |
-| **Ollama** (local) | Set `WALACOR_GATEWAY_PROVIDER=ollama` and `WALACOR_PROVIDER_OLLAMA_URL=http://localhost:11434` |
-| **LM Studio** (local) | Set `WALACOR_PROVIDER_OPENAI_URL=http://localhost:1234` |
-| HuggingFace endpoints | Set `WALACOR_PROVIDER_HUGGINGFACE_URL` |
+| Model | Best for | Thinking | Tools |
+|-------|---------|----------|-------|
+| **qwen3:8b** | Primary — reasoning + tool use | Yes | Yes |
+| **qwen3:30b** | Best quality (needs 32GB RAM) | Yes | Yes |
+| **llama3.1:8b** | Fast, reliable tool workloads | No | Yes |
 
 ---
 
 ## Quick start
 
 ```bash
-pip install -e ./walacor-core
-pip install -e "./Gateway[dev]"
-
-# No governance — just a transparent proxy
-WALACOR_SKIP_GOVERNANCE=true \
-WALACOR_PROVIDER_OPENAI_KEY=sk-... \
-walacor-gateway
-
-# Full governance
-WALACOR_GATEWAY_TENANT_ID=my-tenant \
-WALACOR_CONTROL_PLANE_URL=https://control.walacor.com \
-WALACOR_PROVIDER_OPENAI_KEY=sk-... \
-walacor-gateway
+# Docker Compose (includes Ollama + OpenWebUI)
+git clone https://github.com/dharm0809/LLM-Gateway.git && cd LLM-Gateway
+docker compose up -d
+docker exec gateway-ollama-1 ollama pull qwen3:8b
 ```
 
-Gateway listens on `http://localhost:8000`. Point any OpenAI-compatible client there.
+Gateway: `http://localhost:8002` | Dashboard: `http://localhost:8002/lineage/`
+
+> **API key required.** Check logs for auto-generated key: `docker compose logs gateway | grep "Auto-generated key"`
+
+See [Getting Started](docs/GETTING-STARTED.md) for the full setup guide including API key configuration, user identity headers, and test suite commands.
 
 ---
 
 ## Key endpoints
 
-| Path | Description |
-|---|---|
-| `/v1/chat/completions` | OpenAI / Ollama / LM Studio |
-| `/v1/messages` | Anthropic |
-| `/health` | Status, cache freshness, WAL backlog |
-| `/metrics` | Prometheus |
-| `/lineage/` | Audit lineage dashboard |
-| `/v1/control/discover` | Scan providers for available models |
-| `/v1/control/status` | Gateway status (auth, providers, caches, budgets) |
+| Path | Auth? | Description |
+|---|---|---|
+| `POST /v1/chat/completions` | Yes | OpenAI / Ollama chat proxy |
+| `GET /health` | No | Status, cache freshness, WAL backlog |
+| `GET /metrics` | No | Prometheus metrics |
+| `GET /v1/models` | No | Available models |
+| `GET /lineage/` | No | Audit lineage dashboard |
+| `GET /v1/lineage/sessions` | Yes | Session list with question preview |
+| `GET /v1/lineage/verify/{id}` | Yes | Verify session chain integrity |
+| `GET /v1/control/status` | Yes | Gateway governance status |
+| `GET /v1/control/discover` | Yes | Scan providers for available models |
 
 ---
 
@@ -92,18 +93,22 @@ Gateway listens on `http://localhost:8000`. Point any OpenAI-compatible client t
 ```
 Request comes in
     │
-    ├─ Blocked (attestation / policy / budget)?  → one row in gateway_attempts (disposition = denied_*)
+    ├─ Blocked (attestation / policy / budget / rate limit)?
+    │       → one row in gateway_attempts (disposition = denied_*)
     │
     └─ Allowed?
            │
            ├─ Forward to model, get response
-           ├─ Run content checks (PII, toxicity)
-           ├─ Link to session chain (Merkle hash)
-           ├─ Write to local WAL (SQLite, fsync)
-           └─ Deliver to control plane (async, with retry)
+           ├─ Execute tools if model requests them (web search, MCP)
+           ├─ Strip thinking content, store separately
+           ├─ Run content checks (PII, toxicity, Llama Guard, DLP)
+           ├─ Link to session chain (SHA3-512 Merkle hash)
+           ├─ Write to local WAL (SQLite, fsync, 0600 permissions)
+           └─ Deliver to Walacor backend (async, with retry)
                     ↓
            one row in gateway_attempts (disposition = allowed)
            one row in wal_records (full execution record)
+           N rows in tool_events (if tools were called)
 ```
 
 Every request — whether allowed, blocked, or errored — always produces exactly one row in `gateway_attempts`. This is the completeness invariant.
@@ -112,7 +117,7 @@ Every request — whether allowed, blocked, or errored — always produces exact
 
 ## Session chains (G5)
 
-Pass `x-walacor-session-id` in your request. The gateway links turns within a session via a hash chain:
+Pass `X-Session-Id` header in your request. The gateway links turns within a session via a hash chain:
 
 ```
 turn 1  →  record_hash_1
@@ -120,25 +125,33 @@ turn 2  →  SHA3-512(turn_2_fields + record_hash_1)  →  record_hash_2
 turn 3  →  SHA3-512(turn_3_fields + record_hash_2)  →  record_hash_3
 ```
 
-The control plane can verify that no turn was deleted, reordered, or modified.
+The lineage dashboard verifies chains client-side (no server trust required). Any deleted, reordered, or modified turn breaks the chain.
 
 ---
 
-## Minimum required config
+## Security
 
-```bash
-WALACOR_GATEWAY_TENANT_ID=your-tenant-id
-WALACOR_CONTROL_PLANE_URL=https://your-control-plane
-WALACOR_PROVIDER_OPENAI_KEY=sk-...   # or whichever provider you use
-```
+The gateway ships with 30+ security hardening measures:
 
-Everything else has safe defaults. See [README.md](README.md) for the full configuration reference.
+- API key required for all data endpoints (auto-generated if not configured)
+- CSP + security headers on all responses
+- CORS restricted to configured origins (default: same-origin only)
+- SSRF protection on outbound tool URLs (blocks private IP ranges)
+- MCP subprocess command allowlist + env sanitization
+- Request body size limits (default 50MB)
+- Per-IP pre-auth rate limiting + per-key rate limiting
+- Constant-time API key comparison
+- Generic error responses (no stack traces or internal paths leaked)
+- WAL file permissions 0600 + PRAGMA secure_delete
+- Indirect prompt injection scanning on tool output
+
+See [Security Hardening Plan](docs/plans/2026-03-19-security-hardening.md) for the full 32-task audit.
 
 ---
 
 ## Further reading
 
+- [Getting Started](docs/GETTING-STARTED.md) — API keys, models, testing, team onboarding
 - [How It Works](docs/HOW-IT-WORKS.md) — complete walkthrough of the pipeline, tool execution, MCP, and audit trail
-- [Visual Workflow](docs/gateway-workflow.html) — interactive HTML diagram
-- [Executive Briefing](docs/WIKI-EXECUTIVE.md) — CEO/leadership narrative
 - [EU AI Act Compliance](docs/EU-AI-ACT-COMPLIANCE.md) — regulatory mapping
+- [Executive Briefing](docs/WIKI-EXECUTIVE.md) — CEO/leadership narrative
