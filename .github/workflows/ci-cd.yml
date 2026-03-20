@@ -126,8 +126,8 @@ jobs:
             echo "=== Deploy Gateway from ECR ==="
 
             # 1. Login to ECR
-            aws ecr get-login-password --region "$AWS_REGION" | \
-              docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            ECR_PASSWORD=$(aws ecr get-login-password --region "$AWS_REGION")
+            echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
             # 2. Pull latest image
             docker pull "$IMAGE"
