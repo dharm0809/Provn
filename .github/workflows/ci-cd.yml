@@ -133,8 +133,9 @@ jobs:
             # 2. Pull latest image
             docker pull "$IMAGE"
 
-            # 3. Persist image reference and restart
+            # 3. Update repo and restart with ECR image
             cd ~/Gateway
+            git pull origin main
             sed -i '/^GATEWAY_IMAGE=/d' .env 2>/dev/null || true
             echo "GATEWAY_IMAGE=$IMAGE" >> .env
             docker compose down gateway
