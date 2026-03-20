@@ -135,9 +135,8 @@ jobs:
 
             # 3. Restart with new image
             cd ~/Gateway
-            export GATEWAY_IMAGE="$IMAGE"
             docker compose down gateway
-            docker compose up -d
+            GATEWAY_IMAGE="$IMAGE" docker compose up -d --no-build
 
             # 4. Health check
             echo "Waiting for gateway to start..."
