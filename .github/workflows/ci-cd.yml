@@ -76,9 +76,6 @@ jobs:
 
       - name: Build and push to ECR
         uses: docker/build-push-action@v6
-        env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
         with:
           context: .
           file: deploy/Dockerfile
@@ -130,26 +127,23 @@ jobs:
             ECR_PASSWORD=$(aws ecr get-login-password --region "$AWS_REGION")
             echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-            # 2. Pull latest image
-            docker pull "$IMAGE"
-
-            # 3. Ensure docker-compose uses ECR image
+            # 2. Move to project directory
             cd ~/Gateway
 
-            # Add image field if missing from docker-compose.yml
-            if ! grep -q 'GATEWAY_IMAGE' docker-compose.yml; then
-              sed -i '/^  gateway:/a\    image: ${GATEWAY_IMAGE:-}' docker-compose.yml
-            fi
+            # 3. Pull latest gateway image explicitly
+            docker pull "$IMAGE"
 
-            # Persist GATEWAY_IMAGE in .env
-            sed -i '/^GATEWAY_IMAGE=/d' .env 2>/dev/null || true
+            # 4. Persist GATEWAY_IMAGE in .env
+            touch .env
+            sed -i '/^GATEWAY_IMAGE=/d' .env || true
             echo "GATEWAY_IMAGE=$IMAGE" >> .env
 
-            # 4. Restart with new image
-            docker compose down gateway
-            docker compose up -d --no-build --force-recreate gateway
+            # 5. Restart full stack cleanly
+            docker compose down --remove-orphans || true
+            docker compose pull || true
+            docker compose up -d --force-recreate
 
-            # 4. Health check
+            # 6. Health check
             echo "Waiting for gateway to start..."
             for i in $(seq 1 30); do
               if curl -sf http://localhost:8002/health > /dev/null 2>&1; then
@@ -161,5 +155,8 @@ jobs:
             done
 
             echo "DEPLOY FAILED — gateway not healthy after 90s"
-            docker compose logs gateway --tail=20
+            docker compose ps
+            docker compose logs gateway --tail=50
+            docker compose logs ollama --tail=50 || true
+            docker compose logs openwebui --tail=50 || true
             exit 1
