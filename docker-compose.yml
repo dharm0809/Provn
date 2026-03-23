@@ -2,16 +2,15 @@
 #
 #   docker compose up
 #
-# This starts Gateway + Ollama + OpenWebUI. Open http://localhost:3000 to chat.
-# Lineage dashboard at http://localhost:8002/lineage/
-#
-# Optional: copy .env.example to .env and customize settings.
+# Starts Gateway + Ollama + OpenWebUI
+# OpenWebUI: http://localhost:3000
+# Gateway health: http://localhost:8002/health
+# Gateway lineage: http://localhost:8002/lineage/
 
 services:
   ollama:
     image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
+    container_name: gateway-ollama
     environment:
       - OLLAMA_KEEP_ALIVE=24h
       - OLLAMA_NUM_PARALLEL=2
@@ -27,9 +26,10 @@ services:
 
   gateway:
     image: ${GATEWAY_IMAGE:-}
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
+    container_name: gateway-app
+    # build:
+    #   context: .
+    #   dockerfile: deploy/Dockerfile
     ports:
       - "8002:8000"
     environment:
@@ -46,11 +46,9 @@ services:
       - WALACOR_CONTROL_PLANE_ENABLED=${WALACOR_CONTROL_PLANE_ENABLED:-true}
       - WALACOR_PROVIDER_TIMEOUT=${WALACOR_PROVIDER_TIMEOUT:-300}
       - WALACOR_LOG_LEVEL=${WALACOR_LOG_LEVEL:-INFO}
-      # Walacor backend (optional — leave empty to use local WAL only)
       - WALACOR_SERVER=${WALACOR_SERVER:-}
       - WALACOR_USERNAME=${WALACOR_USERNAME:-}
       - WALACOR_PASSWORD=${WALACOR_PASSWORD:-}
-      # Cloud provider keys (optional)
       - WALACOR_PROVIDER_OPENAI_KEY=${OPENAI_API_KEY:-}
       - WALACOR_PROVIDER_ANTHROPIC_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
@@ -68,6 +66,7 @@ services:
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
+    container_name: gateway-openwebui
     ports:
       - "3000:8080"
     volumes:
