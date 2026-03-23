@@ -11,9 +11,6 @@ env:
   ECR_REPOSITORY: provn-gateway
 
 jobs:
-  # ═══════════════════════════════════════════════════
-  # Stage 1: Unit Tests
-  # ═══════════════════════════════════════════════════
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -36,9 +33,6 @@ jobs:
         if: always()
         run: echo "Unit tests completed"
 
-  # ═══════════════════════════════════════════════════
-  # Stage 2: Build & Push to AWS ECR
-  # ═══════════════════════════════════════════════════
   build:
     name: Build & Push to ECR
     needs: test
@@ -91,12 +85,6 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: echo "Pushed $FULL_IMAGE:latest and $FULL_IMAGE:$TAG"
 
-  # ═══════════════════════════════════════════════════
-  # Stage 3: Deploy to EC2
-  # Requires: EC2_HOST, EC2_USER, EC2_DEPLOY_KEY,
-  #           AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-  #           AWS_REGION, AWS_ACCOUNT_ID
-  # ═══════════════════════════════════════════════════
   deploy:
     name: Deploy to EC2
     needs: build
@@ -130,20 +118,23 @@ jobs:
             # 2. Move to project directory
             cd ~/Gateway
 
-            # 3. Pull latest gateway image explicitly
+            # 3. Sync latest repo on EC2
+            git fetch origin main
+            git reset --hard origin/main
+
+            # 4. Pull latest gateway image explicitly
             docker pull "$IMAGE"
 
-            # 4. Persist GATEWAY_IMAGE in .env
+            # 5. Persist GATEWAY_IMAGE in .env
             touch .env
             sed -i '/^GATEWAY_IMAGE=/d' .env || true
             echo "GATEWAY_IMAGE=$IMAGE" >> .env
 
-            # 5. Restart full stack cleanly
+            # 6. Restart full stack cleanly
             docker compose down --remove-orphans || true
-            docker compose pull || true
             docker compose up -d --force-recreate
 
-            # 6. Health check
+            # 7. Health check
             echo "Waiting for gateway to start..."
             for i in $(seq 1 30); do
               if curl -sf http://localhost:8002/health > /dev/null 2>&1; then
