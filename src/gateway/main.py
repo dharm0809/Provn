@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from gateway.config import get_settings
 from gateway.pipeline.orchestrator import handle_request
@@ -1341,13 +1342,13 @@ def create_app() -> Starlette:
     app = Starlette(debug=False, routes=routes)
     # Middleware order: last registered = outermost (first to run).
     # CORS first so OPTIONS preflight succeeds for browser clients.
-    app.middleware("http")(cors_middleware)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=cors_middleware)
     # Security headers (XSS, clickjack, MIME-sniff) on every response; CSP on /lineage/ only.
-    app.middleware("http")(security_headers_middleware)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=security_headers_middleware)
     # Body size limit runs outside auth so oversized requests are rejected early (H5).
-    app.middleware("http")(body_size_middleware)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=body_size_middleware)
     # api_key runs inside completeness so denied_auth attempts are always recorded.
-    app.middleware("http")(api_key_middleware)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=api_key_middleware)
     # Token rate limiter runs inside api_key (auth already checked) but outside
     # completeness so 429 responses are recorded as attempts.
     settings = get_settings()
@@ -1366,7 +1367,7 @@ def create_app() -> Starlette:
             settings.token_rate_limit_window,
             settings.token_rate_limit_scope,
         )
-    app.middleware("http")(completeness_middleware)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=completeness_middleware)
     app.add_event_handler("startup", on_startup)
     app.add_event_handler("shutdown", on_shutdown)
     return app
