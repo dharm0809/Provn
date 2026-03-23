@@ -154,13 +154,13 @@ async def _forward_with_resilience(adapter, call, request):
                     content=json.dumps({"error": f"Provider timeout — model '{call.model_id}' did not respond in time. It may be loading into memory (retry in 30s)."}),
                     status_code=504,
                     headers={"Content-Type": "application/json", "Retry-After": "30"},
-                ), ModelResponse(content="", provider_request_id="", model_hash=""), False
+                ), ModelResponse(content="", usage=None, raw_body=b"", provider_request_id="", model_hash=""), False
             logger.error("Provider forward error for %s: %s", call.model_id, fwd_exc, exc_info=True)
             return Response(
                 content=json.dumps({"error": "Provider unavailable"}),
                 status_code=502,
                 headers={"Content-Type": "application/json"},
-            ), ModelResponse(content="", provider_request_id="", model_hash=""), False
+            ), ModelResponse(content="", usage=None, raw_body=b"", provider_request_id="", model_hash=""), False
         if cb_reg and resp.status_code < 400:
             cb_reg.record_success(call.model_id)
         elif cb_reg and resp.status_code >= 500:
@@ -176,7 +176,7 @@ async def _forward_with_resilience(adapter, call, request):
             return JSONResponse(
                 {"error": {"message": "Service unavailable (circuit open, no fallback)", "type": "server_error"}},
                 status_code=503,
-            ), ModelResponse(content="", provider_request_id="", model_hash=""), True
+            ), ModelResponse(content="", usage=None, raw_body=b"", provider_request_id="", model_hash=""), True
         # TODO: route to fallback endpoint (requires adapter URL override)
         logger.info("Circuit open fallback available: %s", fb.url)
 
@@ -213,7 +213,7 @@ async def _forward_with_resilience(adapter, call, request):
         return JSONResponse(
             {"error": {"message": f"Provider error: {e.body}", "type": "server_error"}},
             status_code=e.status_code,
-        ), ModelResponse(content="", provider_request_id="", model_hash=""), False
+        ), ModelResponse(content="", usage=None, raw_body=b"", provider_request_id="", model_hash=""), False
     except Exception:
         if cb_reg:
             cb_reg.record_failure(call.model_id)

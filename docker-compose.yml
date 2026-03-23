@@ -12,6 +12,9 @@ services:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_PARALLEL=2
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
@@ -41,6 +44,7 @@ services:
       - WALACOR_THINKING_STRIP_ENABLED=${WALACOR_THINKING_STRIP_ENABLED:-true}
       - WALACOR_LINEAGE_ENABLED=${WALACOR_LINEAGE_ENABLED:-true}
       - WALACOR_CONTROL_PLANE_ENABLED=${WALACOR_CONTROL_PLANE_ENABLED:-true}
+      - WALACOR_PROVIDER_TIMEOUT=${WALACOR_PROVIDER_TIMEOUT:-300}
       - WALACOR_LOG_LEVEL=${WALACOR_LOG_LEVEL:-INFO}
       # Walacor backend (optional — leave empty to use local WAL only)
       - WALACOR_SERVER=${WALACOR_SERVER:-}
