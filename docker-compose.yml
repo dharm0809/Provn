@@ -77,6 +77,7 @@ services:
       - ENABLE_OLLAMA_API=false
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
       - ENABLE_DIRECT_CONNECTIONS=false
+      - ENABLE_SIGNUP=true
       - WEBUI_NAME=${WEBUI_NAME:-Walacor Chat}
     depends_on:
       gateway:
