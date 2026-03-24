@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 from pathlib import Path
@@ -1339,7 +1340,13 @@ def create_app() -> Starlette:
     # Lineage dashboard static files (only if directory exists in package)
     if _static_dir.is_dir():
         routes.append(Mount("/lineage", app=StaticFiles(directory=str(_static_dir), html=True)))
-    app = Starlette(debug=False, routes=routes)
+    @asynccontextmanager
+    async def lifespan(app):
+        await on_startup()
+        yield
+        await on_shutdown()
+
+    app = Starlette(debug=False, routes=routes, lifespan=lifespan)
     # Middleware order: last registered = outermost (first to run).
     # CORS first so OPTIONS preflight succeeds for browser clients.
     app.add_middleware(BaseHTTPMiddleware, dispatch=cors_middleware)
@@ -1368,8 +1375,6 @@ def create_app() -> Starlette:
             settings.token_rate_limit_scope,
         )
     app.add_middleware(BaseHTTPMiddleware, dispatch=completeness_middleware)
-    app.router.on_startup.append(on_startup)
-    app.router.on_shutdown.append(on_shutdown)
     return app
 
 
