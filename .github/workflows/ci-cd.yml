@@ -90,6 +90,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    environment: production
 
     steps:
       - name: Deploy to EC2
