@@ -337,6 +337,9 @@ class OpenAIAdapter(ProviderAdapter):
         if has_mm:
             metadata["has_multimodal_input"] = True
             metadata["multimodal_input_count"] = mm_count
+        # Tag reasoning models early so the orchestrator can force non-streaming.
+        if _is_reasoning_model(model_id) and self._base_url.rstrip("/").endswith("api.openai.com"):
+            metadata["_responses_api"] = True
         return ModelCall(
             provider=self.get_provider_name(),
             model_id=model_id,
@@ -364,8 +367,6 @@ class OpenAIAdapter(ProviderAdapter):
                 "Routing %s to Responses API with reasoning summary",
                 call.model_id,
             )
-            # Tag the call so parse_response knows this is a Responses API request.
-            call.metadata["_responses_api"] = True
             return httpx.Request(method="POST", url=url, headers=headers, content=body)
 
         # Standard Chat Completions path.
@@ -452,6 +453,14 @@ class OpenAIAdapter(ProviderAdapter):
 
         usage = data.get("usage")
         if usage:
+            # Normalize Responses API usage fields to Chat Completions names
+            # so downstream (hasher, lineage) always sees prompt_tokens/completion_tokens.
+            if "input_tokens" in usage and "prompt_tokens" not in usage:
+                usage["prompt_tokens"] = usage["input_tokens"]
+            if "output_tokens" in usage and "completion_tokens" not in usage:
+                usage["completion_tokens"] = usage["output_tokens"]
+            if "total_tokens" not in usage:
+                usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
             cache_info = detect_cache_hit(usage)
             usage = {**usage, **cache_info}
 

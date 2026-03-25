@@ -20,6 +20,52 @@ from gateway.metrics.prometheus import forward_duration
 logger = logging.getLogger(__name__)
 
 
+def _normalize_responses_to_chat_completions(
+    raw_bytes: bytes, model_response: ModelResponse,
+) -> bytes:
+    """Convert OpenAI Responses API JSON → Chat Completions JSON for client compat."""
+    try:
+        data = _json_mod.loads(raw_bytes)
+    except (ValueError, TypeError):
+        return raw_bytes
+
+    # Map Responses API usage (input_tokens/output_tokens) to Chat Completions format.
+    raw_usage = data.get("usage") or {}
+    usage = {
+        "prompt_tokens": raw_usage.get("input_tokens", raw_usage.get("prompt_tokens", 0)),
+        "completion_tokens": raw_usage.get("output_tokens", raw_usage.get("completion_tokens", 0)),
+        "total_tokens": raw_usage.get("total_tokens", 0),
+    }
+    # Preserve detail fields.
+    if raw_usage.get("output_tokens_details"):
+        usage["completion_tokens_details"] = raw_usage["output_tokens_details"]
+    if raw_usage.get("input_tokens_details"):
+        usage["prompt_tokens_details"] = raw_usage["input_tokens_details"]
+
+    chat_completions = {
+        "id": data.get("id", ""),
+        "object": "chat.completion",
+        "created": data.get("created_at", 0),
+        "model": data.get("model", ""),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": model_response.content or "",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": usage,
+    }
+    # Include service_tier if present.
+    if data.get("service_tier"):
+        chat_completions["service_tier"] = data["service_tier"]
+
+    return _json_mod.dumps(chat_completions).encode("utf-8")
+
+
 def _inject_stream_options(content: bytes | None) -> bytes | None:
     """Inject stream_options.include_usage=true into streaming request bodies.
 
@@ -124,11 +170,23 @@ async def forward(
     resp_headers.pop("transfer-encoding", None)
     resp_headers.pop("content-length", None)
     resp_headers["X-Session-Id"] = call.metadata.get("session_id", "")
-    response = Response(
-        content=upstream_resp.content,
-        status_code=upstream_resp.status_code,
-        headers=resp_headers,
-    )
+
+    # Normalize Responses API output → Chat Completions format for clients.
+    if call.metadata.get("_responses_api") and upstream_resp.status_code == 200:
+        normalized = _normalize_responses_to_chat_completions(
+            upstream_resp.content, model_response,
+        )
+        response = Response(
+            content=normalized,
+            status_code=upstream_resp.status_code,
+            headers=resp_headers,
+        )
+    else:
+        response = Response(
+            content=upstream_resp.content,
+            status_code=upstream_resp.status_code,
+            headers=resp_headers,
+        )
     return response, model_response
 
 

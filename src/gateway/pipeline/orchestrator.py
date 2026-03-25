@@ -1991,6 +1991,20 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             )
         _concurrency_acquired = True
 
+    # ── Step 2.95: Responses API reasoning models require non-streaming ─────
+    # OpenAI Responses API does not support SSE streaming. Force non-streaming
+    # for reasoning models so the gateway can normalize the response format.
+    if call.is_streaming and call.metadata.get("_responses_api"):
+        try:
+            body = json.loads(call.raw_body)
+            body["stream"] = False
+            call = dataclasses.replace(
+                call, is_streaming=False, raw_body=json.dumps_bytes(body)
+            )
+            logger.debug("Responses API: overriding stream=False for %s", call.model_id)
+        except Exception:
+            pass
+
     # ── Step 3: Forward ───────────────────────────────────────────────────────
     if call.is_streaming:
         # For streaming, we do a quick non-streaming probe only if tools were
