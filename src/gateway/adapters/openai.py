@@ -114,7 +114,7 @@ def _parse_responses_api_item(item: dict) -> tuple[str, ToolInteraction | None]:
         text = "".join(
             block.get("text", "")
             for block in (item.get("content") or [])
-            if block.get("type") == "text"
+            if block.get("type") in ("text", "output_text")
         )
         return text, None
 
@@ -450,6 +450,11 @@ class OpenAIAdapter(ProviderAdapter):
         content = (cc_content + ra_text).strip() if ra_text else cc_content
         tool_interactions = cc_tools + ra_tools
 
+        usage = data.get("usage")
+        if usage:
+            cache_info = detect_cache_hit(usage)
+            usage = {**usage, **cache_info}
+
         # Extract reasoning summary from Responses API output as thinking_content.
         thinking_content = _extract_reasoning_summary(output_items)
         if thinking_content:
@@ -461,10 +466,15 @@ class OpenAIAdapter(ProviderAdapter):
         if thinking_content and OpenAIAdapter._reasoning_summary_available is None:
             OpenAIAdapter._reasoning_summary_available = True
 
-        usage = data.get("usage")
-        if usage:
-            cache_info = detect_cache_hit(usage)
-            usage = {**usage, **cache_info}
+        # If no summary text but reasoning tokens were used, create an indicator.
+        if not thinking_content and usage:
+            details = usage.get("output_tokens_details") or {}
+            reasoning_tokens = details.get("reasoning_tokens", 0)
+            if reasoning_tokens > 0:
+                thinking_content = (
+                    f"[Reasoning: {reasoning_tokens} tokens used for internal chain-of-thought. "
+                    f"Verify your OpenAI organization to see full reasoning summaries.]"
+                )
 
         return ModelResponse(
             content=content,
