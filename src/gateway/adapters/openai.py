@@ -17,10 +17,24 @@ import gateway.util.json_utils as json
 import httpx
 from starlette.requests import Request
 
+import fnmatch
+import logging
+
 from gateway.adapters.base import ModelCall, ModelResponse, ProviderAdapter, ToolInteraction
 from gateway.adapters.caching import detect_cache_hit
 from gateway.config import get_settings
 from gateway.util.session_id import resolve_session_id
+
+logger = logging.getLogger(__name__)
+
+# OpenAI reasoning models that support the Responses API with reasoning summaries.
+_REASONING_MODEL_PATTERNS = ["o1-*", "o3-*", "o4-*"]
+
+
+def _is_reasoning_model(model_id: str) -> bool:
+    """Check if a model is an OpenAI reasoning model."""
+    model_lower = model_id.lower()
+    return any(fnmatch.fnmatch(model_lower, p) for p in _REASONING_MODEL_PATTERNS)
 
 
 def _concat_messages(messages: list[dict]) -> str:
@@ -143,7 +157,20 @@ def _parse_responses_api_item(item: dict) -> tuple[str, ToolInteraction | None]:
             metadata=None,
         )
 
+    # Reasoning items are handled separately (not text fragments).
     return "", None
+
+
+def _extract_reasoning_summary(output_items: list[dict]) -> str | None:
+    """Extract reasoning summary text from Responses API output items."""
+    summaries: list[str] = []
+    for item in output_items:
+        if item.get("type") != "reasoning":
+            continue
+        for entry in item.get("summary") or []:
+            if entry.get("type") == "summary_text" and entry.get("text"):
+                summaries.append(entry["text"])
+    return "\n".join(summaries) if summaries else None
 
 
 def _parse_chat_completions_choice(
@@ -266,6 +293,9 @@ def _process_sse_line(
 class OpenAIAdapter(ProviderAdapter):
     """Adapter for OpenAI-compatible API (chat/completions and completions)."""
 
+    # Class-level flag: if reasoning summary fails (org not verified), disable it.
+    _reasoning_summary_available: bool | None = None
+
     def __init__(self, base_url: str, api_key: str) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -317,9 +347,6 @@ class OpenAIAdapter(ProviderAdapter):
         )
 
     async def build_forward_request(self, call: ModelCall, original: Request) -> httpx.Request:
-        url = f"{self._base_url}{original.url.path}"
-        if original.url.query:
-            url += f"?{original.url.query}"
         # Build clean headers for the upstream provider — only forward what's needed.
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self._api_key:
@@ -328,6 +355,23 @@ class OpenAIAdapter(ProviderAdapter):
         sid = original.headers.get("x-session-id")
         if sid:
             headers["X-Session-Id"] = sid
+
+        # For OpenAI reasoning models, transform to Responses API for reasoning summaries.
+        if _is_reasoning_model(call.model_id) and self._base_url.rstrip("/").endswith("api.openai.com"):
+            url = f"{self._base_url}/v1/responses"
+            body = self._build_responses_api_body(call)
+            logger.info(
+                "Routing %s to Responses API with reasoning summary",
+                call.model_id,
+            )
+            # Tag the call so parse_response knows this is a Responses API request.
+            call.metadata["_responses_api"] = True
+            return httpx.Request(method="POST", url=url, headers=headers, content=body)
+
+        # Standard Chat Completions path.
+        url = f"{self._base_url}{original.url.path}"
+        if original.url.query:
+            url += f"?{original.url.query}"
         return httpx.Request(
             method=original.method,
             url=url,
@@ -335,17 +379,87 @@ class OpenAIAdapter(ProviderAdapter):
             content=call.raw_body,
         )
 
+    def _build_responses_api_body(self, call: ModelCall) -> bytes:
+        """Transform a Chat Completions request body into Responses API format."""
+        try:
+            data = json.loads(call.raw_body)
+        except (json.JSONDecodeError, TypeError):
+            return call.raw_body
+
+        messages = data.get("messages", [])
+        # Separate system prompt from conversation.
+        instructions = None
+        input_messages: list[dict] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            if role == "system":
+                instructions = msg.get("content", "")
+            else:
+                input_messages.append(msg)
+
+        reasoning_config: dict[str, Any] = {"effort": "medium"}
+        # Only request summary if we haven't learned that it's unavailable.
+        if OpenAIAdapter._reasoning_summary_available is not False:
+            reasoning_config["summary"] = "auto"
+
+        responses_body: dict[str, Any] = {
+            "model": data.get("model", call.model_id),
+            "input": input_messages if input_messages else data.get("messages", []),
+            "reasoning": reasoning_config,
+        }
+        if instructions:
+            responses_body["instructions"] = instructions
+        # Carry over max_tokens if specified.
+        if data.get("max_tokens"):
+            responses_body["max_output_tokens"] = data["max_tokens"]
+        if data.get("max_completion_tokens"):
+            responses_body["max_output_tokens"] = data["max_completion_tokens"]
+        if data.get("temperature") is not None:
+            responses_body["temperature"] = data["temperature"]
+
+        return json.dumps(responses_body).encode("utf-8")
+
     def parse_response(self, response: httpx.Response) -> ModelResponse:
         try:
             data = response.json()
         except Exception:
             return ModelResponse(content="", usage=None, raw_body=response.content)
 
+        # Detect reasoning summary unavailable (org not verified) and cache for future.
+        error = data.get("error")
+        if error and isinstance(error, dict):
+            param = error.get("param", "")
+            if param == "reasoning.summary" and "verified" in error.get("message", "").lower():
+                if OpenAIAdapter._reasoning_summary_available is not False:
+                    OpenAIAdapter._reasoning_summary_available = False
+                    logger.warning(
+                        "Reasoning summary unavailable (org not verified) — "
+                        "disabling for future requests. Responses API still used for reasoning models."
+                    )
+                # Signal that this needs a retry without summary via a sentinel content value.
+                return ModelResponse(
+                    content="__RETRY_WITHOUT_SUMMARY__",
+                    usage=None,
+                    raw_body=response.content,
+                )
+
         cc_content, cc_tools, pending = _parse_chat_completions_choice(data)
-        ra_text, ra_tools = _parse_responses_api_output(data.get("output") or [])
+        output_items = data.get("output") or []
+        ra_text, ra_tools = _parse_responses_api_output(output_items)
 
         content = (cc_content + ra_text).strip() if ra_text else cc_content
         tool_interactions = cc_tools + ra_tools
+
+        # Extract reasoning summary from Responses API output as thinking_content.
+        thinking_content = _extract_reasoning_summary(output_items)
+        if thinking_content:
+            logger.info(
+                "Captured reasoning summary (%d chars) from Responses API",
+                len(thinking_content),
+            )
+        # Mark summary as available if we got it.
+        if thinking_content and OpenAIAdapter._reasoning_summary_available is None:
+            OpenAIAdapter._reasoning_summary_available = True
 
         usage = data.get("usage")
         if usage:
@@ -359,6 +473,7 @@ class OpenAIAdapter(ProviderAdapter):
             provider_request_id=data.get("id"),
             tool_interactions=tool_interactions if tool_interactions else None,
             has_pending_tool_calls=pending,
+            thinking_content=thinking_content,
         )
 
     def parse_streamed_response(self, chunks: list[bytes]) -> ModelResponse:

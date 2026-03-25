@@ -103,6 +103,20 @@ async def forward(
             upstream_resp = await client.send(upstream_req)
     forward_duration.labels(provider=adapter.get_provider_name()).observe(time.perf_counter() - t0)
     model_response = adapter.parse_response(upstream_resp)
+
+    # Retry once if Responses API summary was rejected (org not verified).
+    # The adapter already cached _reasoning_summary_available=False, so rebuild
+    # will omit the summary parameter.
+    if model_response.content == "__RETRY_WITHOUT_SUMMARY__":
+        upstream_req = await adapter.build_forward_request(call, request)
+        if shared:
+            upstream_resp = await client.send(upstream_req)
+        else:
+            upstream_resp = await httpx.AsyncClient(
+                timeout=httpx.Timeout(300),
+            ).send(upstream_req)
+        model_response = adapter.parse_response(upstream_resp)
+
     resp_headers = dict(upstream_resp.headers)
     # Remove hop-by-hop headers that conflict with Starlette's own framing.
     # Starlette sets content-length from the body; keeping transfer-encoding
