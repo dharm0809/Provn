@@ -362,17 +362,28 @@ def _make_adapter_for_route(route: dict) -> ProviderAdapter | None:
     url = route.get("url", "")
     key = route.get("key", "")
     if provider == "openai":
-        return OpenAIAdapter(base_url=url, api_key=key)
+        return OpenAIAdapter(
+            base_url=url or settings.provider_openai_url,
+            api_key=key or settings.provider_openai_key,
+        )
     if provider == "ollama":
         return OllamaAdapter(
-            base_url=url, api_key=key,
+            base_url=url or settings.provider_ollama_url,
+            api_key=key or settings.provider_ollama_key,
             digest_cache_ttl=settings.ollama_digest_cache_ttl,
             thinking_strip_enabled=settings.thinking_strip_enabled,
         )
     if provider == "anthropic":
-        return AnthropicAdapter(base_url=url, api_key=key, prompt_caching=settings.prompt_caching_enabled)
+        return AnthropicAdapter(
+            base_url=url or settings.provider_anthropic_url,
+            api_key=key or settings.provider_anthropic_key,
+            prompt_caching=settings.prompt_caching_enabled,
+        )
     if provider == "huggingface":
-        return HuggingFaceAdapter(base_url=url, api_key=key)
+        return HuggingFaceAdapter(
+            base_url=url or settings.provider_huggingface_url,
+            api_key=key or settings.provider_huggingface_key,
+        )
     return None
 
 

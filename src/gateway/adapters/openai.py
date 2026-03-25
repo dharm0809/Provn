@@ -320,11 +320,14 @@ class OpenAIAdapter(ProviderAdapter):
         url = f"{self._base_url}{original.url.path}"
         if original.url.query:
             url += f"?{original.url.query}"
-        headers = dict(original.headers)
-        # Strip content-length so httpx recomputes it from the actual (possibly modified) body.
-        headers.pop("content-length", None)
-        if self._api_key and "authorization" not in (h.lower() for h in headers):
+        # Build clean headers for the upstream provider — only forward what's needed.
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        # Preserve session tracking header if present.
+        sid = original.headers.get("x-session-id")
+        if sid:
+            headers["X-Session-Id"] = sid
         return httpx.Request(
             method=original.method,
             url=url,
