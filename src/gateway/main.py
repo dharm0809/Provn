@@ -1137,6 +1137,26 @@ async def on_startup() -> None:
             settings.enforcement_mode, settings.tool_aware_enabled,
             settings.web_search_enabled, settings.rate_limit_enabled,
         )
+        # Auto-install audit filter into OpenWebUI (non-blocking, fail-open)
+        if settings.openwebui_url and settings.openwebui_api_key:
+            try:
+                from gateway.integrations.openwebui_setup import install_openwebui_filter
+                # Determine the gateway's own URL for the filter to call back
+                gateway_self_url = f"http://localhost:{os.environ.get('PORT', '8000')}"
+                gw_api_key = (settings.gateway_api_keys or [""])[0] if settings.gateway_api_keys else ""
+                ok = await install_openwebui_filter(
+                    openwebui_url=settings.openwebui_url,
+                    openwebui_api_key=settings.openwebui_api_key,
+                    gateway_url=gateway_self_url,
+                    gateway_api_key=gw_api_key,
+                )
+                if ok:
+                    logger.info("OpenWebUI filter auto-installed at %s", settings.openwebui_url)
+                else:
+                    logger.warning("OpenWebUI filter auto-install failed (non-fatal)")
+            except Exception:
+                logger.warning("OpenWebUI filter auto-install skipped", exc_info=True)
+
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
     except Exception:
         logger.critical("Gateway startup FAILED — cleaning up partially initialized resources", exc_info=True)
