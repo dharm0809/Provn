@@ -216,6 +216,12 @@ class WalacorClient:
         else:
             data = record.model_dump(mode="json")
         meta = data.pop("metadata", None)
+        fm = data.pop("file_metadata", None)
+        # Store file_metadata inside metadata (no separate Walacor schema field needed)
+        if fm and meta:
+            meta["file_metadata"] = fm
+        elif fm:
+            meta = {"file_metadata": fm}
         if meta:
             data["metadata_json"] = json.dumps(meta)
         # Strip fields not in the Walacor schema (timings, cache_hit, etc.)
@@ -311,3 +317,29 @@ class WalacorClient:
                 "Walacor write_tool_event FAILED event_id=%s: %s",
                 data.get("event_id", "?"), e,
             )
+
+    # ── Query API ─────────────────────────────────────────────────────────
+
+    async def query_complex(self, etid: int, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Query Walacor via /api/query/getcomplex with a MongoDB-style aggregation pipeline.
+
+        Returns the result list from ``response.data``.  Re-authenticates once on 401.
+        """
+        assert self._http is not None, "call start() first"
+        url = f"{self._server}/query/getcomplex"
+        for attempt in range(2):
+            resp = await self._http.post(
+                url,
+                json=pipeline,
+                headers=self._headers(etid),
+            )
+            if resp.status_code == 401 and attempt == 0:
+                logger.debug("WalacorClient query_complex: 401 — re-authenticating")
+                await self._authenticate()
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            if isinstance(body, dict):
+                return body.get("data", [])
+            return body if isinstance(body, list) else []
+        return []

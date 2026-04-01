@@ -17,32 +17,11 @@ _GENESIS_HASH = "0" * 128
 
 
 def _create_wal_db(db_path: str):
+    from gateway.wal.writer import _apply_schema
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS wal_records (
-            execution_id  TEXT    PRIMARY KEY,
-            record_json   TEXT    NOT NULL,
-            created_at    TEXT    NOT NULL,
-            delivered     INTEGER NOT NULL DEFAULT 0,
-            delivered_at  TEXT
-        )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS gateway_attempts (
-            request_id    TEXT    PRIMARY KEY,
-            timestamp     TEXT    NOT NULL,
-            tenant_id     TEXT    NOT NULL,
-            provider      TEXT,
-            model_id      TEXT,
-            path          TEXT    NOT NULL,
-            disposition   TEXT    NOT NULL,
-            execution_id  TEXT,
-            status_code   INTEGER NOT NULL,
-            user          TEXT
-        )"""
-    )
+    _apply_schema(conn)
     conn.commit()
     return conn
 
@@ -90,8 +69,13 @@ def _insert_chained_records(conn, session_id: str, count: int = 3,
             "metadata": metadata,
         }
         conn.execute(
-            "INSERT INTO wal_records (execution_id, record_json, created_at) VALUES (?, ?, ?)",
-            (eid, json.dumps(record), ts),
+            """INSERT INTO wal_records
+               (execution_id, record_json, created_at, event_type, session_id,
+                timestamp, model_id, provider, prompt_tokens, completion_tokens,
+                total_tokens, latency_ms, sequence_number, policy_result)
+               VALUES (?, ?, ?, 'execution', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (eid, json.dumps(record), ts, session_id, ts, model_id, provider,
+             100, 50, 150, 200.0 + i * 50, i, policy_result),
         )
         prev_hash = record_hash
         records.append(record)

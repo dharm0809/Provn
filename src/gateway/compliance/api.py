@@ -40,11 +40,17 @@ async def compliance_export(request: Request) -> Response:
     fmt = params.get("format", "json")
     framework = params.get("framework", "eu_ai_act")
 
+    import inspect
     reader = ctx.lineage_reader
-    summary = reader.get_compliance_summary(start, end)
-    executions = reader.get_execution_export(start, end)
-    attestations = reader.get_attestation_summary(start, end)
-    chain_report = reader.get_chain_verification_report(start, end)
+
+    async def _c(method, *args):
+        result = method(*args)
+        return await result if inspect.isawaitable(result) else result
+
+    summary = await _c(reader.get_compliance_summary, start, end)
+    executions = await _c(reader.get_execution_export, start, end)
+    attestations = await _c(reader.get_attestation_summary, start, end)
+    chain_report = await _c(reader.get_chain_verification_report, start, end)
 
     chain_integrity = {
         "sessions_verified": len(chain_report),

@@ -22,32 +22,11 @@ _GENESIS_HASH = "0" * 128
 
 def _create_wal_db(db_path: str):
     """Create a WAL DB with the same schema as WALWriter and populate it with test data."""
+    from gateway.wal.writer import _apply_schema
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS wal_records (
-            execution_id  TEXT    PRIMARY KEY,
-            record_json   TEXT    NOT NULL,
-            created_at    TEXT    NOT NULL,
-            delivered     INTEGER NOT NULL DEFAULT 0,
-            delivered_at  TEXT
-        )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS gateway_attempts (
-            request_id    TEXT    PRIMARY KEY,
-            timestamp     TEXT    NOT NULL,
-            tenant_id     TEXT    NOT NULL,
-            provider      TEXT,
-            model_id      TEXT,
-            path          TEXT    NOT NULL,
-            disposition   TEXT    NOT NULL,
-            execution_id  TEXT,
-            status_code   INTEGER NOT NULL,
-            user          TEXT
-        )"""
-    )
+    _apply_schema(conn)
     conn.commit()
     return conn
 
@@ -88,8 +67,12 @@ def _insert_chained_records(conn, session_id: str, count: int = 3):
             "previous_record_hash": prev_hash,
         }
         conn.execute(
-            "INSERT INTO wal_records (execution_id, record_json, created_at) VALUES (?, ?, ?)",
-            (eid, json.dumps(record), ts),
+            """INSERT INTO wal_records
+               (execution_id, record_json, created_at, event_type, session_id,
+                timestamp, model_id, provider, sequence_number, policy_result)
+               VALUES (?, ?, ?, 'execution', ?, ?, ?, ?, ?, ?)""",
+            (eid, json.dumps(record), ts, session_id, ts,
+             record.get("model_id"), record.get("provider"), i, "pass"),
         )
         prev_hash = record_hash
         records.append(record)
@@ -110,8 +93,12 @@ def _insert_tool_event(conn, execution_id: str, event_id: str):
         "timestamp": "2026-03-03T10:00:05+00:00",
     }
     conn.execute(
-        "INSERT INTO wal_records (execution_id, record_json, created_at) VALUES (?, ?, ?)",
-        (event_id, json.dumps(record), "2026-03-03T10:00:05+00:00"),
+        """INSERT INTO wal_records
+           (execution_id, record_json, created_at, event_type, session_id,
+            timestamp, parent_execution_id, tool_name, tool_type)
+           VALUES (?, ?, ?, 'tool_call', NULL, ?, ?, ?, ?)""",
+        (event_id, json.dumps(record), "2026-03-03T10:00:05+00:00",
+         "2026-03-03T10:00:05+00:00", execution_id, "web_search", "web_search"),
     )
     conn.commit()
     return record
@@ -244,6 +231,43 @@ def test_get_attempts_with_stats(wal_db):
     assert result["stats"]["denied_auth"] == 2
 
 
+def test_get_attempts_search_matches_request_id(wal_db):
+    db_path, conn = wal_db
+    _insert_attempts(conn, count=5)
+
+    reader = LineageReader(db_path)
+    filtered = reader.get_attempts(limit=10, offset=0, search="req-2")
+    reader.close()
+
+    assert filtered["total"] == 1
+    assert len(filtered["items"]) == 1
+    assert filtered["items"][0]["request_id"] == "req-2"
+
+
+def test_get_attempts_stats_respect_search(wal_db):
+    db_path, conn = wal_db
+    _insert_attempts(conn, count=5)
+
+    reader = LineageReader(db_path)
+    only_forwarded = reader.get_attempts(limit=20, search="forwarded")
+    reader.close()
+
+    assert only_forwarded["total"] == 3
+    assert only_forwarded["stats"] == {"forwarded": 3}
+
+
+def test_get_attempts_sort_status_code(wal_db):
+    db_path, conn = wal_db
+    _insert_attempts(conn, count=5)
+
+    reader = LineageReader(db_path)
+    asc = reader.get_attempts(limit=10, sort="status_code", order="asc")
+    reader.close()
+
+    codes = [row["status_code"] for row in asc["items"]]
+    assert codes == sorted(codes)
+
+
 def test_verify_chain_valid(wal_db):
     db_path, conn = wal_db
     _insert_chained_records(conn, "session-g", count=5)
@@ -310,6 +334,45 @@ def test_list_sessions_pagination(wal_db):
     assert len(page3) == 1
 
 
+def test_list_sessions_search_by_session_id(wal_db):
+    db_path, conn = wal_db
+    for i in range(3):
+        _insert_chained_records(conn, f"session-page-{i}", count=1)
+
+    reader = LineageReader(db_path)
+    assert reader.count_sessions(search="page-1") == 1
+    rows = reader.list_sessions(search="page-1")
+    reader.close()
+
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "session-page-1"
+
+
+def test_count_sessions_matches_search_filter(wal_db):
+    db_path, conn = wal_db
+    for i in range(4):
+        _insert_chained_records(conn, f"filter-{i}", count=1)
+
+    reader = LineageReader(db_path)
+    assert reader.count_sessions() == 4
+    assert reader.count_sessions(search="filter-2") == 1
+    assert reader.count_sessions(search="does-not-exist-xyz") == 0
+    reader.close()
+
+
+def test_list_sessions_sort_by_record_count(wal_db):
+    db_path, conn = wal_db
+    _insert_chained_records(conn, "sort-big", count=5)
+    _insert_chained_records(conn, "sort-small", count=1)
+
+    reader = LineageReader(db_path)
+    asc = reader.list_sessions(limit=10, offset=0, sort="record_count", order="asc")
+    reader.close()
+
+    assert asc[0]["session_id"] == "sort-small"
+    assert asc[-1]["session_id"] == "sort-big"
+
+
 def _insert_recent_attempts(conn, count: int = 5):
     """Insert gateway_attempts with current timestamps so datetime('now', ...) filters work."""
     from datetime import datetime, timezone, timedelta
@@ -337,6 +400,7 @@ def test_get_metrics_history_returns_buckets(wal_db):
 
     assert result["range"] == "1h"
     assert isinstance(result["buckets"], list)
+    assert len(result["buckets"]) == 60  # full rolling hour, one minute per bucket
     total = sum(b["total"] for b in result["buckets"])
     assert total == 5
     total_allowed = sum(b["allowed"] for b in result["buckets"])
@@ -354,6 +418,7 @@ def test_get_metrics_history_invalid_range_defaults_to_1h(wal_db):
     reader.close()
 
     assert result["range"] == "1h"
+    assert len(result["buckets"]) == 60
 
 
 def test_get_metrics_history_empty(wal_db):
@@ -364,7 +429,8 @@ def test_get_metrics_history_empty(wal_db):
     reader.close()
 
     assert result["range"] == "7d"
-    assert result["buckets"] == []
+    assert len(result["buckets"]) == 7 * 24
+    assert all(b["total"] == 0 and b["allowed"] == 0 and b["blocked"] == 0 for b in result["buckets"])
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +472,7 @@ def test_get_token_latency_history_returns_buckets(wal_db):
 
     assert result["range"] == "1h"
     assert isinstance(result["buckets"], list)
-    assert len(result["buckets"]) > 0
+    assert len(result["buckets"]) == 60
 
     total_prompt = sum(b["prompt_tokens"] for b in result["buckets"])
     assert total_prompt == 100 + 110 + 120 + 130  # 460
@@ -424,7 +490,8 @@ def test_get_token_latency_history_empty(wal_db):
     reader.close()
 
     assert result["range"] == "24h"
-    assert result["buckets"] == []
+    assert len(result["buckets"]) == 24
+    assert sum(b["request_count"] for b in result["buckets"]) == 0
 
 
 def test_get_token_latency_history_invalid_range(wal_db):
@@ -437,3 +504,4 @@ def test_get_token_latency_history_invalid_range(wal_db):
 
     assert result["range"] == "1h"
     assert isinstance(result["buckets"], list)
+    assert len(result["buckets"]) == 60

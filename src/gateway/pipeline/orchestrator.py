@@ -509,10 +509,14 @@ class _ToolStrategyResult:
 
 # ── Phase 14: tool strategy helpers ──────────────────────────────────────────
 
-def _select_tool_strategy(adapter: ProviderAdapter, settings) -> str:
+def _select_tool_strategy(adapter: ProviderAdapter, settings, call: ModelCall | None = None) -> str:
     """Return 'passive', 'active', or 'disabled' based on config and provider."""
     if not settings.tool_aware_enabled:
         return "disabled"
+    # Gateway web search: force active strategy so the gateway executes web_search
+    # via the built-in WebSearchTool instead of letting the provider do it natively.
+    if call and call.metadata.get("_gateway_web_search"):
+        return "active"
     if settings.tool_strategy != "auto":
         return settings.tool_strategy
     return "passive" if adapter.get_provider_name() in ("openai", "anthropic") else "active"
@@ -657,7 +661,7 @@ def _build_tool_event_record(
         "event_type": "tool_call",
         "tool_id": t.tool_id,
         "tool_type": t.tool_type,
-        "tool_name": t.tool_name,
+        "tool_name": t.tool_name or t.tool_type,
         "source": source,
     }
     if t.input_data is not None:
@@ -665,6 +669,10 @@ def _build_tool_event_record(
         record["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
     if t.output_data is not None:
         record["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
+    elif t.sources:
+        # For passive provider tools (e.g. OpenAI web_search), output_data is
+        # unavailable but sources are captured — hash sources as output proxy.
+        record["output_hash"] = compute_sha3_512_string(json.dumps(t.sources, default=str, sort_keys=True))
     if t.sources:
         record["sources"] = t.sources
     if t.metadata:
@@ -975,6 +983,9 @@ async def _after_stream_record(
             model_hash = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
             if model_hash:
                 model_response = dataclasses.replace(model_response, model_hash=model_hash)
+
+        from gateway.pipeline.normalizer import normalize_model_response
+        model_response = normalize_model_response(model_response, adapter.get_provider_name())
 
         await _record_token_usage(
             model_response, settings.gateway_tenant_id,
@@ -1419,7 +1430,7 @@ async def _run_pre_checks(
         except Exception as e:
             logger.warning("Shadow policy evaluation failed: %s", e)
 
-    tool_strategy = _select_tool_strategy(adapter, settings)
+    tool_strategy = _select_tool_strategy(adapter, settings, call)
     if tool_strategy == "active" and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
         # Skip tool injection if we already know this model doesn't support tools
         _sup = None
@@ -1856,6 +1867,70 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     except Exception:
         logger.debug("Audit classifier skipped", exc_info=True)
 
+    # ── File/attachment extraction ─────────────────────────────────────────
+    # Extract images from base64 content blocks + OpenWebUI file metadata.
+    # Stores metadata (hash, mimetype, size) in request.state.file_metadata
+    # so build_execution_record picks it up for the audit trail.
+    _file_metadata: list[dict] = []
+    _body = body_dict if isinstance(body_dict, dict) else {}
+    try:
+        from gateway.middleware.attachment_tracker import (
+            extract_images_from_messages,
+            extract_openwebui_files,
+        )
+        _messages = _body.get("messages", [])
+        if _messages:
+            _extracted_images = extract_images_from_messages(_messages)
+            for img in _extracted_images:
+                _file_metadata.append({
+                    "filename": f"image_{img['index']}.{(img.get('mimetype') or 'png').split('/')[-1]}",
+                    "mimetype": img.get("mimetype", "image/png"),
+                    "size_bytes": img.get("size_bytes", 0),
+                    "hash_sha3_512": img.get("hash_sha3_512", ""),
+                    "source": "inline_base64",
+                })
+            # Run OCR + PII scan on extracted images if analyzer is available
+            if _extracted_images and ctx.image_ocr_analyzer is not None:
+                try:
+                    from gateway.content.image_ocr import evaluate_image_ocr
+                    _blocked, _block_resp, _ocr_results = await evaluate_image_ocr(
+                        ctx.image_ocr_analyzer, _extracted_images,
+                    )
+                    # Merge OCR results into file metadata
+                    for ocr_r in _ocr_results:
+                        idx = ocr_r.get("image_index", 0)
+                        if idx < len(_file_metadata):
+                            _file_metadata[idx].update({
+                                k: v for k, v in ocr_r.items()
+                                if k.startswith("ocr_")
+                            })
+                    if _blocked and _block_resp is not None:
+                        request.state.file_metadata = _file_metadata
+                        _set_disposition(request, "blocked_image_pii")
+                        _inc_request(provider, model, "blocked")
+                        return _block_resp
+                except Exception:
+                    logger.debug("Image OCR analysis failed (non-blocking)", exc_info=True)
+
+        _owui_files = extract_openwebui_files(_body)
+        _file_metadata.extend(_owui_files)
+
+        # Correlate with webhook notification cache if available
+        if _file_metadata and ctx.attachment_cache is not None:
+            for fm in _file_metadata:
+                fh = fm.get("hash_sha3_512")
+                if fh:
+                    cached = ctx.attachment_cache.get(fh)
+                    if cached:
+                        fm["filename"] = cached.get("filename", fm.get("filename", ""))
+                        fm["upload_source"] = cached.get("source", "")
+    except Exception:
+        logger.debug("File extraction skipped", exc_info=True)
+
+    if _file_metadata:
+        request.state.file_metadata = _file_metadata
+        logger.info("Extracted %d file(s)/image(s) from request", len(_file_metadata))
+
     call = dataclasses.replace(call, metadata={**call.metadata, **extra})
 
     # ── B.9: A/B model testing — rewrite model before adapter resolution ──────
@@ -2091,6 +2166,25 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             _record_model_capability(call.model_id, supports_tools=True)
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
+    from gateway.pipeline.normalizer import normalize_model_response
+    _pre_norm_content = model_response.content
+    model_response = normalize_model_response(model_response, provider)
+    # If normalizer changed content (e.g. thinking fallback for qwen3), rebuild the
+    # client response body so the user sees the actual content, not the raw empty string.
+    if model_response.content and model_response.content != _pre_norm_content and http_response.status_code == 200:
+        try:
+            resp_data = json.loads(http_response.body)
+            if "choices" in resp_data and resp_data["choices"]:
+                resp_data["choices"][0].setdefault("message", {})["content"] = model_response.content
+                rebuilt_headers = {k: v for k, v in http_response.headers.items()
+                                   if k.lower() not in ("content-length", "transfer-encoding")}
+                http_response = Response(
+                    content=json.dumps_bytes(resp_data),
+                    status_code=http_response.status_code,
+                    headers=rebuilt_headers,
+                )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
     fwd_rtt = time.perf_counter() - t_fwd
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
     forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)
