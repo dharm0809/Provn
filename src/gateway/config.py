@@ -314,7 +314,7 @@ class Settings(BaseSettings):
     )
 
     # Phase 14: Tool-aware gateway
-    tool_aware_enabled: bool = Field(default=False, description="Enable tool-call awareness and auditing (Phase 14)")
+    tool_aware_enabled: bool = Field(default=True, description="Enable tool-call awareness and auditing (Phase 14)")
     tool_strategy: str = Field(
         default="auto",
         description="Tool strategy: 'auto' (detect from provider), 'passive', 'active', or 'disabled'",
@@ -352,7 +352,7 @@ class Settings(BaseSettings):
         ),
     )
     web_search_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Enable built-in web search tool for local/private models (Ollama active strategy). "
             "When enabled, the 'web_search' tool is auto-registered and injected into Ollama requests."
@@ -380,7 +380,7 @@ class Settings(BaseSettings):
         ),
     )
     gateway_web_search_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Route ALL web search through the gateway's built-in WebSearchTool. "
             "When enabled, OpenAI requests stay on Chat Completions (not Responses API) "
