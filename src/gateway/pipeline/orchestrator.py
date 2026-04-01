@@ -1823,10 +1823,17 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             call.prompt_text or "", dict(request.headers), body_dict)
     else:
         extra["request_type"] = _classify_request_type(call.prompt_text or "")
-    # Propagate OpenWebUI message ID for per-message audit correlation
+    # Propagate OpenWebUI message/chat IDs for per-message audit correlation
     msg_id = request.headers.get("x-openwebui-message-id")
     if msg_id:
         extra["message_id"] = msg_id
+    # Also check body metadata for chat_id/message_id (from Walacor filter plugin)
+    _body_meta_ids = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
+    if isinstance(_body_meta_ids, dict):
+        if not msg_id and _body_meta_ids.get("message_id"):
+            extra["message_id"] = _body_meta_ids["message_id"]
+        if _body_meta_ids.get("chat_id"):
+            extra["chat_id"] = _body_meta_ids["chat_id"]
     # Merge caller identity from middleware (JWT or header-based).
     # Second-pass: if middleware didn't resolve identity (no headers),
     # try body metadata (OpenWebUI plugin injects user info there).
