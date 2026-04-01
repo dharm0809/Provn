@@ -391,6 +391,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # OpenWebUI auto-integration
+    openwebui_url: str = Field(
+        default="",
+        description=(
+            "OpenWebUI base URL (e.g. http://localhost:3000). When set, the Gateway "
+            "automatically installs its audit filter plugin into OpenWebUI at startup."
+        ),
+    )
+    openwebui_api_key: str = Field(
+        default="",
+        description="OpenWebUI admin API key for auto-installing the filter plugin.",
+    )
+
     # Phase 15: Multi-model routing + Redis state sharing
     redis_url: str = Field(
         default="",
