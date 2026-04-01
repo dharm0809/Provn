@@ -31,19 +31,6 @@ def resolve_identity_from_headers(request: Request, body_metadata: dict | None =
         or (request.headers.get("x-openwebui-user-id") or "").strip()
     )
 
-    # Fallback: body metadata from OpenWebUI governance pipeline
-    source = "header_unverified"
-    if not user_id and body_metadata:
-        user_id = (body_metadata.get("openwebui_user_id") or "").strip()
-        if user_id:
-            source = "openwebui_metadata"
-
-    # Fallback: client IP (always available)
-    if not user_id:
-        client = request.client
-        user_id = f"anonymous@{client.host}" if client else "anonymous"
-        source = "anonymous"
-
     # Email: generic → OpenWebUI
     email = (
         (request.headers.get("x-user-email") or "").strip()
@@ -57,6 +44,30 @@ def resolve_identity_from_headers(request: Request, body_metadata: dict | None =
     else:
         owui_role = (request.headers.get("x-openwebui-user-role") or "").strip()
         roles = [owui_role] if owui_role else []
+
+    # Fallback: body metadata from OpenWebUI Walacor filter plugin
+    source = "header_unverified"
+    if body_metadata:
+        if not user_id:
+            user_id = (
+                (body_metadata.get("user_id") or "").strip()
+                or (body_metadata.get("openwebui_user_id") or "").strip()
+                or (body_metadata.get("user_name") or "").strip()
+            )
+            if user_id:
+                source = "openwebui_metadata"
+        if not email:
+            email = (body_metadata.get("user_email") or "").strip()
+        if not roles:
+            bm_role = (body_metadata.get("user_role") or "").strip()
+            if bm_role:
+                roles = [bm_role]
+
+    # Fallback: client IP (always available)
+    if not user_id:
+        client = request.client
+        user_id = f"anonymous@{client.host}" if client else "anonymous"
+        source = "anonymous"
 
     # Team: generic only (no OpenWebUI equivalent)
     team = (request.headers.get("x-team-id") or "").strip() or None
