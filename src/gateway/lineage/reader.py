@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,129 @@ from gateway.core import compute_sha3_512_string
 from gateway.pipeline.session_chain import GENESIS_HASH
 
 logger = logging.getLogger(__name__)
+
+_SESSIONS_AGG_SUBQUERY = """
+                SELECT
+                    session_id,
+                    COUNT(*) AS record_count,
+                    SUM(CASE WHEN COALESCE(
+                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
+                    ) = 'user_message' THEN 1 ELSE 0 END) AS user_message_count,
+                    MAX(timestamp) AS last_activity,
+                    model_id AS model,
+                    user,
+                    json_extract(record_json, '$.metadata.walacor_audit.user_question') AS user_question,
+                    json_extract(record_json, '$.metadata.walacor_audit.has_rag_context') AS has_rag_context,
+                    json_extract(record_json, '$.metadata.walacor_audit.has_files') AS has_files,
+                    json_extract(record_json, '$.metadata.request_type') AS request_type
+                FROM wal_records
+                WHERE session_id IS NOT NULL
+                  AND event_type = 'execution'
+                GROUP BY session_id"""
+
+_SESSIONS_TOOL_JOIN_SUBQUERY = """
+                SELECT
+                    r.session_id AS session_id,
+                    GROUP_CONCAT(DISTINCT te.tool_name) AS tool_names,
+                    GROUP_CONCAT(DISTINCT
+                        te.tool_name || ':' ||
+                        COALESCE(te.tool_type, 'unknown')
+                    ) AS tool_details
+                FROM wal_records r
+                JOIN wal_records te
+                  ON te.parent_execution_id = r.execution_id
+                 AND te.event_type = 'tool_call'
+                WHERE r.session_id IS NOT NULL
+                  AND r.event_type = 'execution'
+                GROUP BY r.session_id"""
+
+_SESSIONS_SORT_COLUMNS: dict[str, str] = {
+    "last_activity": "s.last_activity",
+    "record_count": "s.record_count",
+    "model": "COALESCE(s.model, '')",
+}
+
+
+def _sessions_search_where(search: str | None) -> tuple[str, tuple]:
+    if not search or not str(search).strip():
+        return "", ()
+    n = str(search).strip()
+    clause = """WHERE (
+            INSTR(LOWER(COALESCE(s.session_id, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(s.model, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(s.user, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(s.user_question, '')), LOWER(?)) > 0
+        )"""
+    return clause, (n, n, n, n)
+
+
+_ATTEMPTS_SORT_COLUMNS: dict[str, str] = {
+    "timestamp": "timestamp",
+    "disposition": "disposition",
+    "request_id": "COALESCE(request_id, '')",
+    "user": "COALESCE(user, '')",
+    "model_id": "COALESCE(model_id, '')",
+    "path": "COALESCE(path, '')",
+    "status_code": "status_code",
+}
+
+
+def _attempts_search_where(search: str | None) -> tuple[str, tuple]:
+    if not search or not str(search).strip():
+        return "", ()
+    n = str(search).strip()
+    clause = """WHERE (
+            INSTR(LOWER(COALESCE(request_id, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(tenant_id, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(provider, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(model_id, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(path, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(disposition, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(user, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(execution_id, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(CAST(status_code AS TEXT)), LOWER(?)) > 0
+        )"""
+    return clause, (n, n, n, n, n, n, n, n, n)
+
+
+def _metrics_timeline_labels(range_key: str) -> tuple[list[str], str, str]:
+    """Build UTC bucket keys for the full window plus [t_low, t_high) bounds for SQL (ISO +00:00).
+
+    Returns 60 one-minute buckets for 1h, 24 hourly for 24h, 168 for 7d, 720 for 30d.
+    """
+    now = datetime.now(timezone.utc)
+    if range_key == "1h":
+        end = now.replace(second=0, microsecond=0)
+        start = end - timedelta(hours=1)
+        step = timedelta(minutes=1)
+        fmt = "%Y-%m-%dT%H:%M:00"
+    elif range_key == "24h":
+        end = now.replace(minute=0, second=0, microsecond=0)
+        start = end - timedelta(hours=24)
+        step = timedelta(hours=1)
+        fmt = "%Y-%m-%dT%H:00:00"
+    elif range_key == "7d":
+        end = now.replace(minute=0, second=0, microsecond=0)
+        start = end - timedelta(days=7)
+        step = timedelta(hours=1)
+        fmt = "%Y-%m-%dT%H:00:00"
+    elif range_key == "30d":
+        end = now.replace(minute=0, second=0, microsecond=0)
+        start = end - timedelta(days=30)
+        step = timedelta(hours=1)
+        fmt = "%Y-%m-%dT%H:00:00"
+    else:
+        raise ValueError(range_key)
+
+    labels: list[str] = []
+    cur = start
+    while cur < end:
+        labels.append(cur.strftime(fmt))
+        cur += step
+
+    t_low = start.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00"
+    t_high = end.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00"
+    return labels, t_low, t_high
 
 
 class LineageReader:
@@ -42,11 +166,24 @@ class LineageReader:
             self._conn.close()
             self._conn = None
 
-    def list_sessions(self, limit: int = 50, offset: int = 0) -> list[dict]:
-        """List distinct sessions with record count and latest timestamp."""
-        conn = self._ensure_conn()
-        cur = conn.execute(
-            """
+    def list_sessions(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort: str = "last_activity",
+        order: str = "desc",
+    ) -> list[dict]:
+        """List distinct sessions with record count and latest timestamp.
+
+        *search* filters by substring match on session_id, model, user, or user_question (case-insensitive).
+        *sort* is one of: last_activity, record_count, model. *order* is asc or desc.
+        """
+        sort_key = sort if sort in _SESSIONS_SORT_COLUMNS else "last_activity"
+        order_sql = "ASC" if str(order).lower() == "asc" else "DESC"
+        order_expr = _SESSIONS_SORT_COLUMNS[sort_key]
+        where_sql, extra_params = _sessions_search_where(search)
+        sql = f"""
             SELECT
                 s.session_id,
                 s.record_count,
@@ -60,58 +197,30 @@ class LineageReader:
                 s.request_type,
                 COALESCE(t.tool_names, '') AS tool_names,
                 COALESCE(t.tool_details, '') AS tool_details
-            FROM (
-                SELECT
-                    json_extract(record_json, '$.session_id') AS session_id,
-                    COUNT(*) AS record_count,
-                    SUM(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) = 'user_message' THEN 1 ELSE 0 END) AS user_message_count,
-                    MAX(json_extract(record_json, '$.timestamp')) AS last_activity,
-                    COALESCE(json_extract(record_json, '$.model_id'),
-                             json_extract(record_json, '$.model_attestation_id')) AS model,
-                    json_extract(record_json, '$.user') AS user,
-                    json_extract(record_json, '$.metadata.walacor_audit.user_question') AS user_question,
-                    json_extract(record_json, '$.metadata.walacor_audit.has_rag_context') AS has_rag_context,
-                    json_extract(record_json, '$.metadata.walacor_audit.has_files') AS has_files,
-                    json_extract(record_json, '$.metadata.request_type') AS request_type
-                FROM wal_records
-                WHERE json_extract(record_json, '$.session_id') IS NOT NULL
-                  AND json_extract(record_json, '$.event_type') IS NULL
-                GROUP BY session_id
-            ) s
-            LEFT JOIN (
-                SELECT
-                    json_extract(r.record_json, '$.session_id') AS session_id,
-                    GROUP_CONCAT(DISTINCT json_extract(te.record_json, '$.tool_name')) AS tool_names,
-                    GROUP_CONCAT(DISTINCT
-                        json_extract(te.record_json, '$.tool_name') || ':' ||
-                        COALESCE(json_extract(te.record_json, '$.source'), 'unknown')
-                    ) AS tool_details
-                FROM wal_records r
-                JOIN wal_records te
-                  ON json_extract(te.record_json, '$.execution_id') = r.execution_id
-                 AND json_extract(te.record_json, '$.event_type') = 'tool_call'
-                WHERE json_extract(r.record_json, '$.session_id') IS NOT NULL
-                  AND json_extract(r.record_json, '$.event_type') IS NULL
-                GROUP BY json_extract(r.record_json, '$.session_id')
-            ) t ON t.session_id = s.session_id
-            ORDER BY s.last_activity DESC
+            FROM ({_SESSIONS_AGG_SUBQUERY}) s
+            LEFT JOIN ({_SESSIONS_TOOL_JOIN_SUBQUERY}) t ON t.session_id = s.session_id
+            {where_sql}
+            ORDER BY {order_expr} {order_sql}
             LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
+            """
+        conn = self._ensure_conn()
+        cur = conn.execute(sql, (*extra_params, limit, offset))
         return [dict(row) for row in cur.fetchall()]
 
-    def count_sessions(self) -> int:
-        """Count total distinct sessions in WAL."""
+    def count_sessions(self, search: str | None = None) -> int:
+        """Count sessions matching the same filters as list_sessions (excluding limit/offset)."""
+        where_sql, extra_params = _sessions_search_where(search)
+        sql = f"""
+            SELECT COUNT(*) AS c FROM (
+                SELECT s.session_id
+                FROM ({_SESSIONS_AGG_SUBQUERY}) s
+                LEFT JOIN ({_SESSIONS_TOOL_JOIN_SUBQUERY}) t ON t.session_id = s.session_id
+                {where_sql}
+            )
+            """
         conn = self._ensure_conn()
-        cur = conn.execute(
-            "SELECT COUNT(DISTINCT json_extract(record_json, '$.session_id')) FROM wal_records "
-            "WHERE json_extract(record_json, '$.session_id') IS NOT NULL "
-            "AND json_extract(record_json, '$.event_type') IS NULL"
-        )
-        return cur.fetchone()[0] or 0
+        cur = conn.execute(sql, extra_params)
+        return int(cur.fetchone()[0] or 0)
 
     def get_session_timeline(self, session_id: str) -> list[dict]:
         """Return all execution records for a session, ordered by sequence_number."""
@@ -120,9 +229,9 @@ class LineageReader:
             """
             SELECT execution_id, record_json, created_at
             FROM wal_records
-            WHERE json_extract(record_json, '$.session_id') = ?
-              AND json_extract(record_json, '$.event_type') IS NULL
-            ORDER BY json_extract(record_json, '$.sequence_number') ASC,
+            WHERE session_id = ?
+              AND event_type = 'execution'
+            ORDER BY sequence_number ASC,
                      created_at ASC
             """,
             (session_id,),
@@ -153,9 +262,9 @@ class LineageReader:
             """
             SELECT record_json
             FROM wal_records
-            WHERE json_extract(record_json, '$.execution_id') = ?
-              AND json_extract(record_json, '$.event_type') = 'tool_call'
-            ORDER BY json_extract(record_json, '$.timestamp') ASC
+            WHERE parent_execution_id = ?
+              AND event_type = 'tool_call'
+            ORDER BY timestamp ASC
             """,
             (execution_id,),
         )
@@ -173,28 +282,47 @@ class LineageReader:
             "timings": execution.get("timings") or {},
         }
 
-    def get_attempts(self, limit: int = 100, offset: int = 0) -> dict:
-        """Return recent attempt records and disposition stats."""
+    def get_attempts(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        search: str | None = None,
+        sort: str = "timestamp",
+        order: str = "desc",
+    ) -> dict:
+        """Return attempt records and disposition stats (same *search* filter for list, stats, total).
+
+        *search* matches substring across request_id, tenant_id, provider, model_id, path,
+        disposition, user, execution_id, and status_code (as text), case-insensitive.
+        *sort*: timestamp, disposition, request_id, user, model_id, path, status_code.
+        """
+        sort_key = sort if sort in _ATTEMPTS_SORT_COLUMNS else "timestamp"
+        order_sql = "ASC" if str(order).lower() == "asc" else "DESC"
+        order_expr = _ATTEMPTS_SORT_COLUMNS[sort_key]
+        where_sql, extra_params = _attempts_search_where(search)
+        base = f"FROM gateway_attempts {where_sql}"
+
         conn = self._ensure_conn()
         cur = conn.execute(
-            """
+            f"""
             SELECT request_id, timestamp, tenant_id, provider, model_id,
                    path, disposition, execution_id, status_code, user
-            FROM gateway_attempts
-            ORDER BY timestamp DESC
+            {base}
+            ORDER BY {order_expr} {order_sql}
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (*extra_params, limit, offset),
         )
         items = [dict(row) for row in cur.fetchall()]
 
         cur2 = conn.execute(
-            "SELECT disposition, COUNT(*) AS count FROM gateway_attempts GROUP BY disposition"
+            f"SELECT disposition, COUNT(*) AS count {base} GROUP BY disposition",
+            extra_params,
         )
         stats = {row["disposition"]: row["count"] for row in cur2.fetchall()}
 
-        total_cur = conn.execute("SELECT COUNT(*) AS total FROM gateway_attempts")
-        total = total_cur.fetchone()["total"]
+        total_cur = conn.execute(f"SELECT COUNT(*) AS total {base}", extra_params)
+        total = int(total_cur.fetchone()["total"] or 0)
 
         return {"items": items, "stats": stats, "total": total}
 
@@ -211,10 +339,14 @@ class LineageReader:
 
         range_key: "1h" | "24h" | "7d" | "30d"
         Returns: {buckets: [{t, total, allowed, blocked}], range: str}
+
+        Includes every bucket in the window (zeros where there was no traffic) so charts show
+        the full last hour / day / week rather than only non-empty intervals.
         """
         if range_key not in self._RANGE_CONFIG:
             range_key = "1h"
-        lookback, fmt = self._RANGE_CONFIG[range_key]
+        _, fmt = self._RANGE_CONFIG[range_key]
+        labels, t_low, t_high = _metrics_timeline_labels(range_key)
         conn = self._ensure_conn()
         cur = conn.execute(
             f"""
@@ -224,12 +356,25 @@ class LineageReader:
                 SUM(CASE WHEN disposition IN ('forwarded', 'allowed') THEN 1 ELSE 0 END) AS allowed,
                 SUM(CASE WHEN disposition NOT IN ('forwarded', 'allowed') THEN 1 ELSE 0 END) AS blocked
             FROM gateway_attempts
-            WHERE timestamp >= datetime('now', '{lookback}')
+            WHERE timestamp >= ? AND timestamp < ?
             GROUP BY t
             ORDER BY t ASC
             """,
+            (t_low, t_high),
         )
-        buckets = [{"t": row["t"], "total": row["total"], "allowed": row["allowed"], "blocked": row["blocked"]} for row in cur.fetchall()]
+        by_t = {row["t"]: row for row in cur.fetchall()}
+        buckets = []
+        for t in labels:
+            row = by_t.get(t)
+            if row is None:
+                buckets.append({"t": t, "total": 0, "allowed": 0, "blocked": 0})
+            else:
+                buckets.append({
+                    "t": t,
+                    "total": row["total"],
+                    "allowed": row["allowed"] or 0,
+                    "blocked": row["blocked"] or 0,
+                })
         return {"buckets": buckets, "range": range_key}
 
     def get_token_latency_history(self, range_key: str) -> dict:
@@ -237,40 +382,59 @@ class LineageReader:
 
         Returns: {buckets: [{t, prompt_tokens, completion_tokens, total_tokens,
                              avg_latency_ms, max_latency_ms, request_count}], range: str}
+
+        Uses the same UTC window as :meth:`get_metrics_history` (parameterized bounds) so
+        JSON ``$.timestamp`` values (ISO-8601 from execution records) align with
+        ``gateway_attempts`` charts. Emits a full timeline with zeros for empty buckets.
         """
         if range_key not in self._RANGE_CONFIG:
             range_key = "1h"
-        lookback, fmt = self._RANGE_CONFIG[range_key]
+        _, fmt = self._RANGE_CONFIG[range_key]
+        labels, t_low, t_high = _metrics_timeline_labels(range_key)
         conn = self._ensure_conn()
         cur = conn.execute(
             f"""
             SELECT
-                strftime('{fmt}', json_extract(record_json, '$.timestamp')) AS t,
-                COALESCE(SUM(json_extract(record_json, '$.prompt_tokens')), 0) AS prompt_tokens,
-                COALESCE(SUM(json_extract(record_json, '$.completion_tokens')), 0) AS completion_tokens,
-                COALESCE(SUM(json_extract(record_json, '$.total_tokens')), 0) AS total_tokens,
-                COALESCE(AVG(json_extract(record_json, '$.latency_ms')), 0) AS avg_latency_ms,
-                COALESCE(MAX(json_extract(record_json, '$.latency_ms')), 0) AS max_latency_ms,
+                strftime('{fmt}', timestamp) AS t,
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
+                COALESCE(MAX(latency_ms), 0) AS max_latency_ms,
                 COUNT(*) AS request_count
             FROM wal_records
-            WHERE json_extract(record_json, '$.timestamp') >= datetime('now', '{lookback}')
-              AND (json_extract(record_json, '$.event_type') IS NULL
-                   OR json_extract(record_json, '$.event_type') = '')
+            WHERE timestamp >= ? AND timestamp < ?
+              AND event_type = 'execution'
             GROUP BY t
+            HAVING t IS NOT NULL
             ORDER BY t ASC
             """,
+            (t_low, t_high),
         )
-        buckets = []
-        for row in cur.fetchall():
-            buckets.append({
-                "t": row["t"],
-                "prompt_tokens": row["prompt_tokens"],
-                "completion_tokens": row["completion_tokens"],
-                "total_tokens": row["total_tokens"],
-                "avg_latency_ms": round(row["avg_latency_ms"], 1),
-                "max_latency_ms": round(row["max_latency_ms"], 1),
-                "request_count": row["request_count"],
-            })
+        by_t = {row["t"]: row for row in cur.fetchall()}
+        buckets: list[dict[str, Any]] = []
+        for t in labels:
+            row = by_t.get(t)
+            if row is None:
+                buckets.append({
+                    "t": t,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "avg_latency_ms": 0,
+                    "max_latency_ms": 0,
+                    "request_count": 0,
+                })
+            else:
+                buckets.append({
+                    "t": t,
+                    "prompt_tokens": row["prompt_tokens"] or 0,
+                    "completion_tokens": row["completion_tokens"] or 0,
+                    "total_tokens": row["total_tokens"] or 0,
+                    "avg_latency_ms": round(row["avg_latency_ms"] or 0, 1),
+                    "max_latency_ms": round(row["max_latency_ms"] or 0, 1),
+                    "request_count": row["request_count"] or 0,
+                })
         return {"buckets": buckets, "range": range_key}
 
     # ── Compliance query methods (Phase 24) ────────────────────────────────
@@ -298,12 +462,11 @@ class LineageReader:
         # Models used in period
         cur2 = conn.execute(
             """
-            SELECT DISTINCT json_extract(record_json, '$.model_id') AS model_id
+            SELECT DISTINCT model_id
             FROM wal_records
-            WHERE json_extract(record_json, '$.timestamp') >= ?
-              AND json_extract(record_json, '$.timestamp') < ?
-              AND json_extract(record_json, '$.event_type') IS NULL
-              AND json_extract(record_json, '$.model_id') IS NOT NULL
+            WHERE timestamp >= ? AND timestamp < ?
+              AND event_type = 'execution'
+              AND model_id IS NOT NULL
             """,
             (start, end),
         )
@@ -323,10 +486,9 @@ class LineageReader:
             """
             SELECT record_json
             FROM wal_records
-            WHERE json_extract(record_json, '$.timestamp') >= ?
-              AND json_extract(record_json, '$.timestamp') < ?
-              AND json_extract(record_json, '$.event_type') IS NULL
-            ORDER BY json_extract(record_json, '$.timestamp') ASC
+            WHERE timestamp >= ? AND timestamp < ?
+              AND event_type = 'execution'
+            ORDER BY timestamp ASC
             LIMIT ?
             """,
             (start, end, limit),
@@ -339,16 +501,15 @@ class LineageReader:
         cur = conn.execute(
             """
             SELECT
-                json_extract(record_json, '$.model_id') AS model_id,
-                json_extract(record_json, '$.provider') AS provider,
+                model_id,
+                provider,
                 json_extract(record_json, '$.model_attestation_id') AS attestation_id,
                 COUNT(*) AS request_count,
-                SUM(COALESCE(json_extract(record_json, '$.total_tokens'), 0)) AS total_tokens
+                SUM(COALESCE(total_tokens, 0)) AS total_tokens
             FROM wal_records
-            WHERE json_extract(record_json, '$.timestamp') >= ?
-              AND json_extract(record_json, '$.timestamp') < ?
-              AND json_extract(record_json, '$.event_type') IS NULL
-              AND json_extract(record_json, '$.model_id') IS NOT NULL
+            WHERE timestamp >= ? AND timestamp < ?
+              AND event_type = 'execution'
+              AND model_id IS NOT NULL
             GROUP BY model_id, provider
             ORDER BY request_count DESC
             """,
@@ -361,12 +522,11 @@ class LineageReader:
         conn = self._ensure_conn()
         cur = conn.execute(
             """
-            SELECT DISTINCT json_extract(record_json, '$.session_id') AS session_id
+            SELECT DISTINCT session_id
             FROM wal_records
-            WHERE json_extract(record_json, '$.timestamp') >= ?
-              AND json_extract(record_json, '$.timestamp') < ?
-              AND json_extract(record_json, '$.session_id') IS NOT NULL
-              AND json_extract(record_json, '$.event_type') IS NULL
+            WHERE timestamp >= ? AND timestamp < ?
+              AND session_id IS NOT NULL
+              AND event_type = 'execution'
             """,
             (start, end),
         )
@@ -381,27 +541,23 @@ class LineageReader:
         interval = interval_map.get(range_key, "-1 day")
 
         if group_by == "user":
-            group_col = "json_extract(record_json, '$.user')"
+            group_col = "user"
             group_alias = "user"
         else:
-            group_col = (
-                "COALESCE(json_extract(record_json, '$.model_id'), "
-                "json_extract(record_json, '$.model_attestation_id'))"
-            )
+            group_col = "model_id"
             group_alias = "model"
 
         sql = f"""
             SELECT
                 {group_col} AS group_key,
                 COUNT(*) AS request_count,
-                SUM(COALESCE(json_extract(record_json, '$.prompt_tokens'), 0)) AS total_prompt_tokens,
-                SUM(COALESCE(json_extract(record_json, '$.completion_tokens'), 0)) AS total_completion_tokens,
-                SUM(COALESCE(json_extract(record_json, '$.total_tokens'), 0)) AS total_tokens,
+                SUM(COALESCE(prompt_tokens, 0)) AS total_prompt_tokens,
+                SUM(COALESCE(completion_tokens, 0)) AS total_completion_tokens,
+                SUM(COALESCE(total_tokens, 0)) AS total_tokens,
                 SUM(COALESCE(json_extract(record_json, '$.estimated_cost_usd'), 0.0)) AS total_cost_usd
             FROM wal_records
-            WHERE json_extract(record_json, '$.timestamp') > datetime('now', ?)
-              AND (json_extract(record_json, '$.event_type') IS NULL
-                   OR json_extract(record_json, '$.event_type') = '')
+            WHERE timestamp > datetime('now', ?)
+              AND event_type = 'execution'
             GROUP BY group_key
             ORDER BY total_cost_usd DESC
         """
@@ -432,7 +588,7 @@ class LineageReader:
         """Get all file_metadata entries from execution records in a session."""
         conn = self._ensure_conn()
         rows = conn.execute(
-            "SELECT record_json FROM wal_records WHERE json_extract(record_json, '$.session_id') = ?",
+            "SELECT record_json FROM wal_records WHERE session_id = ? AND event_type = 'execution'",
             (session_id,),
         ).fetchall()
         attachments = []

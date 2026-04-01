@@ -10,6 +10,12 @@ import tempfile
 import pytest
 
 from gateway.control.store import ControlPlaneStore
+from gateway.wal.writer import _apply_schema
+
+
+def _backfill_extracted_columns(conn: sqlite3.Connection) -> None:
+    """Backfill extracted columns from record_json for test data inserted with old-style INSERTs."""
+    _apply_schema(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -32,29 +38,8 @@ def wal_db():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "wal.db")
         conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS wal_records (
-                execution_id TEXT PRIMARY KEY,
-                record_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                delivered INTEGER NOT NULL DEFAULT 0,
-                delivered_at TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS gateway_attempts (
-                request_id TEXT PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                tenant_id TEXT DEFAULT '',
-                provider TEXT DEFAULT '',
-                model_id TEXT DEFAULT '',
-                path TEXT DEFAULT '',
-                disposition TEXT DEFAULT 'forwarded',
-                execution_id TEXT DEFAULT '',
-                status_code INTEGER DEFAULT 200,
-                user TEXT DEFAULT ''
-            )
-        """)
+        from gateway.wal.writer import _apply_schema
+        _apply_schema(conn)
         conn.commit()
         conn.close()
         yield db_path
@@ -246,6 +231,7 @@ def test_cost_summary_reader_by_model(wal_db):
             (rec["execution_id"], json.dumps(rec), "2099-01-01T00:00:00"),
         )
     conn.commit()
+    _backfill_extracted_columns(conn)
     conn.close()
 
     reader = LineageReader(wal_db)
@@ -305,6 +291,7 @@ def test_cost_summary_reader_by_user(wal_db):
             (rec["execution_id"], json.dumps(rec), "2099-01-01T00:00:00"),
         )
     conn.commit()
+    _backfill_extracted_columns(conn)
     conn.close()
 
     reader = LineageReader(wal_db)
@@ -370,6 +357,7 @@ def test_cost_summary_excludes_tool_events(wal_db):
         ("tool-1", json.dumps(tool_record), "2099-01-01T00:00:01"),
     )
     conn.commit()
+    _backfill_extracted_columns(conn)
     conn.close()
 
     reader = LineageReader(wal_db)

@@ -688,20 +688,38 @@ async def _init_web_search_tool(settings, ctx) -> None:
 
 
 def _init_lineage(settings, ctx) -> None:
-    """Phase 18: Lineage dashboard reader (read-only SQLite connection to WAL db)."""
+    """Phase 18: Lineage dashboard reader.
+
+    Prefers WalacorLineageReader (reads from Walacor API) when walacor_client
+    is available. Falls back to SQLite LineageReader for local-only mode.
+    """
     if not settings.lineage_enabled:
         return
-    from gateway.lineage.reader import LineageReader
 
+    # Walacor-backed reader: reads from Walacor API via getcomplex
+    if ctx.walacor_client is not None:
+        from gateway.lineage.walacor_reader import WalacorLineageReader
+        ctx.lineage_reader = WalacorLineageReader(
+            client=ctx.walacor_client,
+            executions_etid=settings.walacor_executions_etid,
+            attempts_etid=settings.walacor_attempts_etid,
+            tool_events_etid=settings.walacor_tool_events_etid,
+        )
+        logger.info("Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
+                     settings.walacor_executions_etid, settings.walacor_attempts_etid,
+                     settings.walacor_tool_events_etid)
+        return
+
+    # Fallback: local SQLite reader
+    from gateway.lineage.reader import LineageReader
     wal_db = Path(settings.wal_path) / "wal.db"
-    # Force WALWriter to create the DB file if it hasn't yet (lazy init).
     if not wal_db.exists() and ctx.wal_writer:
         ctx.wal_writer._ensure_conn()
     if not wal_db.exists():
         logger.info("Lineage dashboard: WAL db not found at %s — skipping", wal_db)
         return
     ctx.lineage_reader = LineageReader(str(wal_db))
-    logger.info("Lineage dashboard enabled: reading from %s", wal_db)
+    logger.info("Lineage dashboard enabled: reading from local SQLite %s", wal_db)
 
 
 def _init_otel(settings, ctx) -> None:
@@ -1003,7 +1021,7 @@ async def on_startup() -> None:
             logger.warning("SECURITY: Rate limiting is DISABLED — enable WALACOR_RATE_LIMIT_ENABLED=true for production")
         if settings.tool_aware_enabled and settings.mcp_servers_json:
             await _init_tool_registry(settings, ctx)
-        if settings.tool_aware_enabled and settings.web_search_enabled:
+        if settings.tool_aware_enabled and (settings.web_search_enabled or settings.gateway_web_search_enabled):
             await _init_web_search_tool(settings, ctx)
         if settings.otel_enabled:
             _init_otel(settings, ctx)

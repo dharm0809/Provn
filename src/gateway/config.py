@@ -370,6 +370,26 @@ class Settings(BaseSettings):
         default=5,
         description="Default number of search results returned per query.",
     )
+    openai_web_search_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable OpenAI's native web search via the Responses API. "
+            "When enabled, OpenAI models (gpt-4o, gpt-4o-mini, etc.) are routed through "
+            "the Responses API with the web_search tool, giving them live internet access. "
+            "Superseded by gateway_web_search_enabled when both are set."
+        ),
+    )
+    gateway_web_search_enabled: bool = Field(
+        default=False,
+        description=(
+            "Route ALL web search through the gateway's built-in WebSearchTool. "
+            "When enabled, OpenAI requests stay on Chat Completions (not Responses API) "
+            "and web_search is injected as a function tool executed by the gateway. "
+            "This gives full audit trail with actual search results, content analysis, "
+            "and uses the same active tool loop as Ollama. "
+            "Takes priority over openai_web_search_enabled."
+        ),
+    )
 
     # Phase 15: Multi-model routing + Redis state sharing
     redis_url: str = Field(
