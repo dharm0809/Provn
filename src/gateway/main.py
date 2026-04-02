@@ -74,6 +74,7 @@ from gateway.control.sync_api import (
 from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
 from gateway.openwebui.status_api import openwebui_status
+from gateway.openwebui.events_api import openwebui_events_receive, openwebui_events_list
 
 try:
     import uvloop
@@ -1320,6 +1321,8 @@ def create_app() -> Starlette:
         Route("/v1/policies", sync_policies, methods=["GET"]),
         # OpenWebUI integration
         Route("/v1/openwebui/status", openwebui_status, methods=["GET"]),
+        Route("/v1/openwebui/events", openwebui_events_receive, methods=["POST"]),
+        Route("/v1/openwebui/events", openwebui_events_list, methods=["GET"]),
         # Models API (OpenAI-compatible)
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
