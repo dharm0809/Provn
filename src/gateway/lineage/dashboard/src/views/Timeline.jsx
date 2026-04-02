@@ -144,9 +144,18 @@ export default function Timeline({ navigate, sessionId }) {
 
       {records.length === 0 ? (
         <div className="empty-state"><h3>No records in this session</h3></div>
-      ) : (
+      ) : (() => {
+        const userRecords = records.filter(r => {
+          const rt = r.metadata?.request_type || '';
+          return !rt.startsWith('system_task');
+        });
+        const systemRecords = records.filter(r => {
+          const rt = r.metadata?.request_type || '';
+          return rt.startsWith('system_task');
+        });
+        return (
         <div>
-          {records.map((r, i) => {
+          {userRecords.map((r, i) => {
             const seq = r.sequence_number ?? '?';
             const prompt = (r.prompt_text || '').substring(0, 100);
             const response = (r.response_content || r.thinking_content || '').substring(0, 80);
@@ -224,8 +233,55 @@ export default function Timeline({ navigate, sessionId }) {
               </div>
             );
           })}
+
+          {/* System Tasks (follow-ups, tags, etc.) — collapsible */}
+          {systemRecords.length > 0 && (
+            <details style={{ marginTop: 20 }}>
+              <summary style={{
+                cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                color: 'var(--text-muted)', textTransform: 'uppercase',
+                letterSpacing: '0.8px', padding: '8px 0',
+                borderTop: '1px solid var(--border)',
+              }}>
+                System Tasks ({systemRecords.length}) — follow-ups, tags, suggestions
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                {systemRecords.map((r, i) => {
+                  const prompt = (r.prompt_text || '').substring(0, 120);
+                  const response = (r.response_content || r.thinking_content || '').substring(0, 100);
+                  const rt = r.metadata?.request_type || 'system_task';
+                  return (
+                    <div key={r.execution_id || `sys-${i}`}
+                      className="chain-card" style={{ marginBottom: 8, opacity: 0.7 }}
+                      onClick={() => navigate('execution', { executionId: r.execution_id, sessionId })}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <span className="badge badge-muted" style={{ fontSize: 10 }}>{rt}</span>
+                        {r.metadata?.tool_interactions?.length > 0 && (
+                          <span className="badge badge-gold" style={{ fontSize: 10 }}>
+                            tools: {r.metadata.tool_interactions.length}
+                          </span>
+                        )}
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                          {getTokenCount(r)} tokens
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {prompt}
+                      </div>
+                      {response && (
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.7 }}>
+                          → {response}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          )}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
