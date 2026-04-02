@@ -1973,14 +1973,23 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     _test_name, _original_model, _resolved_model,
                 )
 
+    # ── Web search: only inject when user explicitly enables it in chat UI ──
+    # OpenWebUI sends metadata.features.web_search=true when the user toggles
+    # web search on. The gateway only injects the web_search tool when this
+    # is true — otherwise the model calls it on every request unnecessarily.
+    # Direct API callers (curl, scripts) bypass this check and always get tools.
+    _body_meta = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
+    if isinstance(_body_meta, dict) and call.metadata.get("_gateway_web_search"):
+        features = _body_meta.get("features") or {}
+        if not features.get("web_search", False):
+            call = dataclasses.replace(call, metadata={
+                **call.metadata, "_gateway_web_search": False,
+            })
+
     # ── System task detection: skip tools for auto-generated requests ────────
-    # OpenWebUI sends follow-up suggestions, tag generation, etc. as system tasks.
-    # These are still audited (valuable context) but don't trigger web search/tools.
-    # The dashboard renders them in a collapsible section, not the main timeline.
     _req_type = extra.get("request_type", "user_message")
     _is_system_task = isinstance(_req_type, str) and _req_type.startswith("system_task")
     if _is_system_task:
-        # Strip gateway web search flag so system tasks don't trigger tool injection
         if call.metadata.get("_gateway_web_search"):
             call = dataclasses.replace(call, metadata={
                 **call.metadata, "_gateway_web_search": False,
