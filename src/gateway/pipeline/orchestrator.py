@@ -1973,11 +1973,19 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     _test_name, _original_model, _resolved_model,
                 )
 
-    # ── System task detection: skip audit for auto-generated requests ────────
+    # ── System task detection: skip audit + tools for auto-generated requests ──
+    # OpenWebUI sends follow-up suggestions, tag generation, etc. as system tasks.
+    # These should not be audited or trigger web search/tool calls.
     _req_type = extra.get("request_type", "user_message")
-    if settings.skip_system_task_audit and isinstance(_req_type, str) and _req_type.startswith("system_task:"):
+    _is_system_task = isinstance(_req_type, str) and _req_type.startswith("system_task")
+    if settings.skip_system_task_audit and _is_system_task:
         request.state.skip_audit = True
-        logger.debug("System task detected (%s) — will skip audit record", _req_type)
+        # Strip gateway web search flag so system tasks don't trigger tool injection
+        if call.metadata.get("_gateway_web_search"):
+            call = dataclasses.replace(call, metadata={
+                **call.metadata, "_gateway_web_search": False,
+            })
+        logger.debug("System task detected (%s) — skipping audit and tools", _req_type)
 
     ctx = get_pipeline_context()
     provider = adapter.get_provider_name()

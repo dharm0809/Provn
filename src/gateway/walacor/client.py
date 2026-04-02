@@ -289,7 +289,7 @@ class WalacorClient:
         "event_id", "execution_id", "session_id", "tenant_id", "gateway_id",
         "timestamp", "tool_name", "tool_type", "tool_source", "input_data",
         "input_hash", "output_data", "output_hash", "duration_ms", "iteration",
-        "is_error", "content_analysis", "metadata_json",
+        "is_error", "content_analysis", "sources", "metadata_json",
     })
 
     async def write_tool_event(self, record: dict[str, Any]) -> None:
