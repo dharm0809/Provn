@@ -65,7 +65,10 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           SHORT_SHA=$(echo "$SHA" | cut -c1-7)
-          echo "tag=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          DATE=$(date -u +"%Y%m%d")
+          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          READABLE_TAG="${BRANCH}-${DATE}-${SHORT_SHA}"
+          echo "tag=$READABLE_TAG" >> "$GITHUB_OUTPUT"
           echo "full_image=$ECR_REGISTRY/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
 
       - name: Build and push to ECR
