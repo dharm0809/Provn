@@ -292,61 +292,92 @@ class WalacorLineageReader:
     # ── Metrics history ───────────────────────────────────────────────────
 
     async def get_metrics_history(self, range_key: str) -> dict:
-        interval_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
-        hours = interval_map.get(range_key, 1)
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        """Time-bucketed attempt counts for throughput chart."""
+        cfg = {"1h": (1, 60, "%Y-%m-%dT%H:%M:00"), "24h": (24, 24, "%Y-%m-%dT%H:00:00"),
+               "7d": (168, 168, "%Y-%m-%dT%H:00:00"), "30d": (720, 720, "%Y-%m-%dT%H:00:00")}
+        hours, num_buckets, fmt = cfg.get(range_key, cfg["1h"])
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(hours=hours)).isoformat()
 
         pipeline = [
             {"$match": {"timestamp": {"$gte": cutoff}}},
-            {"$group": {
-                "_id": "$disposition",
-                "count": {"$sum": 1},
-            }},
+            {"$project": {"timestamp": 1, "disposition": 1}},
         ]
         rows = await self._client.query_complex(self._att_etid, pipeline)
-        stats = {r["_id"]: r["count"] for r in rows if r.get("_id")}
-        total = sum(stats.values())
-        return {
-            "range": range_key,
-            "total": total,
-            "allowed": stats.get("allowed", 0),
-            "blocked": total - stats.get("allowed", 0),
-            "stats": stats,
-        }
+
+        # Build time buckets in Python
+        step = timedelta(hours=hours) / num_buckets
+        start = now - timedelta(hours=hours)
+        labels = [(start + step * i).strftime(fmt) for i in range(num_buckets)]
+        by_t: dict[str, dict] = {t: {"t": t, "total": 0, "allowed": 0, "blocked": 0} for t in labels}
+
+        for r in rows:
+            ts = r.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                key = dt.strftime(fmt)
+            except (ValueError, TypeError):
+                continue
+            bucket = by_t.get(key)
+            if bucket:
+                bucket["total"] += 1
+                if r.get("disposition") in ("allowed", "forwarded"):
+                    bucket["allowed"] += 1
+                else:
+                    bucket["blocked"] += 1
+
+        return {"buckets": [by_t[t] for t in labels], "range": range_key}
 
     # ── Token / latency history ───────────────────────────────────────────
 
     async def get_token_latency_history(self, range_key: str) -> dict:
-        interval_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
-        hours = interval_map.get(range_key, 1)
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        """Time-bucketed token usage and latency for charts."""
+        cfg = {"1h": (1, 60, "%Y-%m-%dT%H:%M:00"), "24h": (24, 24, "%Y-%m-%dT%H:00:00"),
+               "7d": (168, 168, "%Y-%m-%dT%H:00:00"), "30d": (720, 720, "%Y-%m-%dT%H:00:00")}
+        hours, num_buckets, fmt = cfg.get(range_key, cfg["1h"])
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(hours=hours)).isoformat()
 
         pipeline = [
             {"$match": {"timestamp": {"$gte": cutoff}}},
-            {"$group": {
-                "_id": None,
-                "prompt_tokens": {"$sum": "$prompt_tokens"},
-                "completion_tokens": {"$sum": "$completion_tokens"},
-                "total_tokens": {"$sum": "$total_tokens"},
-                "avg_latency_ms": {"$avg": "$latency_ms"},
-                "max_latency_ms": {"$max": "$latency_ms"},
-                "request_count": {"$sum": 1},
-            }},
+            {"$project": {"timestamp": 1, "prompt_tokens": 1, "completion_tokens": 1,
+                          "total_tokens": 1, "latency_ms": 1}},
         ]
         rows = await self._client.query_complex(self._exec_etid, pipeline)
-        if rows:
-            r = rows[0]
-            buckets = [{
-                "t": "aggregate",
-                "prompt_tokens": r.get("prompt_tokens", 0) or 0,
-                "completion_tokens": r.get("completion_tokens", 0) or 0,
-                "total_tokens": r.get("total_tokens", 0) or 0,
-                "avg_latency_ms": round(r.get("avg_latency_ms", 0) or 0, 1),
-                "max_latency_ms": round(r.get("max_latency_ms", 0) or 0, 1),
-                "request_count": r.get("request_count", 0),
-            }]
-        else:
-            buckets = []
+
+        step = timedelta(hours=hours) / num_buckets
+        start = now - timedelta(hours=hours)
+        labels = [(start + step * i).strftime(fmt) for i in range(num_buckets)]
+        by_t: dict[str, dict] = {}
+        for t in labels:
+            by_t[t] = {"t": t, "prompt_tokens": 0, "completion_tokens": 0,
+                       "total_tokens": 0, "latencies": [], "request_count": 0}
+
+        for r in rows:
+            ts = r.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                key = dt.strftime(fmt)
+            except (ValueError, TypeError):
+                continue
+            bucket = by_t.get(key)
+            if bucket:
+                bucket["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
+                bucket["completion_tokens"] += r.get("completion_tokens", 0) or 0
+                bucket["total_tokens"] += r.get("total_tokens", 0) or 0
+                lat = r.get("latency_ms")
+                if lat:
+                    bucket["latencies"].append(lat)
+                bucket["request_count"] += 1
+
+        buckets = []
+        for t in labels:
+            b = by_t[t]
+            lats = b.pop("latencies")
+            b["avg_latency_ms"] = round(sum(lats) / len(lats), 1) if lats else 0
+            b["max_latency_ms"] = round(max(lats), 1) if lats else 0
+            buckets.append(b)
+
         return {"buckets": buckets, "range": range_key}
 
     # ── Chain verification ────────────────────────────────────────────────
