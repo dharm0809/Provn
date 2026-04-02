@@ -20,6 +20,7 @@ dependencies = [
   "pybreaker>=1.2",
   "orjson>=3.9",
   "cachetools>=5.3",
+  "ddgs>=7.0",
 ]
 
 [project.optional-dependencies]
