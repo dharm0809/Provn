@@ -7,7 +7,7 @@ install:
 	pip install -e .
 
 run:
-	uvicorn gateway.main:app --host 0.0.0.0 --port 8002 --reload
+	uvicorn gateway.main:app --host 0.0.0.0 --port 8000 --reload
 
 run-prod:
 	walacor-gateway
