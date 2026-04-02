@@ -189,7 +189,37 @@ export default function Timeline({ navigate, sessionId }) {
                         <CopyBtn text={r.record_hash} />
                       </span>
                     </span>
+                    {(r._envelope || r._walacor_eid || r.EId) && (
+                      <span className="badge badge-gold" title={`EId: ${r._walacor_eid || r.EId || ''}\nBlock: ${(r._envelope || {}).block_id || '—'}`} style={{ cursor: 'default' }}>
+                        ◆ on-chain
+                      </span>
+                    )}
                   </div>
+                  {/* Blockchain proof summary row */}
+                  {r._envelope && r._envelope.block_id && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Blockchain:</span>
+                      <span className="hash-gold" style={{ fontSize: 10 }}>
+                        <span className="copy-wrap">
+                          <span className="copy-text" title="Block ID">{truncHash(r._envelope.block_id, 16)}</span>
+                          <CopyBtn text={r._envelope.block_id} />
+                        </span>
+                      </span>
+                      {r._envelope.data_hash && (
+                        <span className="hash-gold" style={{ fontSize: 10 }}>
+                          <span className="copy-wrap">
+                            <span className="copy-text" title="Data Hash">DH: {truncHash(r._envelope.data_hash, 12)}</span>
+                            <CopyBtn text={r._envelope.data_hash} />
+                          </span>
+                        </span>
+                      )}
+                      {r._walacor_eid && (
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-muted)' }} title="Walacor Entity ID">
+                          EId: {truncHash(r._walacor_eid, 12)}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             );
