@@ -11,7 +11,7 @@ A drop-in proxy that sits between your application and any LLM provider. No code
 | Guarantee | What it does |
 |---|---|
 | **G1 — Model Attestation** | Only cryptographically attested models can serve requests. Unknown models are blocked. |
-| **G2 — Full-fidelity Audit** | Prompt, response, thinking content, provider request ID, and model hash are persisted to Walacor backend + local SQLite WAL. |
+| **G2 — Full-fidelity Audit** | Prompt, response, thinking content, provider request ID, and model hash are persisted to Walacor blockchain-backed storage with envelope proof (EId, BlockId, TransId, DataHash). |
 | **G3 — Pre-inference Policy** | Requests are evaluated against active policy rules before forwarding. Stale policies fail closed. |
 | **G4 — Content Gate** | Responses pass through pluggable analyzers (PII, toxicity, Llama Guard, DLP, Prompt Guard) before reaching the caller. |
 | **G5 — Session Chain** | Conversation turns are linked via SHA3-512 Merkle chain for tamper detection. |
@@ -35,14 +35,16 @@ Client
 |  |  |  +---------------------------------------+|||
 |  |  |  |  orchestrator (8-step pipeline)        ||||
 |  |  |  |                                        ||||
+|  |  |  |  0. Intent classify (ONNX+rules)       ||||
 |  |  |  |  1. Attestation lookup           (G1)  ||||
 |  |  |  |  2. Pre-inference policy eval    (G3)  ||||
-|  |  |  |  3. Budget + rate limit + WAL          ||||
+|  |  |  |  3. Budget + rate limit                ||||
 |  |  |  |  4. Forward to provider                ||||
-|  |  |  |  5. Tool loop (MCP, web search)        ||||
-|  |  |  |  6. Post-inference content gate  (G4)  ||||
-|  |  |  |  7. Build execution record + chain(G5) ||||
-|  |  |  |  8. Audit write (Walacor + WAL)  (G2)  ||||
+|  |  |  |  5. Tool loop (if intent=web_search)   ||||
+|  |  |  |  6. Normalize + schema validate        ||||
+|  |  |  |  7. Post-inference content gate  (G4)  ||||
+|  |  |  |  8. Build record + chain         (G5)  ||||
+|  |  |  |  9. Walacor write + blockchain   (G2)  ||||
 |  |  |  +---------------------------------------+|||
 |  |  +-------------------------------------------+||
 |  +-----------------------------------------------+|
@@ -72,17 +74,27 @@ Gateway: `http://localhost:8002` | Dashboard: `http://localhost:8002/lineage/` |
 ### Manual
 
 ```bash
-pip install -e ".[dev]"
+pip install -e .
 
-# Full governance with Ollama
+# Minimal: Ollama only (web search, tool awareness, intent classifier all ON by default)
 export WALACOR_GATEWAY_TENANT_ID=dev-tenant
 export WALACOR_GATEWAY_API_KEYS=my-secret-key
 export WALACOR_GATEWAY_PROVIDER=ollama
 export WALACOR_PROVIDER_OLLAMA_URL=http://localhost:11434
 walacor-gateway
+
+# Full: Walacor backend + OpenWebUI auto-integration
+export WALACOR_SERVER=https://sandbox.walacor.com/api
+export WALACOR_USERNAME=your-user
+export WALACOR_PASSWORD=your-pass
+export WALACOR_OPENWEBUI_URL=http://localhost:3000
+export WALACOR_OPENWEBUI_API_KEY=your-owui-key
+walacor-gateway
 ```
 
 Point any OpenAI-compatible client at `http://localhost:8000`. All config uses the `WALACOR_` prefix (see `.env.example`).
+
+**Defaults ON:** tool awareness, web search (DuckDuckGo), intent classifier, normalization, schema validation. User only configures provider connections and (optionally) Walacor backend + OpenWebUI.
 
 > **API key required.** If no keys are configured, the gateway auto-generates one at startup (check logs). See [Getting Started](docs/GETTING-STARTED.md) for full setup guide.
 
@@ -128,21 +140,28 @@ Thinking models (qwen3) produce `<think>` blocks which the gateway strips from t
 - Request body size limits, per-IP rate limiting, CORS origin restriction
 - Security headers (CSP, X-Frame-Options, X-Content-Type-Options) on all responses
 
+**Data Integrity Engine**
+- **Intent Classifier** — two-tier (deterministic rules + ONNX ML model, 99.5% accuracy) routes every request: normal, web_search, rag, reasoning, mcp_tools, system_task
+- **Normalization Engine** — post-parse layer ensures consistent field format across all providers (Anthropic usage mapping, thinking fallback, cache enrichment, sentinel clearing)
+- **Schema Validator** — type-checks and coerces every field before Walacor write (missing required fields logged, wrong types auto-coerced)
+- Confidence-gated ML decisions: >0.95 auto-accept, 0.7–0.95 accept+flag, <0.7 safe default
+
 **Audit & Compliance**
-- Dual-write to Walacor backend + local SQLite WAL (encrypted, 0600 permissions)
+- **Walacor blockchain storage** — every record gets EId, BlockId, TransactionId, DataHash envelope proof
 - SHA3-512 Merkle session chains with client-side verification
 - Thinking content stored separately from response in execution records
-- Tool event audit trail with SHA3-512 hashes on input/output data
+- Tool event audit trail with full search results, sources, and duration
+- File/attachment tracking — inline images hashed (SHA3-512), OpenWebUI files captured
 - Content analysis results stored per-request for compliance replay
 - Audit content classifier separates user question from conversation noise
-- Compliance export API — EU AI Act, NIST AI RMF, SOC 2 (JSON/CSV)
+- Compliance export API — EU AI Act, NIST AI RMF, SOC 2 (JSON/CSV/PDF)
 
 **Tool Execution**
-- Active tool loop: gateway executes tools on behalf of the model (web search, MCP, custom)
-- Built-in web search (DuckDuckGo, Brave, SerpAPI) with source attribution
+- **Unified web search** — gateway executes web search for ALL providers (DuckDuckGo free, no API key needed; Brave/SerpAPI optional). Full audit trail with actual search results, not just URLs
+- Intent-driven tool injection — web search only activates when user explicitly toggles it in the chat UI (no unnecessary tool calls on poems or code questions)
 - MCP server support (stdio + HTTP/SSE transport) with command allowlist
-- Tool output content analysis (PII, toxicity, indirect prompt injection scanning)
-- Tool output size limits and total loop wall-clock timeout
+- Tool output content analysis (PII false-positive downgrading for web search; toxicity/injection still block)
+- Tool output size limits and total loop wall-clock timeout (300s for CPU inference)
 - Adaptive per-model timeouts based on observed P95 latency
 
 **Performance**
@@ -157,6 +176,7 @@ Thinking models (qwen3) produce `<think>` blocks which the gateway strips from t
 - Resilience layer: weighted load balancing, circuit breakers, retry with backoff
 - Alert bus: webhooks, PagerDuty for budget threshold crossings
 - Horizontal scaling via Redis (session chain + budget state sharing)
+- **OpenWebUI auto-integration** — filter plugin auto-installs on startup; captures user identity, chat ID, files, features without manual setup
 - OpenTelemetry trace export, Prometheus metrics at `/metrics`
 
 ---
@@ -186,7 +206,9 @@ The gateway serves a built-in React dashboard at `/lineage/` with:
 - **Overview** — stat cards, live throughput chart, token usage and latency charts
 - **Sessions** — browse sessions with user identity, question preview, numbered pagination
 - **Chain Verification** — client-side SHA3-512 recomputation (no server trust required)
+- **Blockchain Proof** — Walacor EId, Block ID, Transaction ID, Data Hash displayed per execution
 - **Pipeline Trace** — canvas waterfall showing time spent in each governance step
+- **System Tasks** — OpenWebUI follow-ups/tags in collapsible section (not polluting main timeline)
 - **Control** — manage models, policies, budgets; discover available models from providers
 - **Playground** — interactive prompt testing with governance readout and model comparison
 - **Compliance** — preview and download compliance reports
@@ -236,7 +258,15 @@ cp .env.example .env                       # fill in credentials
 python3 -m uvicorn gateway.main:app --reload --port 8000 --app-dir src
 ```
 
-Requirements: Python 3.12+. Optional extras: `[redis]`, `[telemetry]`, `[auth]`, `[presidio]`, `[guard]`.
+Requirements: Python 3.12+. Core deps include `ddgs` (web search), `scikit-learn` + `onnxruntime` (intent classifier). Optional extras: `[redis]`, `[telemetry]`, `[auth]`, `[presidio]`, `[guard]`.
+
+### Retrain Intent Classifier
+
+```bash
+# Export labeled data from Walacor, then train
+python scripts/train_intent_classifier.py --real-data /tmp/training_data.json
+# Output: src/gateway/classifier/model.onnx (~181KB, 99.5% accuracy)
+```
 
 ---
 
