@@ -97,7 +97,7 @@ export default function Execution({ navigate, executionId, sessionId }) {
           </div>
         </div>
 
-        {/* Chain Integrity */}
+        {/* Chain Integrity + Blockchain Proof */}
         <div className="card">
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
             ◆ Chain Integrity
@@ -107,6 +107,28 @@ export default function Execution({ navigate, executionId, sessionId }) {
             <DetailRow label="Record Hash" value={r.record_hash} className="gold mono" copyable />
             <DetailRow label="Previous Hash" value={r.previous_record_hash} className="gold mono" copyable />
           </div>
+
+          {/* Walacor Blockchain Proof */}
+          {(r._walacor_eid || r._envelope || r.EId) && (() => {
+            const env = r._envelope || {};
+            const eid = r._walacor_eid || r.EId || '';
+            return (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginTop: 16, marginBottom: 12, paddingTop: 12, paddingBottom: 8, borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
+                  ◆ Walacor Blockchain Proof
+                </div>
+                <div className="detail-grid">
+                  {eid && <DetailRow label="Entity ID (EId)" value={eid} className="mono" copyable />}
+                  {env.block_id && <DetailRow label="Block ID" value={env.block_id} className="gold mono" copyable />}
+                  {env.trans_id && <DetailRow label="Transaction ID" value={env.trans_id} className="gold mono" copyable />}
+                  {env.data_hash && <DetailRow label="Data Hash (DH)" value={env.data_hash} className="gold mono" copyable />}
+                  {env.block_level != null && <DetailRow label="Block Level" value={env.block_level} className="mono" />}
+                  {env.block_index != null && <DetailRow label="Block Index" value={env.block_index} className="mono" />}
+                  {env.created_at && <DetailRow label="Blockchain Timestamp" value={typeof env.created_at === 'number' ? new Date(env.created_at).toISOString() : env.created_at} className="mono" />}
+                </div>
+              </>
+            );
+          })()}
         </div>
       </div>
 
