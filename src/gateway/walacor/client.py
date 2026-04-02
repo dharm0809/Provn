@@ -215,6 +215,9 @@ class WalacorClient:
             data = dict(record)
         else:
             data = record.model_dump(mode="json")
+        # Schema validation: ensure all fields have correct types before write
+        from gateway.classifier.schema import validate_execution
+        data = validate_execution(data)
         meta = data.pop("metadata", None)
         fm = data.pop("file_metadata", None)
         # Store file_metadata inside metadata (no separate Walacor schema field needed)
@@ -299,6 +302,8 @@ class WalacorClient:
         auditing never blocks the response path.
         """
         data = dict(record)
+        from gateway.classifier.schema import validate_tool_event
+        data = validate_tool_event(data)
         # Field mapping: gateway uses "source", schema uses "tool_source"
         if "source" in data:
             data["tool_source"] = data.pop("source")
