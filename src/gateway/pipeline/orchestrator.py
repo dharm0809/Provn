@@ -519,7 +519,11 @@ def _select_tool_strategy(adapter: ProviderAdapter, settings, call: ModelCall | 
         return "active"
     if settings.tool_strategy != "auto":
         return settings.tool_strategy
-    return "passive" if adapter.get_provider_name() in ("openai", "anthropic") else "active"
+    # Auto mode: use passive for all providers by default. Active is only used
+    # when explicitly requested via _gateway_web_search (above) or MCP tools.
+    # This prevents the active strategy from forcing stream=false on every
+    # Ollama request, which breaks OpenWebUI's streaming expectation.
+    return "passive"
 
 
 def _strip_tools_from_call(call: ModelCall) -> ModelCall:
