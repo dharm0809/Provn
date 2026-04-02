@@ -133,6 +133,8 @@ jobs:
 
             # 6. Restart full stack cleanly
             docker compose down --remove-orphans || true
+            # Force-remove any leftover containers that compose down missed
+            docker ps -aq --filter "name=gateway-" | xargs -r docker rm -f 2>/dev/null || true
             docker compose up -d --force-recreate
 
             # 7. Health check
