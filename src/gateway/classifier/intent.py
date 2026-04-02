@@ -156,17 +156,28 @@ class IntentClassifier:
         try:
             import numpy as np
 
-            inputs = self._tokenize(prompt)
-            outputs = self._onnx_session.run(None, inputs)
-            logits = outputs[0][0]
+            # sklearn pipeline ONNX model expects string input named "prompt"
+            input_name = self._onnx_session.get_inputs()[0].name
+            input_shape = self._onnx_session.get_inputs()[0].shape
 
-            # Softmax
-            exp_logits = np.exp(logits - np.max(logits))
-            probs = exp_logits / exp_logits.sum()
-
-            idx = int(np.argmax(probs))
-            confidence = float(probs[idx])
-            intent = self._label_map.get(idx, NORMAL)
+            if input_name == "prompt":
+                # sklearn TF-IDF + LR pipeline — string input
+                inp = np.array([[prompt[:1000]]]).reshape(1, 1)
+                outputs = self._onnx_session.run(None, {input_name: inp})
+                # Output 0 = label, Output 1 = probability dict
+                intent = str(outputs[0][0])
+                prob_dict = outputs[1][0]  # {class: prob}
+                confidence = float(max(prob_dict.values()))
+            else:
+                # Transformer model — tokenized input
+                inputs = self._tokenize(prompt)
+                outputs = self._onnx_session.run(None, inputs)
+                logits = outputs[0][0]
+                exp_logits = np.exp(logits - np.max(logits))
+                probs = exp_logits / exp_logits.sum()
+                idx = int(np.argmax(probs))
+                confidence = float(probs[idx])
+                intent = self._label_map.get(idx, NORMAL)
 
             if confidence >= CONFIDENCE_AUTO:
                 return IntentResult(

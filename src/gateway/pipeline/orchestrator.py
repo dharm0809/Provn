@@ -16,6 +16,7 @@ import fnmatch
 import logging
 import re
 import time
+from pathlib import Path
 import uuid
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -1977,30 +1978,56 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     _test_name, _original_model, _resolved_model,
                 )
 
-    # ── Web search: only inject when user explicitly enables it in chat UI ──
-    # OpenWebUI sends metadata.features.web_search=true when the user toggles
-    # web search on. The gateway only injects the web_search tool when this
-    # is true — otherwise the model calls it on every request unnecessarily.
-    # Direct API callers (curl, scripts) bypass this check and always get tools.
+    # ── Intent classification ────────────────────────────────────────────
+    # Single decision point: classify the request intent and store the
+    # result. All downstream decisions (tools, streaming, audit) use this.
     _body_meta = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
-    if isinstance(_body_meta, dict) and call.metadata.get("_gateway_web_search"):
-        features = _body_meta.get("features") or {}
-        if not features.get("web_search", False):
-            call = dataclasses.replace(call, metadata={
-                **call.metadata, "_gateway_web_search": False,
-            })
-
-    # ── System task detection: skip tools for auto-generated requests ────────
-    _req_type = extra.get("request_type", "user_message")
-    _is_system_task = isinstance(_req_type, str) and _req_type.startswith("system_task")
-    if _is_system_task:
-        if call.metadata.get("_gateway_web_search"):
-            call = dataclasses.replace(call, metadata={
-                **call.metadata, "_gateway_web_search": False,
-            })
-        logger.debug("System task detected (%s) — tools disabled, audit kept", _req_type)
+    _intent_metadata = {**call.metadata}
+    if isinstance(_body_meta, dict):
+        _intent_metadata["_body_metadata"] = _body_meta
 
     ctx = get_pipeline_context()
+    from gateway.classifier.intent import IntentClassifier, NORMAL, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG
+    _classifier = getattr(ctx, "intent_classifier", None)
+    if _classifier is None:
+        _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
+                        and settings.mcp_servers_json)
+        _onnx_path = str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+        _classifier = IntentClassifier(onnx_model_path=_onnx_path, has_mcp_tools=_has_mcp)
+        ctx.intent_classifier = _classifier
+
+    _intent = _classifier.classify(
+        prompt=call.prompt_text or "",
+        metadata=_intent_metadata,
+        model_id=call.model_id or "",
+    )
+    extra["_intent"] = _intent.intent
+    extra["_intent_confidence"] = _intent.confidence
+    extra["_intent_tier"] = _intent.tier
+    extra["_intent_reason"] = _intent.reason
+
+    # Apply intent to call metadata for downstream pipeline decisions
+    _meta_updates: dict[str, Any] = {}
+    if _intent.intent == WEB_SEARCH:
+        _meta_updates["_gateway_web_search"] = True
+    elif _intent.intent == SYSTEM_TASK:
+        _meta_updates["_gateway_web_search"] = False
+    elif _intent.intent == REASONING:
+        if not call.metadata.get("_responses_api"):
+            _meta_updates["_responses_api"] = True
+    else:
+        # normal, rag, mcp_tools — ensure web search is off unless MCP
+        if call.metadata.get("_gateway_web_search") and _intent.intent != MCP_TOOLS:
+            _meta_updates["_gateway_web_search"] = False
+
+    if _meta_updates:
+        call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
+
+    logger.info(
+        "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s",
+        _intent.intent, _intent.confidence, _intent.tier, _intent.reason,
+        call.model_id,
+    )
     provider = adapter.get_provider_name()
     model = call.model_id or "unknown"
     provider_var.set(provider)
