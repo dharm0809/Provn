@@ -796,6 +796,7 @@ async def _execute_one_tool(
     # Analyse tool output BEFORE feeding back to the LLM (blocks indirect prompt injection)
     output_content = result.content
     is_error = result.is_error
+    _is_web_search = tc.tool_name in ("web_search",) or tc.tool_type == "web_search"
     if (settings.tool_content_analysis_enabled
             and ctx.content_analyzers
             and output_content
@@ -804,12 +805,21 @@ async def _execute_one_tool(
         blocking = [d for d in analysis if d.get("verdict") == "block"]
         if blocking:
             top = blocking[0]
-            logger.warning(
-                "Tool output blocked before LLM injection: tool=%s category=%s analyzer=%s",
-                tc.tool_name, top["category"], top["analyzer_id"],
-            )
-            output_content = f"[Tool output blocked by content policy: {top['category']}]"
-            is_error = True
+            # Web search results contain URLs, tracking tokens, and page IDs that
+            # false-positive match PII patterns (api_key, credit_card). Downgrade
+            # to warning — external web content should not be blocked by PII analysis.
+            if _is_web_search and top.get("category") == "pii":
+                logger.info(
+                    "Tool output PII finding downgraded to warn (web search): tool=%s analyzer=%s",
+                    tc.tool_name, top["analyzer_id"],
+                )
+            else:
+                logger.warning(
+                    "Tool output blocked before LLM injection: tool=%s category=%s analyzer=%s",
+                    tc.tool_name, top["category"], top["analyzer_id"],
+                )
+                output_content = f"[Tool output blocked by content policy: {top['category']}]"
+                is_error = True
 
     _meta: dict = {"iteration": iteration, "duration_ms": duration_ms, "is_error": is_error}
     if _injection_detected:
