@@ -145,10 +145,24 @@ export default function Execution({ navigate, executionId, sessionId }) {
         </div>
       )}
 
-      {/* Prompt */}
+      {/* User Question + Full Prompt */}
       <div className="card">
-        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Prompt</div>
-        <div className="text-block">{r.prompt_text || '(empty)'}</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
+          User Question
+          {r.metadata?.request_type && <span className="badge badge-muted" style={{ fontSize: 10, marginLeft: 8 }}>{r.metadata.request_type}</span>}
+          {r.metadata?._intent && <span className="badge badge-gold" style={{ fontSize: 10, marginLeft: 4 }}>intent: {r.metadata._intent}</span>}
+        </div>
+        <div className="text-block" style={{ fontSize: 15, lineHeight: 1.6 }}>
+          {r.metadata?.walacor_audit?.user_question || r.prompt_text?.substring(0, 200) || '(empty)'}
+        </div>
+        {r.prompt_text && r.prompt_text.length > 200 && (
+          <details style={{ marginTop: 8 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Full Prompt ({r.prompt_text.length} chars — includes conversation history)
+            </summary>
+            <div className="text-block" style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>{r.prompt_text}</div>
+          </details>
+        )}
       </div>
 
       {/* Response */}
