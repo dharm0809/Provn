@@ -2020,8 +2020,18 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         if call.metadata.get("_gateway_web_search") and _intent.intent != MCP_TOOLS:
             _meta_updates["_gateway_web_search"] = False
 
-    if _meta_updates:
-        call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
+    # Merge intent result + chat_id into call metadata (after classifier, before pipeline)
+    _meta_updates["_intent"] = _intent.intent
+    _meta_updates["_intent_confidence"] = _intent.confidence
+    _meta_updates["_intent_tier"] = _intent.tier
+    _meta_updates["_intent_reason"] = _intent.reason
+    if isinstance(_body_meta, dict):
+        if _body_meta.get("chat_id"):
+            _meta_updates["chat_id"] = _body_meta["chat_id"]
+        if _body_meta.get("message_id"):
+            _meta_updates["message_id"] = _body_meta["message_id"]
+
+    call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
 
     logger.info(
         "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s",
