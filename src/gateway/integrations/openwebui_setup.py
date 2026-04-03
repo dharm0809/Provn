@@ -138,7 +138,7 @@ async def _ensure_global(
                     headers=headers,
                 )
                 logger.info("OpenWebUI filter '%s' enabled as global filter", FILTER_ID)
-            if not fn.get("is_active", True):
+            if not fn.get("is_active"):
                 await client.post(
                     f"{base}/api/v1/functions/id/{FILTER_ID}/toggle",
                     headers=headers,
