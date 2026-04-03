@@ -79,6 +79,7 @@ class WalacorLineageReader:
                 "last_activity": {"$max": "$timestamp"},
                 "model": {"$last": "$model_id"},
                 "user": {"$last": "$user"},
+                "metadata_json": {"$last": "$metadata_json"},
             }},
             {"$sort": {sort_field: sort_dir}},
         ]
@@ -95,23 +96,97 @@ class WalacorLineageReader:
         pipeline.extend([{"$skip": offset}, {"$limit": limit}])
         rows = await self._client.query_complex(self._exec_etid, pipeline)
 
-        return [
-            {
-                "session_id": r.get("_id") or r.get("session_id"),
+        # Extract session IDs for tool event lookup
+        session_ids = [r.get("_id") or r.get("session_id") for r in rows if r.get("_id") or r.get("session_id")]
+        tool_map = await self._get_session_tool_indicators(session_ids) if session_ids else {}
+
+        results = []
+        for r in rows:
+            sid = r.get("_id") or r.get("session_id")
+            meta = self._parse_session_metadata(r.get("metadata_json"))
+            tools = tool_map.get(sid, {})
+            results.append({
+                "session_id": sid,
                 "record_count": r.get("record_count", 0),
-                "user_message_count": r.get("record_count", 0),
+                "user_message_count": meta.get("user_message_count", r.get("record_count", 0)),
                 "last_activity": r.get("last_activity"),
                 "model": r.get("model"),
                 "user": r.get("user"),
-                "user_question": None,
-                "has_rag_context": None,
-                "has_files": None,
-                "request_type": None,
-                "tool_names": "",
-                "tool_details": "",
-            }
-            for r in rows
+                "user_question": meta.get("user_question"),
+                "has_rag_context": meta.get("has_rag_context"),
+                "has_files": meta.get("has_files"),
+                "request_type": meta.get("request_type"),
+                "tool_names": tools.get("tool_names", ""),
+                "tool_details": tools.get("tool_details", ""),
+            })
+        return results
+
+    @staticmethod
+    def _parse_session_metadata(metadata_json: str | dict | None) -> dict:
+        """Extract indicator fields from the last record's metadata_json."""
+        if not metadata_json:
+            return {}
+        meta = metadata_json
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, ValueError):
+                return {}
+        if not isinstance(meta, dict):
+            return {}
+
+        audit = meta.get("walacor_audit", {})
+        return {
+            "user_question": audit.get("user_question") or None,
+            "has_rag_context": audit.get("has_rag_context", False),
+            "has_files": audit.get("has_files", False) or audit.get("file_count", 0) > 0,
+            "request_type": meta.get("request_type"),
+            "user_message_count": audit.get("conversation_turns", 0) or 0,
+        }
+
+    async def _get_session_tool_indicators(self, session_ids: list[str]) -> dict[str, dict]:
+        """Query tool events for a batch of sessions. Returns {session_id: {tool_names, tool_details}}.
+
+        Uses a simple $match + $project to fetch raw tool events, then aggregates
+        in Python. This avoids relying on advanced MongoDB operators ($addToSet,
+        $concat, $ifNull) that Walacor's getcomplex may not fully support.
+        """
+        if not session_ids:
+            return {}
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"session_id": {"$in": session_ids}}},
+            {"$project": {
+                "session_id": 1,
+                "tool_name": 1,
+                "tool_source": 1,
+                "tool_type": 1,
+            }},
         ]
+        try:
+            rows = await self._client.query_complex(self._tool_etid, pipeline)
+        except Exception:
+            logger.debug("Tool event indicator query failed", exc_info=True)
+            return {}
+
+        # Aggregate in Python: collect unique tool names and sources per session
+        from collections import defaultdict
+        session_tools: dict[str, dict[str, set]] = defaultdict(lambda: {"names": set(), "details": set()})
+        for r in rows:
+            sid = r.get("session_id")
+            name = r.get("tool_name")
+            if not sid or not name:
+                continue
+            source = r.get("tool_source") or r.get("tool_type") or "unknown"
+            session_tools[sid]["names"].add(name)
+            session_tools[sid]["details"].add(f"{name}:{source}")
+
+        return {
+            sid: {
+                "tool_names": ",".join(sorted(data["names"])),
+                "tool_details": ",".join(sorted(data["details"])),
+            }
+            for sid, data in session_tools.items()
+        }
 
     async def count_sessions(self, search: str | None = None) -> int:
         pipeline: list[dict[str, Any]] = [
