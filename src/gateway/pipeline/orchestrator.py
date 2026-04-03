@@ -713,6 +713,10 @@ async def _write_tool_events(
             analysis = await analyze_text(output_text, ctx.content_analyzers)
             if analysis:
                 record["content_analysis"] = analysis
+        # Schema validation before write
+        _si = getattr(ctx, "schema_intelligence", None)
+        if _si:
+            record, _ = _si.validate_tool_event(record)
         if ctx.storage:
             await ctx.storage.write_tool_event(record)
 
@@ -941,7 +945,13 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
 
 
 async def _store_execution(record, request: Request, ctx) -> None:
-    """Write execution record via storage router, then tag request state."""
+    """Validate schema then write execution record via storage router."""
+    # Schema validation: enforce types before Walacor write
+    _si = getattr(ctx, "schema_intelligence", None)
+    if _si:
+        record, _val_report = _si.validate_execution(record)
+        if _val_report.issues:
+            logger.info("Execution schema: %d issues fixed before write", len(_val_report.issues))
     eid = record["execution_id"]
     if ctx.storage:
         result = await ctx.storage.write_execution(record)
@@ -999,8 +1009,15 @@ async def _after_stream_record(
             if model_hash:
                 model_response = dataclasses.replace(model_response, model_hash=model_hash)
 
-        from gateway.pipeline.normalizer import normalize_model_response
-        model_response = normalize_model_response(model_response, adapter.get_provider_name())
+        # Use unified SchemaIntelligence for streaming response normalization
+        _si = getattr(ctx, "schema_intelligence", None)
+        if _si:
+            model_response, _norm_report = _si.process_response(model_response, adapter.get_provider_name())
+            if _norm_report.changes:
+                logger.debug("Stream normalization: %s", "; ".join(_norm_report.changes))
+        else:
+            from gateway.pipeline.normalizer import normalize_model_response
+            model_response = normalize_model_response(model_response, adapter.get_provider_name())
 
         await _record_token_usage(
             model_response, settings.gateway_tenant_id,
@@ -1978,53 +1995,61 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     _test_name, _original_model, _resolved_model,
                 )
 
-    # ── Intent classification ────────────────────────────────────────────
-    # Single decision point: classify the request intent and store the
-    # result. All downstream decisions (tools, streaming, audit) use this.
+    # ── Unified Schema Intelligence ─────────────────────────────────────
+    # Single decision point: extract prompt, classify intent, and enrich
+    # metadata. Replaces scattered IntentClassifier + audit_classifier
+    # + _concat_messages with one coherent system.
     _body_meta = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
+
+    ctx = get_pipeline_context()
+    from gateway.classifier.unified import SchemaIntelligence, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG, NORMAL
+    _si = getattr(ctx, "schema_intelligence", None)
+    if _si is None:
+        _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
+                        and settings.mcp_servers_json)
+        _onnx_path = str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+        _si = SchemaIntelligence(onnx_model_path=_onnx_path, has_mcp_tools=_has_mcp)
+        ctx.schema_intelligence = _si
+
+    # Build metadata context for intent classification
     _intent_metadata = {**call.metadata}
     if isinstance(_body_meta, dict):
         _intent_metadata["_body_metadata"] = _body_meta
 
-    ctx = get_pipeline_context()
-    from gateway.classifier.intent import IntentClassifier, NORMAL, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG
-    _classifier = getattr(ctx, "intent_classifier", None)
-    if _classifier is None:
-        _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
-                        and settings.mcp_servers_json)
-        _onnx_path = str(Path(__file__).parent.parent / "classifier" / "model.onnx")
-        _classifier = IntentClassifier(onnx_model_path=_onnx_path, has_mcp_tools=_has_mcp)
-        ctx.intent_classifier = _classifier
+    # Extract messages from request body for prompt extraction
+    _body = body_dict if isinstance(body_dict, dict) else {}
+    _messages = _body.get("messages", [])
 
-    _intent = _classifier.classify(
-        prompt=call.prompt_text or "",
+    # process_request() does prompt extraction + intent classification in one pass
+    _si_enrichment = _si.process_request(
+        messages=_messages,
         metadata=_intent_metadata,
         model_id=call.model_id or "",
     )
-    extra["_intent"] = _intent.intent
-    extra["_intent_confidence"] = _intent.confidence
-    extra["_intent_tier"] = _intent.tier
-    extra["_intent_reason"] = _intent.reason
 
-    # Apply intent to call metadata for downstream pipeline decisions
-    _meta_updates: dict[str, Any] = {}
-    if _intent.intent == WEB_SEARCH:
-        _meta_updates["_gateway_web_search"] = True
-    elif _intent.intent == SYSTEM_TASK:
-        _meta_updates["_gateway_web_search"] = False
-    elif _intent.intent == REASONING:
-        if not call.metadata.get("_responses_api"):
-            _meta_updates["_responses_api"] = True
-    else:
-        # normal, rag, mcp_tools — ensure web search is off unless MCP
-        if call.metadata.get("_gateway_web_search") and _intent.intent != MCP_TOOLS:
-            _meta_updates["_gateway_web_search"] = False
+    # Override prompt_text with the extracted user question (THE KEY FIX)
+    # _concat_messages in adapters joins ALL messages — we replace that
+    # with just the actual question the user asked.
+    _user_question = _si_enrichment.get("user_question", "")
+    if _user_question:
+        call = dataclasses.replace(call, prompt_text=_user_question)
 
-    # Merge intent result + chat_id into call metadata (after classifier, before pipeline)
-    _meta_updates["_intent"] = _intent.intent
-    _meta_updates["_intent_confidence"] = _intent.confidence
-    _meta_updates["_intent_tier"] = _intent.tier
-    _meta_updates["_intent_reason"] = _intent.reason
+    # Update walacor_audit with better prompt extraction data
+    _existing_audit = extra.get("walacor_audit", {})
+    _existing_audit["user_question"] = _si_enrichment.get("user_question", _existing_audit.get("user_question", ""))
+    _existing_audit["conversation_context"] = _si_enrichment.get("conversation_context", "")
+    _existing_audit["conversation_turns"] = _si_enrichment.get("conversation_turns", 0)
+    _existing_audit["question_fingerprint"] = _si_enrichment.get("question_fingerprint", "")
+    _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "")
+    _existing_audit["has_rag_context"] = _si_enrichment.get("has_rag_context", _existing_audit.get("has_rag_context", False))
+    _existing_audit["has_files"] = _si_enrichment.get("has_files", _existing_audit.get("has_files", False))
+    extra["walacor_audit"] = _existing_audit
+
+    # Merge intent + routing into call metadata
+    _meta_updates: dict[str, Any] = {
+        k: v for k, v in _si_enrichment.items()
+        if k.startswith("_") or k in ("chat_id", "message_id")
+    }
     if isinstance(_body_meta, dict):
         if _body_meta.get("chat_id"):
             _meta_updates["chat_id"] = _body_meta["chat_id"]
@@ -2034,9 +2059,13 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
 
     logger.info(
-        "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s",
-        _intent.intent, _intent.confidence, _intent.tier, _intent.reason,
+        "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s prompt=%d chars",
+        _si_enrichment.get("_intent", "unknown"),
+        _si_enrichment.get("_intent_confidence", 0.0),
+        _si_enrichment.get("_intent_tier", ""),
+        _si_enrichment.get("_intent_reason", ""),
         call.model_id,
+        len(_user_question),
     )
     provider = adapter.get_provider_name()
     model = call.model_id or "unknown"
@@ -2241,9 +2270,16 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             _record_model_capability(call.model_id, supports_tools=True)
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
-    from gateway.pipeline.normalizer import normalize_model_response
+    # Use unified SchemaIntelligence for response normalization
+    _si = getattr(ctx, "schema_intelligence", None)
     _pre_norm_content = model_response.content
-    model_response = normalize_model_response(model_response, provider)
+    if _si:
+        model_response, _norm_report = _si.process_response(model_response, provider)
+        if _norm_report.changes:
+            logger.debug("Normalization: %s", "; ".join(_norm_report.changes))
+    else:
+        from gateway.pipeline.normalizer import normalize_model_response
+        model_response = normalize_model_response(model_response, provider)
     # If normalizer changed content (e.g. thinking fallback for qwen3), rebuild the
     # client response body so the user sees the actual content, not the raw empty string.
     if model_response.content and model_response.content != _pre_norm_content and http_response.status_code == 200:
