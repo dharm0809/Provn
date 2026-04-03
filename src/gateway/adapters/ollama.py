@@ -135,7 +135,7 @@ class OllamaAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list, data)
 
         # OpenAI-standard inference params
         params = _extract_inference_params(data)
