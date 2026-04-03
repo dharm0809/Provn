@@ -226,7 +226,21 @@ class WalacorClient:
         elif fm:
             meta = {"file_metadata": fm}
         if meta:
-            data["metadata_json"] = json.dumps(meta)
+            # Strip bulky OpenWebUI-injected fields that bloat metadata_json
+            for _strip_key in ("features", "tool_ids", "files", "variables",
+                               "params", "knowledge", "citations"):
+                meta.pop(_strip_key, None)
+            raw = json.dumps(meta)
+            # Walacor schema field limit — truncate to prevent write rejection
+            if len(raw) > 4000:
+                # Keep essential audit fields, drop the rest
+                _keep = {"session_id", "prompt_id", "client_context", "request_type",
+                         "user", "identity_source", "walacor_audit", "_intent",
+                         "_intent_confidence", "_intent_tier", "_intent_reason",
+                         "chat_id", "user_email", "user_name"}
+                meta = {k: v for k, v in meta.items() if k in _keep}
+                raw = json.dumps(meta)
+            data["metadata_json"] = raw
         # Strip fields not in the Walacor schema (timings, cache_hit, etc.)
         data = {k: v for k, v in data.items()
                 if v is not None and k in self._EXECUTION_SCHEMA_FIELDS}

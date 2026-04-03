@@ -66,46 +66,46 @@ class Filter:
         """Pre-LLM call: enrich request with audit metadata for the Gateway."""
 
         user = __user__ or {}
-        metadata = __metadata__ or body.get("metadata", {})
+        metadata = __metadata__ or {}
         gateway_url = self.valves.gateway_url.rstrip("/")
 
-        # ── 1. Inject identity into request metadata ──────────────────────
-        # The Gateway reads these from the request body's metadata or headers.
+        # ── 1. Inject identity via HTTP headers ──────────────────────────
+        # OpenWebUI 0.8+ forwards __metadata__["headers"] as HTTP headers
+        # to the downstream API. body.metadata is stripped before forwarding,
+        # so we MUST use headers for data the Gateway needs to see.
         if self.valves.inject_headers:
+            if not isinstance(metadata.get("headers"), dict):
+                metadata["headers"] = {}
+            h = metadata["headers"]
+
+            # Session identity — chat_id becomes X-Session-Id for the Gateway
+            chat_id = __chat_id__ or metadata.get("chat_id", "")
+            if chat_id:
+                h["X-Session-Id"] = chat_id
+                h["X-OpenWebUI-Chat-Id"] = chat_id
+
+            # User identity
+            h["X-User-Id"] = user.get("email") or user.get("name") or user.get("id") or ""
+            h["X-User-Email"] = user.get("email", "")
+            h["X-User-Name"] = user.get("name", "")
+            h["X-User-Roles"] = user.get("role", "")
+
+            if __message_id__:
+                h["X-OpenWebUI-Message-Id"] = __message_id__
+
+            # File count for the Gateway to know files are attached
+            files = metadata.get("files") or body.get("files") or []
+            file_count = len([f for f in files if isinstance(f, dict)])
+            if file_count > 0:
+                h["X-OpenWebUI-File-Count"] = str(file_count)
+
+            # Also put minimal metadata in body for backward compat
             if "metadata" not in body:
                 body["metadata"] = {}
-            m = body["metadata"]
-            m["user_id"] = user.get("id", "")
-            m["user_email"] = user.get("email", "")
-            m["user_name"] = user.get("name", "")
-            m["user_role"] = user.get("role", "")
-            m["chat_id"] = __chat_id__ or metadata.get("chat_id", "")
-            m["message_id"] = __message_id__ or metadata.get("message_id", "")
-            m["session_id"] = metadata.get("session_id", "")
-
-            # Files attached to this request
-            files = metadata.get("files") or body.get("files") or []
-            if files:
-                m["files"] = [
-                    {
-                        "id": f.get("id", ""),
-                        "name": f.get("name", f.get("filename", "")),
-                        "type": f.get("type", ""),
-                        "content_type": f.get("content_type", ""),
-                    }
-                    for f in files
-                    if isinstance(f, dict)
-                ]
-
-            # Features enabled for this chat
-            features = metadata.get("features", {})
-            if features:
-                m["features"] = features
-
-            # Tool IDs enabled
-            tool_ids = metadata.get("tool_ids")
-            if tool_ids:
-                m["tool_ids"] = tool_ids
+            body["metadata"]["chat_id"] = chat_id
+            body["metadata"]["user_id"] = user.get("id", "")
+            body["metadata"]["user_email"] = user.get("email", "")
+            body["metadata"]["user_name"] = user.get("name", "")
 
         # ── 2. Notify gateway about attached files ────────────────────────
         # Sends file metadata + hash to /v1/attachments/notify so the gateway
