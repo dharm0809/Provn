@@ -71,6 +71,24 @@ export function dispositionLabel(d) {
   return d.replace(/_/g, ' ').toUpperCase();
 }
 
+/** Readable labels for summary strips (avoid ALL CAPS like `ERROR PARSE` being misread as “parse error”). */
+export function dispositionSummaryLabel(d) {
+  if (!d) return '—';
+  const known = {
+    allowed: 'Allowed',
+    forwarded: 'Forwarded',
+    denied_auth: 'Denied · auth',
+    denied_policy: 'Denied · policy',
+    denied_attestation: 'Denied · attestation',
+    error_parse: 'Rejected · invalid JSON body',
+    error_provider: 'Error · upstream provider',
+  };
+  if (known[d]) return known[d];
+  if (d.startsWith('denied_')) return `Denied · ${d.slice(7).replace(/_/g, ' ')}`;
+  if (d.startsWith('error_')) return `Error · ${d.slice(6).replace(/_/g, ' ')}`;
+  return d.replace(/_/g, ' ');
+}
+
 export function policyBadgeClass(result) {
   if (!result) return 'badge-muted';
   if (result === 'pass') return 'badge-pass';

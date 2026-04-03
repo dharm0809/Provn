@@ -24,8 +24,14 @@ export async function getMetrics() {
   return resp.text();
 }
 
-export async function getSessions(limit = 50, offset = 0) {
-  return fetchJSON(`${API}/sessions?limit=${limit}&offset=${offset}`);
+export async function getSessions(limit = 50, offset = 0, opts = {}) {
+  const sp = new URLSearchParams();
+  sp.set('limit', String(limit));
+  sp.set('offset', String(offset));
+  if (opts.q != null && String(opts.q).trim()) sp.set('q', String(opts.q).trim());
+  if (opts.sort) sp.set('sort', opts.sort);
+  if (opts.order) sp.set('order', opts.order);
+  return fetchJSON(`${API}/sessions?${sp.toString()}`);
 }
 
 export async function getSession(sessionId) {
@@ -36,8 +42,14 @@ export async function getExecution(executionId) {
   return fetchJSON(`${API}/executions/${executionId}`);
 }
 
-export async function getAttempts(limit = 100, offset = 0) {
-  return fetchJSON(`${API}/attempts?limit=${limit}&offset=${offset}`);
+export async function getAttempts(limit = 100, offset = 0, opts = {}) {
+  const sp = new URLSearchParams();
+  sp.set('limit', String(limit));
+  sp.set('offset', String(offset));
+  if (opts.q != null && String(opts.q).trim()) sp.set('q', String(opts.q).trim());
+  if (opts.sort) sp.set('sort', opts.sort);
+  if (opts.order) sp.set('order', opts.order);
+  return fetchJSON(`${API}/attempts?${sp.toString()}`);
 }
 
 export async function getTokenLatency(range) {
