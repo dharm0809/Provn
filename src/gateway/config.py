@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     wal_max_age_hours: float = Field(default=72.0, description="Max WAL record age hours before action")
     wal_high_water_mark: int = Field(default=10000, description="Max undelivered records before rejecting new requests (enforced mode)")
     max_stream_buffer_bytes: int = Field(default=10_485_760, description="Max stream buffer for hashing (10MB)")
-    wal_batch_enabled: bool = Field(default=False, description="Enable group commit batching for WAL writes")
+    wal_batch_enabled: bool = Field(default=True, description="Enable group commit batching for WAL writes")
     wal_batch_flush_ms: int = Field(default=10, description="Max flush delay in milliseconds")
     wal_batch_max_size: int = Field(default=50, description="Max records per batch before immediate flush")
 
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # Phase 10: Response policy / content analysis
     response_policy_enabled: bool = Field(default=True, description="Enable post-inference content analysis")
     pii_detection_enabled: bool = Field(default=True, description="Enable built-in PII detector (walacor.pii.v1)")
-    toxicity_detection_enabled: bool = Field(default=False, description="Enable built-in toxicity detector (walacor.toxicity.v1)")
+    toxicity_detection_enabled: bool = Field(default=True, description="Enable built-in toxicity detector (walacor.toxicity.v1)")
     toxicity_deny_terms: str = Field(default="", description="Comma-separated extra deny-list terms for toxicity detector")
 
     # Stage B.7: Parallel content analysis
@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     )
 
     # System task filtering: skip audit for OpenWebUI auto-generated requests (tags, suggestions, titles)
-    skip_system_task_audit: bool = Field(default=True, description="Skip audit records for system-generated requests (tag/title/suggestion generation)")
+    skip_system_task_audit: bool = Field(default=False, description="Skip audit records for system-generated requests (tag/title/suggestion generation)")
 
     # Multimodal audit: attachment tracking
     attachment_tracking_enabled: bool = Field(default=True, description="Track file/image metadata in execution records")
@@ -153,7 +153,7 @@ class Settings(BaseSettings):
 
     # B.8: DLP data classification
     dlp_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable DLP data classification for financial, health, secrets, and infrastructure data",
     )
     dlp_categories: str = Field(
@@ -204,7 +204,7 @@ class Settings(BaseSettings):
     session_chain_ttl: int = Field(default=3600, description="Session state TTL seconds (evict inactive sessions)")
 
     # Phase 11: Adaptive concurrency limiting (Gradient2)
-    adaptive_concurrency_enabled: bool = Field(default=False, description="Enable Gradient2 adaptive concurrency limiting")
+    adaptive_concurrency_enabled: bool = Field(default=True, description="Enable Gradient2 adaptive concurrency limiting")
     adaptive_concurrency_min: int = Field(default=5, description="Min concurrency limit per provider")
     adaptive_concurrency_max: int = Field(default=100, description="Max concurrency limit per provider")
 
@@ -541,7 +541,7 @@ class Settings(BaseSettings):
     record_signing_key_path: str = Field(default="", description="Path to Ed25519 private key PEM file")
 
     # Phase 24: Periodic Merkle tree checkpoints
-    merkle_checkpoint_enabled: bool = Field(default=False, description="Enable periodic Merkle tree checkpoints for session chains")
+    merkle_checkpoint_enabled: bool = Field(default=True, description="Enable periodic Merkle tree checkpoints for session chains")
     merkle_checkpoint_interval_seconds: int = Field(default=3600, description="Seconds between Merkle tree checkpoint builds")
 
     # Phase 25: Transparency log publishing
@@ -550,7 +550,7 @@ class Settings(BaseSettings):
 
     # ── B.4: Semantic caching (exact-match tier) ──────────────────────────────
     semantic_cache_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Cache LLM responses for identical prompts (exact-match SHA-256 key)",
     )
     semantic_cache_ttl: int = Field(
