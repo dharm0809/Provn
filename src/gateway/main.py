@@ -75,6 +75,7 @@ from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
 from gateway.openwebui.status_api import openwebui_status
 from gateway.openwebui.events_api import openwebui_events_receive, openwebui_events_list
+from gateway.ollama_proxy import ollama_api_tags, ollama_api_ps, ollama_api_version, ollama_api_show
 
 try:
     import uvloop
@@ -165,12 +166,12 @@ async def body_size_middleware(request: Request, call_next):
 _ip_limiter = IPRateLimiter()
 
 
-async def api_key_middleware(request: Request, call_next):
+async def api_key_middleware(request: Request, call_next):  # noqa: C901
     """When WALACOR_GATEWAY_API_KEYS is set, require valid API key on proxy routes.
 
     Supports auth_mode: 'api_key' (default), 'jwt', or 'both'.
     """
-    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage/", "/v1/lineage/", "/v1/compliance")):
+    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage/", "/v1/lineage/", "/v1/compliance", "/v1/openwebui/", "/api/")):
         return await call_next(request)
 
     # Pre-auth per-IP rate limiting (before any auth check)
@@ -1323,6 +1324,11 @@ def create_app() -> Starlette:
         Route("/v1/openwebui/status", openwebui_status, methods=["GET"]),
         Route("/v1/openwebui/events", openwebui_events_receive, methods=["POST"]),
         Route("/v1/openwebui/events", openwebui_events_list, methods=["GET"]),
+        # Native Ollama API proxy (OpenWebUI polls these when added as Ollama connection)
+        Route("/api/tags", ollama_api_tags, methods=["GET"]),
+        Route("/api/ps", ollama_api_ps, methods=["GET"]),
+        Route("/api/version", ollama_api_version, methods=["GET"]),
+        Route("/api/show", ollama_api_show, methods=["POST"]),
         # Models API (OpenAI-compatible)
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
