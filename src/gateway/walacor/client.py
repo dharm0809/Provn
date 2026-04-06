@@ -198,8 +198,11 @@ class WalacorClient:
         "thinking_content", "latency_ms", "prompt_tokens", "completion_tokens",
         "total_tokens", "cache_hit", "cached_tokens", "cache_creation_tokens",
         "retry_of", "variant_id",
-        # Session chain integrity fields
-        "sequence_number", "record_hash", "previous_record_hash",
+        # NOTE: sequence_number, record_hash, previous_record_hash are in the
+        # local WAL but NOT in the Walacor sandbox schema (ETId 9000011).
+        # Adding them here causes Walacor to reject writes with
+        # "This field is not defined in schema". Keep them WAL-only until
+        # the Walacor admin adds these columns to the schema.
     })
 
     async def write_execution(self, record: ExecutionRecord | dict[str, Any]) -> None:
