@@ -169,15 +169,22 @@ class WalacorLineageReader:
         except Exception:
             return {}
 
-        # Group by session, pick the first non-system-task record
+        # Group by session: use last user question, but OR-merge boolean flags
         result: dict[str, dict] = {}
         for r in rows:
             sid = r.get("session_id")
-            if not sid or sid in result:
+            if not sid:
                 continue
             meta = self._parse_session_metadata(r.get("metadata_json"))
-            if meta.get("user_question"):
+            if not meta.get("user_question"):
+                continue
+            if sid not in result:
                 result[sid] = meta
+            else:
+                # Merge: keep latest question, OR boolean flags
+                for flag in ("has_rag_context", "has_files", "has_images"):
+                    if meta.get(flag):
+                        result[sid][flag] = True
         return result
 
     async def _get_session_tool_indicators(self, session_ids: list[str]) -> dict[str, dict]:
