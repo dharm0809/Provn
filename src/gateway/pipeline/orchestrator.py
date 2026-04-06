@@ -2304,6 +2304,59 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             model_response = normalize_model_response(model_response, provider)
     except Exception as _norm_err:
         logger.error("Response normalization failed (non-fatal): %s", _norm_err)
+
+    # ── SchemaMapper ML cross-validation ─────────────────────────────
+    # Run the ONNX schema mapper on the raw response to cross-validate
+    # adapter parsing and capture overflow fields the adapter missed.
+    _schema_mapper = getattr(ctx, "schema_mapper", None)
+    if _schema_mapper is None:
+        try:
+            from gateway.schema.mapper import SchemaMapper
+            _schema_mapper = SchemaMapper()
+            ctx.schema_mapper = _schema_mapper
+        except Exception as _sm_init_err:
+            logger.debug("SchemaMapper init failed (non-fatal): %s", _sm_init_err)
+    if _schema_mapper and http_response.status_code < 400:
+        try:
+            _raw_resp = json.loads(http_response.body)
+            _canonical = _schema_mapper.map_response(_raw_resp)
+
+            # Cross-validate: if adapter found no usage but ML did, enrich
+            _adapter_usage = model_response.usage or {}
+            if not _adapter_usage.get("prompt_tokens") and _canonical.usage.prompt_tokens:
+                _adapter_usage = dict(_adapter_usage)
+                _adapter_usage["prompt_tokens"] = _canonical.usage.prompt_tokens
+                _adapter_usage["completion_tokens"] = _canonical.usage.completion_tokens
+                _adapter_usage["total_tokens"] = _canonical.usage.total_tokens
+                model_response = dataclasses.replace(model_response, usage=_adapter_usage)
+                logger.info("SchemaMapper enriched missing token usage from ML classification")
+
+            # If adapter found no content but ML did (edge case)
+            if not model_response.content and _canonical.content:
+                model_response = dataclasses.replace(model_response, content=_canonical.content)
+                logger.info("SchemaMapper recovered content from ML classification")
+
+            # If adapter found no thinking_content but ML did
+            if not model_response.thinking_content and _canonical.thinking_content:
+                model_response = dataclasses.replace(model_response, thinking_content=_canonical.thinking_content)
+                logger.info("SchemaMapper recovered thinking_content from ML classification")
+
+            # Store ML mapping metadata for audit trail
+            _mapping_meta = {
+                "schema_mapper_confidence": round(_canonical._mapping_confidence, 3),
+                "schema_mapper_mapped": len(_canonical._mapped_fields),
+                "schema_mapper_unmapped": len(_canonical._unmapped_fields),
+            }
+            if _canonical.overflow:
+                _mapping_meta["schema_mapper_overflow_keys"] = list(_canonical.overflow.keys())[:20]
+            if _canonical.timing:
+                _mapping_meta["schema_mapper_timing"] = dataclasses.asdict(_canonical.timing)
+            if _canonical.citations:
+                _mapping_meta["schema_mapper_citations"] = len(_canonical.citations)
+
+            call = dataclasses.replace(call, metadata={**call.metadata, **_mapping_meta})
+        except Exception as _sm_err:
+            logger.debug("SchemaMapper cross-validation failed (non-fatal): %s", _sm_err)
     # If normalizer changed content (e.g. thinking fallback for qwen3), rebuild the
     # client response body so the user sees the actual content, not the raw empty string.
     if model_response.content and model_response.content != _pre_norm_content and http_response.status_code == 200:

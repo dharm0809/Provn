@@ -97,8 +97,67 @@ class SchemaMapper:
         # 2. Classify each field
         classifications = self._classify_fields(fields)
 
-        # 3. Assemble canonical response
+        # 3. Post-process: path-name safety net for UNKNOWN classifications
+        classifications = self._apply_path_fallbacks(fields, classifications)
+
+        # 4. Assemble canonical response
         return self._assemble(fields, classifications, raw)
+
+    # Path-name patterns that strongly indicate a canonical field.
+    # Used as safety net when ONNX says UNKNOWN but the path is obvious.
+    _PATH_FALLBACK_RULES: list[tuple[list[str], str, str]] = [
+        # (path must contain ALL of these tokens, leaf key must match, → label)
+        (["content"], "content", "content"),
+        (["text"], "text", "content"),
+        (["generated"], "generated_text", "content"),
+        (["output"], "outputText", "content"),
+        (["output"], "output", "content"),
+        (["reasoning"], "reasoning_content", "thinking_content"),
+        (["reasoning"], "reasoning", "thinking_content"),
+        (["thinking"], "thinking", "thinking_content"),
+        (["tool_plan"], "tool_plan", "thinking_content"),
+        (["finish"], "finish_reason", "finish_reason"),
+        (["stop"], "stop_reason", "finish_reason"),
+        (["done"], "done_reason", "finish_reason"),
+        (["completion"], "completionReason", "finish_reason"),
+        (["status"], "status", "finish_reason"),
+        (["prompt"], "prompt_tokens", "prompt_tokens"),
+        (["input"], "input_tokens", "prompt_tokens"),
+        (["prompt"], "promptTokenCount", "prompt_tokens"),
+        (["prompt"], "prompt_eval_count", "prompt_tokens"),
+        (["input"], "inputTextTokenCount", "prompt_tokens"),
+        (["completion"], "completion_tokens", "completion_tokens"),
+        (["output"], "output_tokens", "completion_tokens"),
+        (["candidates"], "candidatesTokenCount", "completion_tokens"),
+        (["eval"], "eval_count", "completion_tokens"),
+        (["token"], "tokenCount", "completion_tokens"),
+        (["generated"], "generated_tokens", "completion_tokens"),
+        (["total"], "total_tokens", "total_tokens"),
+        (["total"], "totalTokenCount", "total_tokens"),
+        (["cache"], "cached_tokens", "cached_tokens"),
+        (["cache", "read"], "cache_read_input_tokens", "cached_tokens"),
+        (["cache", "hit"], "prompt_cache_hit_tokens", "cached_tokens"),
+        (["cache", "creation"], "cache_creation_input_tokens", "cache_creation_tokens"),
+    ]
+
+    def _apply_path_fallbacks(self, fields: list[FlatField],
+                               classifications: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        """Safety net: reclassify UNKNOWN fields when path name is obvious."""
+        result = list(classifications)
+        for i, (f, (label, conf)) in enumerate(zip(fields, classifications)):
+            if label != "UNKNOWN":
+                continue
+            # Skip structural types — they're correctly UNKNOWN
+            if f.value_type in ("object", "array"):
+                continue
+            key_lower = f.key.lower()
+            path_lower = f.path.lower()
+            for path_tokens, leaf_match, target_label in self._PATH_FALLBACK_RULES:
+                if key_lower == leaf_match.lower() or f.key == leaf_match:
+                    if all(tok in path_lower for tok in path_tokens):
+                        result[i] = (target_label, 0.75)  # Lower confidence than ONNX
+                        break
+        return result
 
     def _classify_fields(self, fields: list[FlatField]) -> list[tuple[str, float]]:
         """Classify each field using ONNX model or heuristic fallback.
