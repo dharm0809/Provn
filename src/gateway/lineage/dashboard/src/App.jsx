@@ -238,10 +238,10 @@ export default function App() {
     <div className="app-layout">
       {/* ── Sidebar ── */}
       <aside className={`sidebar${sidebarOpen ? ' expanded' : ''}`}>
-        <div className="sidebar-brand" onClick={() => navigate('overview')} title="Walacor Lineage">
+        <div className="sidebar-brand" onClick={() => navigate('overview')} title="TruzenAI Lineage">
           <span className="sidebar-diamond">◆</span>
           <div className="sidebar-brand-text">
-            <span className="sidebar-brand-name">WALACOR</span>
+            <span className="sidebar-brand-name">TRUZEN AI</span>
             <span className="sidebar-brand-sub">LINEAGE</span>
           </div>
         </div>
