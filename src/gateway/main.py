@@ -1139,6 +1139,13 @@ async def on_startup() -> None:
             logger.warning("SchemaMapper init failed (non-fatal): %s", e)
 
         try:
+            from gateway.intelligence.consistency import ConsistencyTracker
+            ctx.consistency_tracker = ConsistencyTracker()
+            logger.info("Consistency tracker initialized (AuditLLM passive mode)")
+        except Exception as e:
+            logger.warning("Consistency tracker init failed (non-fatal): %s", e)
+
+        try:
             from gateway.schema.anomaly import AnomalyDetector
             ctx.anomaly_detector = AnomalyDetector()
             logger.info("Anomaly detector initialized")
@@ -1163,6 +1170,10 @@ async def on_startup() -> None:
                 )
                 ctx.intelligence_worker_task = asyncio.create_task(ctx.intelligence_worker.run())
                 logger.info("Intelligence worker started (ollama=%s)", _ollama_url)
+
+                # AuditLLM probe generator for active consistency testing
+                from gateway.intelligence.consistency import ProbeGenerator
+                ctx.probe_generator = ProbeGenerator(ollama_url=_ollama_url)
             except Exception as e:
                 logger.warning("Intelligence worker init failed (non-fatal): %s", e)
 
