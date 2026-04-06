@@ -96,14 +96,19 @@ class WalacorLineageReader:
         pipeline.extend([{"$skip": offset}, {"$limit": limit}])
         rows = await self._client.query_complex(self._exec_etid, pipeline)
 
-        # Extract session IDs for tool event lookup
+        # Extract session IDs for tool event + user-record metadata lookup
         session_ids = [r.get("_id") or r.get("session_id") for r in rows if r.get("_id") or r.get("session_id")]
         tool_map = await self._get_session_tool_indicators(session_ids) if session_ids else {}
+        # For sessions where $last metadata is a system task, fetch user-record metadata
+        user_meta_map = await self._get_user_record_metadata(session_ids) if session_ids else {}
 
         results = []
         for r in rows:
             sid = r.get("_id") or r.get("session_id")
             meta = self._parse_session_metadata(r.get("metadata_json"))
+            # If last record was system task, use user-record metadata instead
+            if not meta.get("user_question") and sid in user_meta_map:
+                meta.update(user_meta_map[sid])
             tools = tool_map.get(sid, {})
             results.append({
                 "session_id": sid,
@@ -149,6 +154,31 @@ class WalacorLineageReader:
             "request_type": "user_message" if is_system else request_type,
             "user_message_count": audit.get("conversation_turns", 0) or 0,
         }
+
+    async def _get_user_record_metadata(self, session_ids: list[str]) -> dict[str, dict]:
+        """For sessions where $last record is a system task, fetch the last user record's metadata."""
+        if not session_ids:
+            return {}
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"session_id": {"$in": session_ids}}},
+            {"$project": {"session_id": 1, "metadata_json": 1}},
+            {"$sort": {"timestamp": -1}},
+        ]
+        try:
+            rows = await self._client.query_complex(self._exec_etid, pipeline)
+        except Exception:
+            return {}
+
+        # Group by session, pick the first non-system-task record
+        result: dict[str, dict] = {}
+        for r in rows:
+            sid = r.get("session_id")
+            if not sid or sid in result:
+                continue
+            meta = self._parse_session_metadata(r.get("metadata_json"))
+            if meta.get("user_question"):
+                result[sid] = meta
+        return result
 
     async def _get_session_tool_indicators(self, session_ids: list[str]) -> dict[str, dict]:
         """Query tool events for a batch of sessions. Returns {session_id: {tool_names, tool_details}}.
