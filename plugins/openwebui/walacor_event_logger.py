@@ -36,7 +36,7 @@ class Filter:
             description="Filter execution order (lower = first)",
         )
         gateway_url: str = Field(
-            default=os.environ.get("WALACOR_GATEWAY_URL", "http://localhost:8002"),
+            default=os.environ.get("WALACOR_GATEWAY_URL", "http://localhost:8000"),
             description="Walacor Gateway base URL",
         )
         gateway_api_key: str = Field(

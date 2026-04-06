@@ -90,6 +90,7 @@ from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
 from gateway.openwebui.status_api import openwebui_status
 from gateway.openwebui.events_api import openwebui_events_receive, openwebui_events_list
+from gateway.ollama_proxy import ollama_api_tags, ollama_api_ps, ollama_api_version, ollama_api_show
 
 try:
     import uvloop
@@ -180,7 +181,7 @@ async def body_size_middleware(request: Request, call_next):
 _ip_limiter = IPRateLimiter()  # configured at startup via _configure_ip_limiter()
 
 
-async def api_key_middleware(request: Request, call_next):
+async def api_key_middleware(request: Request, call_next):  # noqa: C901
     """When WALACOR_GATEWAY_API_KEYS is set, require valid API key on proxy routes.
 
     Supports auth_mode: 'api_key' (default), 'jwt', or 'both'.
@@ -188,12 +189,15 @@ async def api_key_middleware(request: Request, call_next):
     _always_open = ("/", "/health", "/metrics", "/v1/models")
     # /lineage/ serves the static dashboard — must load so users can reach the AuthGate.
     # /v1/lineage/* and /v1/compliance expose JSON data; gated when lineage_auth_required=True.
+    # /v1/openwebui/* and /api/* are the OpenWebUI plugin + native Ollama proxy routes.
     _static_ui = request.url.path.startswith("/lineage/")
+    _plugin_paths = ("/v1/openwebui/", "/api/")
     _lineage_data_paths = ("/v1/lineage/", "/v1/compliance")
     _lineage_data_open = not get_settings().lineage_auth_required
     if (
         request.url.path in _always_open
         or _static_ui
+        or request.url.path.startswith(_plugin_paths)
         or (_lineage_data_open and request.url.path.startswith(_lineage_data_paths))
     ):
         return await call_next(request)
@@ -1987,6 +1991,11 @@ def create_app() -> Starlette:
         Route("/v1/openwebui/status", openwebui_status, methods=["GET"]),
         Route("/v1/openwebui/events", openwebui_events_receive, methods=["POST"]),
         Route("/v1/openwebui/events", openwebui_events_list, methods=["GET"]),
+        # Native Ollama API proxy (OpenWebUI polls these when added as Ollama connection)
+        Route("/api/tags", ollama_api_tags, methods=["GET"]),
+        Route("/api/ps", ollama_api_ps, methods=["GET"]),
+        Route("/api/version", ollama_api_version, methods=["GET"]),
+        Route("/api/show", ollama_api_show, methods=["POST"]),
         # Models API (OpenAI-compatible)
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
