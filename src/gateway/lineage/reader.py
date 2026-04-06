@@ -21,15 +21,36 @@ _SESSIONS_AGG_SUBQUERY = """
                     COUNT(*) AS record_count,
                     SUM(CASE WHEN COALESCE(
                         json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) = 'user_message' THEN 1 ELSE 0 END) AS user_message_count,
+                    ) NOT LIKE 'system_task%' THEN 1 ELSE 0 END) AS user_message_count,
                     MAX(timestamp) AS last_activity,
                     model_id AS model,
                     user,
-                    json_extract(record_json, '$.metadata.walacor_audit.user_question') AS user_question,
-                    json_extract(record_json, '$.metadata.walacor_audit.has_rag_context') AS has_rag_context,
-                    json_extract(record_json, '$.metadata.walacor_audit.has_files') AS has_files,
-                    json_extract(record_json, '$.metadata.walacor_audit.has_images') AS has_images,
-                    json_extract(record_json, '$.metadata.request_type') AS request_type
+                    -- Pick user_question from the last USER record, not system tasks
+                    MAX(CASE WHEN COALESCE(
+                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
+                    ) NOT LIKE 'system_task%'
+                    THEN json_extract(record_json, '$.metadata.walacor_audit.user_question')
+                    ELSE NULL END) AS user_question,
+                    MAX(CASE WHEN COALESCE(
+                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
+                    ) NOT LIKE 'system_task%'
+                    THEN json_extract(record_json, '$.metadata.walacor_audit.has_rag_context')
+                    ELSE NULL END) AS has_rag_context,
+                    MAX(CASE WHEN COALESCE(
+                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
+                    ) NOT LIKE 'system_task%'
+                    THEN json_extract(record_json, '$.metadata.walacor_audit.has_files')
+                    ELSE NULL END) AS has_files,
+                    MAX(CASE WHEN COALESCE(
+                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
+                    ) NOT LIKE 'system_task%'
+                    THEN json_extract(record_json, '$.metadata.walacor_audit.has_images')
+                    ELSE NULL END) AS has_images,
+                    MAX(CASE WHEN COALESCE(
+                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
+                    ) NOT LIKE 'system_task%'
+                    THEN json_extract(record_json, '$.metadata.request_type')
+                    ELSE NULL END) AS request_type
                 FROM wal_records
                 WHERE session_id IS NOT NULL
                   AND event_type = 'execution'
