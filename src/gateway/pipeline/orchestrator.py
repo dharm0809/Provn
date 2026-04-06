@@ -1741,6 +1741,32 @@ async def _build_and_write_record(
     if params.timings is not None:
         params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
 
+    # ── Consistency check (inline, < 1ms) ───────────────────────────
+    _consistency_tracker = getattr(ctx, "consistency_tracker", None)
+    if _consistency_tracker:
+        try:
+            _con_result = _consistency_tracker.check(
+                prompt=record.get("prompt_text", ""),
+                response=record.get("response_content", ""),
+                model_id=record.get("model_id", ""),
+                execution_id=record.get("execution_id", ""),
+                session_id=session_id or "",
+                user=record.get("user", ""),
+            )
+            if _con_result:
+                meta = record.get("metadata") or {}
+                meta["consistency_check"] = {
+                    "compared_with": _con_result.execution_id_a[:12],
+                    "prompt_similarity": _con_result.prompt_similarity,
+                    "response_similarity": _con_result.response_similarity,
+                    "consistent": _con_result.consistent,
+                }
+                if not _con_result.consistent:
+                    meta.setdefault("anomalies", []).append("consistency_flag")
+                record["metadata"] = meta
+        except Exception as _ct_err:
+            logger.debug("Consistency check failed (non-fatal): %s", _ct_err)
+
     # ── Anomaly detection (inline, < 2ms) ────────────────────────────
     _anomaly_detector = getattr(ctx, "anomaly_detector", None)
     if _anomaly_detector:
