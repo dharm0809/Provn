@@ -1131,6 +1131,42 @@ async def on_startup() -> None:
             from gateway.middleware.attachment_tracker import AttachmentNotificationCache
             ctx.attachment_cache = AttachmentNotificationCache()
             logger.info("Attachment tracking cache enabled")
+        # ── Schema Intelligence v2: SchemaMapper + Anomaly + Overflow + LLM Intelligence ──
+        try:
+            from gateway.schema.mapper import SchemaMapper
+            ctx.schema_mapper = SchemaMapper()
+            logger.info("SchemaMapper initialized (ONNX=%s)", ctx.schema_mapper._session is not None)
+        except Exception as e:
+            logger.warning("SchemaMapper init failed (non-fatal): %s", e)
+
+        try:
+            from gateway.schema.anomaly import AnomalyDetector
+            ctx.anomaly_detector = AnomalyDetector()
+            logger.info("Anomaly detector initialized")
+        except Exception as e:
+            logger.warning("Anomaly detector init failed (non-fatal): %s", e)
+
+        try:
+            from gateway.schema.overflow import FieldRegistry
+            ctx.field_registry = FieldRegistry()
+            logger.info("Field registry initialized")
+        except Exception as e:
+            logger.warning("Field registry init failed (non-fatal): %s", e)
+
+        # Background LLM intelligence worker (only if Ollama is configured)
+        if settings.gateway_provider == "ollama" or settings.provider_ollama_url:
+            try:
+                from gateway.intelligence.worker import IntelligenceWorker
+                _ollama_url = settings.provider_ollama_url or "http://localhost:11434"
+                ctx.intelligence_worker = IntelligenceWorker(
+                    ollama_url=_ollama_url,
+                    enabled=True,
+                )
+                ctx.intelligence_worker_task = asyncio.create_task(ctx.intelligence_worker.run())
+                logger.info("Intelligence worker started (ollama=%s)", _ollama_url)
+            except Exception as e:
+                logger.warning("Intelligence worker init failed (non-fatal): %s", e)
+
         logger.info(
             "Gateway config: tenant=%s provider=%s auth_mode=%s enforcement=%s "
             "tool_aware=%s web_search=%s rate_limit=%s",
@@ -1228,6 +1264,14 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"tool_registry.shutdown: {e}")
         ctx.tool_registry = None
+
+    # Stop intelligence worker
+    _intel_worker = getattr(ctx, "intelligence_worker", None)
+    if _intel_worker:
+        try:
+            await _intel_worker.stop()
+        except Exception as e:
+            errors.append(f"intelligence_worker.stop: {e}")
 
     if ctx.redis_client:
         try:
