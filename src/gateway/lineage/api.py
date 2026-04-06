@@ -145,6 +145,10 @@ def _enrich_execution_record(record: dict) -> dict:
     if not record.get("content_analysis") and meta.get("analyzer_decisions"):
         record["content_analysis"] = meta["analyzer_decisions"]
 
+    # Promote file_metadata from metadata to top level for dashboard
+    if not record.get("file_metadata") and meta.get("file_metadata"):
+        record["file_metadata"] = meta.pop("file_metadata")
+
     return record
 
 
