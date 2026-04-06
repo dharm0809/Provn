@@ -137,12 +137,16 @@ class WalacorLineageReader:
             return {}
 
         audit = meta.get("walacor_audit", {})
+        request_type = meta.get("request_type") or ""
+        # If the last record is a system task, don't use its question/flags
+        # (the real user question is in an earlier record)
+        is_system = request_type.startswith("system_task")
         return {
-            "user_question": audit.get("user_question") or None,
-            "has_rag_context": audit.get("has_rag_context", False),
-            "has_files": audit.get("has_files", False) or audit.get("file_count", 0) > 0,
-            "has_images": audit.get("has_images", False),
-            "request_type": meta.get("request_type"),
+            "user_question": None if is_system else (audit.get("user_question") or None),
+            "has_rag_context": False if is_system else audit.get("has_rag_context", False),
+            "has_files": False if is_system else (audit.get("has_files", False) or audit.get("file_count", 0) > 0),
+            "has_images": False if is_system else audit.get("has_images", False),
+            "request_type": "user_message" if is_system else request_type,
             "user_message_count": audit.get("conversation_turns", 0) or 0,
         }
 
