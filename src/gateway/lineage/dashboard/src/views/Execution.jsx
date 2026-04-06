@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getExecution, getTrace } from '../api';
-import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes, copyToClipboard } from '../utils';
+import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes, copyToClipboard, fileTypeInfo } from '../utils';
 import TraceWaterfall from '../components/TraceWaterfall';
 
 function CopyBtn({ text }) {
@@ -256,10 +256,10 @@ export default function Execution({ navigate, executionId, sessionId }) {
             📎 Attachments ({r.file_metadata.length})
           </div>
           {r.file_metadata.map((f, i) => {
-            const isImg = (f.mimetype || '').startsWith('image/');
+            const ft = fileTypeInfo(f.mimetype, f.filename);
             return (
               <div key={`file-${i}`} style={{ display: 'flex', gap: 14, padding: '12px 14px', background: 'var(--bg-hover)', borderRadius: 8, marginBottom: i < r.file_metadata.length - 1 ? 10 : 0, border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 32, lineHeight: 1, alignSelf: 'center' }}>{isImg ? '🖼️' : '📄'}</div>
+                <div style={{ fontSize: 32, lineHeight: 1, alignSelf: 'center' }}>{ft.icon}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)', marginBottom: 6 }}>
                     {f.filename || 'unknown'}
@@ -267,7 +267,7 @@ export default function Execution({ navigate, executionId, sessionId }) {
                   <div className="detail-grid" style={{ gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 }}>
                     <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Type</span>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span className={`badge ${isImg ? 'badge-blue' : 'badge-file'}`} style={{ fontSize: 11 }}>{isImg ? '📷 Image' : '📄 Document'}</span>
+                      <span className={`badge ${ft.badgeClass}`} style={{ fontSize: 11 }}>{ft.icon} {ft.label}</span>
                       <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{f.mimetype || 'unknown'}</span>
                     </span>
                     <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Size</span>

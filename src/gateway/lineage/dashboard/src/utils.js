@@ -134,3 +134,30 @@ export function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
+
+/** Returns { icon, label, badgeClass } for a file based on mimetype and filename. */
+export function fileTypeInfo(mimetype, filename) {
+  const mime = (mimetype || '').toLowerCase();
+  const ext = (filename || '').split('.').pop().toLowerCase();
+
+  if (mime.startsWith('image/'))                                    return { icon: '🖼️', label: 'Image',       badgeClass: 'badge-blue' };
+  if (mime === 'application/pdf' || ext === 'pdf')                  return { icon: '📕', label: 'PDF',         badgeClass: 'badge-file' };
+  if (mime.includes('spreadsheet') || mime.includes('csv')
+      || ext === 'csv' || ext === 'xlsx' || ext === 'xls')         return { icon: '📊', label: 'Spreadsheet', badgeClass: 'badge-file' };
+  if (mime.includes('word') || mime.includes('document')
+      || ext === 'docx' || ext === 'doc')                          return { icon: '📝', label: 'Document',    badgeClass: 'badge-file' };
+  if (mime.includes('presentation') || ext === 'pptx'
+      || ext === 'ppt')                                            return { icon: '📽️', label: 'Slides',      badgeClass: 'badge-file' };
+  if (mime.startsWith('text/') || ext === 'txt' || ext === 'md'
+      || ext === 'log')                                            return { icon: '📄', label: 'Text',        badgeClass: 'badge-muted' };
+  if (mime.includes('json') || ext === 'json')                     return { icon: '{ }', label: 'JSON',       badgeClass: 'badge-muted' };
+  if (mime.includes('xml') || ext === 'xml')                       return { icon: '📋', label: 'XML',         badgeClass: 'badge-muted' };
+  if (mime.startsWith('audio/'))                                    return { icon: '🎵', label: 'Audio',       badgeClass: 'badge-blue' };
+  if (mime.startsWith('video/'))                                    return { icon: '🎬', label: 'Video',       badgeClass: 'badge-blue' };
+  if (mime.includes('zip') || mime.includes('tar')
+      || mime.includes('gzip') || ext === 'zip' || ext === 'gz')   return { icon: '📦', label: 'Archive',     badgeClass: 'badge-muted' };
+  if (ext === 'py' || ext === 'js' || ext === 'ts' || ext === 'java'
+      || ext === 'c' || ext === 'cpp' || ext === 'go'
+      || ext === 'rs' || ext === 'rb' || ext === 'sh')             return { icon: '💻', label: 'Code',        badgeClass: 'badge-gold' };
+  return                                                             { icon: '📄', label: 'File',        badgeClass: 'badge-muted' };
+}
