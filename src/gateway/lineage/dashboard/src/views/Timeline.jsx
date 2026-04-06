@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { sha3_512 } from 'js-sha3';
 import { getSession, verifySession } from '../api';
-import { formatSessionId, displayModel, timeAgo, truncHash, getTokenCount, policyBadgeClass, copyToClipboard } from '../utils';
+import { formatSessionId, displayModel, timeAgo, truncHash, getTokenCount, policyBadgeClass, copyToClipboard, fileTypeInfo, formatBytes } from '../utils';
 
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
@@ -191,12 +191,12 @@ export default function Timeline({ navigate, sessionId }) {
                       return <span key={ti} className={`badge ${cls}`}>⚙ {t.tool_name || 'tool'}{suffix}</span>;
                     })}
                     {(r.file_metadata && r.file_metadata.length > 0) && r.file_metadata.map((f, fi) => {
-                      const isImg = (f.mimetype || '').startsWith('image/');
+                      const ft = fileTypeInfo(f.mimetype, f.filename);
                       return (
-                        <span key={fi} className={`badge ${isImg ? 'badge-blue' : 'badge-file'}`}
-                          title={`${f.filename}\n${f.mimetype} · ${f.size_bytes ? (f.size_bytes / 1024).toFixed(1) + ' KB' : '—'}\nSHA3: ${f.hash_sha3_512 || '—'}`}
+                        <span key={fi} className={`badge ${ft.badgeClass}`}
+                          title={`${f.filename}\n${ft.label} · ${f.mimetype} · ${f.size_bytes ? formatBytes(f.size_bytes) : '—'}\nSHA3: ${f.hash_sha3_512 || '—'}`}
                           style={{ cursor: 'default' }}>
-                          {isImg ? '📷' : '📄'} {f.filename || 'file'}
+                          {ft.icon} {f.filename || 'file'}
                         </span>
                       );
                     })}
@@ -217,15 +217,16 @@ export default function Timeline({ navigate, sessionId }) {
                   {r.file_metadata && r.file_metadata.length > 0 && (
                     <div style={{ marginTop: 8, padding: '8px 10px', background: 'var(--bg-hover)', borderRadius: 6, fontSize: 11 }}>
                       {r.file_metadata.map((f, fi) => {
-                        const isImg = (f.mimetype || '').startsWith('image/');
+                        const ft = fileTypeInfo(f.mimetype, f.filename);
                         return (
                           <div key={fi} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: fi < r.file_metadata.length - 1 ? 6 : 0 }}>
-                            <span style={{ fontSize: 16 }}>{isImg ? '🖼️' : '📄'}</span>
+                            <span style={{ fontSize: 16 }}>{ft.icon}</span>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{f.filename || 'unknown'}</div>
                               <div style={{ color: 'var(--text-muted)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
+                                <span className={`badge ${ft.badgeClass}`} style={{ fontSize: 10 }}>{ft.label}</span>
                                 <span>{f.mimetype || '—'}</span>
-                                {f.size_bytes > 0 && <span>{(f.size_bytes / 1024).toFixed(1)} KB</span>}
+                                {f.size_bytes > 0 && <span>{formatBytes(f.size_bytes)}</span>}
                                 <span style={{ textTransform: 'uppercase', fontSize: 10 }}>{f.source || 'upload'}</span>
                               </div>
                               {f.hash_sha3_512 && (
