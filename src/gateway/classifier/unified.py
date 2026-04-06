@@ -684,3 +684,57 @@ class SchemaIntelligence:
                 self._label_map = {i: l for i, l in enumerate(labels)}
         else:
             self._label_map = {i: l for i, l in enumerate(ALL_INTENTS)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STANDALONE VALIDATION FUNCTIONS — work without SchemaIntelligence instance
+# These are the last safety gate before permanent storage. They must ALWAYS
+# be callable, even if the ONNX model fails, the class fails to init, etc.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _standalone_validate(record: dict[str, Any], schema: dict[str, dict], record_type: str) -> tuple[dict[str, Any], ValidationReport]:
+    """Validate and coerce a record against schema. Standalone version."""
+    report = ValidationReport(record_type=record_type)
+    cleaned = dict(record)
+    for field_name, field_spec in schema.items():
+        value = cleaned.get(field_name)
+        expected_type = field_spec["type"]
+        required = field_spec["required"]
+        default = field_spec.get("default")
+        if value is None and (field_name not in cleaned or required):
+            if required:
+                report.issues.append(f"MISSING required: {field_name}")
+                cleaned[field_name] = default if default is not None else ""
+                report.defaults_applied += 1
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, expected_type):
+            try:
+                if expected_type == int:
+                    cleaned[field_name] = int(float(value)) if value else 0
+                elif expected_type == float:
+                    cleaned[field_name] = float(value) if value else 0.0
+                elif expected_type == str:
+                    cleaned[field_name] = str(value)
+                elif expected_type == bool:
+                    cleaned[field_name] = bool(value)
+                report.coercions += 1
+            except (ValueError, TypeError):
+                cleaned[field_name] = default
+    return cleaned, report
+
+
+def validate_execution(record: dict[str, Any]) -> tuple[dict[str, Any], ValidationReport]:
+    """Standalone execution schema validation — no class instance needed."""
+    return _standalone_validate(record, EXECUTION_SCHEMA, "execution")
+
+
+def validate_tool_event(record: dict[str, Any]) -> tuple[dict[str, Any], ValidationReport]:
+    """Standalone tool event schema validation."""
+    return _standalone_validate(record, TOOL_EVENT_SCHEMA, "tool_event")
+
+
+def validate_attempt(record: dict[str, Any]) -> tuple[dict[str, Any], ValidationReport]:
+    """Standalone attempt schema validation."""
+    return _standalone_validate(record, ATTEMPT_SCHEMA, "attempt")

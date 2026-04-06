@@ -713,10 +713,16 @@ async def _write_tool_events(
             analysis = await analyze_text(output_text, ctx.content_analyzers)
             if analysis:
                 record["content_analysis"] = analysis
-        # Schema validation before write
-        _si = getattr(ctx, "schema_intelligence", None)
-        if _si:
-            record, _ = _si.validate_tool_event(record)
+        # Schema validation ALWAYS runs before write
+        try:
+            _si = getattr(ctx, "schema_intelligence", None)
+            if _si:
+                record, _ = _si.validate_tool_event(record)
+            else:
+                from gateway.classifier.unified import validate_tool_event as _sv_te
+                record, _ = _sv_te(record)
+        except Exception as _val_err:
+            logger.error("Tool event schema validation failed: %s", _val_err)
         if ctx.storage:
             await ctx.storage.write_tool_event(record)
 
@@ -946,12 +952,19 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
 
 async def _store_execution(record, request: Request, ctx) -> None:
     """Validate schema then write execution record via storage router."""
-    # Schema validation: enforce types before Walacor write
-    _si = getattr(ctx, "schema_intelligence", None)
-    if _si:
-        record, _val_report = _si.validate_execution(record)
+    # Schema validation ALWAYS runs — this is the last gate before permanent storage.
+    # If SchemaIntelligence is unavailable, use standalone validation.
+    try:
+        _si = getattr(ctx, "schema_intelligence", None)
+        if _si:
+            record, _val_report = _si.validate_execution(record)
+        else:
+            from gateway.classifier.unified import validate_execution as _standalone_validate
+            record, _val_report = _standalone_validate(record)
         if _val_report.issues:
             logger.info("Execution schema: %d issues fixed before write", len(_val_report.issues))
+    except Exception as _val_err:
+        logger.error("Schema validation failed (writing anyway): %s", _val_err)
     eid = record["execution_id"]
     if ctx.storage:
         result = await ctx.storage.write_execution(record)
@@ -1010,11 +1023,14 @@ async def _after_stream_record(
                 model_response = dataclasses.replace(model_response, model_hash=model_hash)
 
         # Use unified SchemaIntelligence for streaming response normalization
-        _si = getattr(ctx, "schema_intelligence", None)
-        if _si:
-            model_response, _norm_report = _si.process_response(model_response, adapter.get_provider_name())
-            if _norm_report.changes:
-                logger.debug("Stream normalization: %s", "; ".join(_norm_report.changes))
+        try:
+            _si = getattr(ctx, "schema_intelligence", None)
+            if _si:
+                model_response, _norm_report = _si.process_response(model_response, adapter.get_provider_name())
+                if _norm_report.changes:
+                    logger.debug("Stream normalization: %s", "; ".join(_norm_report.changes))
+        except Exception as _norm_err:
+            logger.error("Stream normalization failed (non-fatal): %s", _norm_err)
         else:
             from gateway.pipeline.normalizer import normalize_model_response
             model_response = normalize_model_response(model_response, adapter.get_provider_name())
@@ -2021,11 +2037,16 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     _messages = _body.get("messages", [])
 
     # process_request() does prompt extraction + intent classification in one pass
-    _si_enrichment = _si.process_request(
-        messages=_messages,
-        metadata=_intent_metadata,
-        model_id=call.model_id or "",
-    )
+    # Wrapped in try/except — SI failure must NEVER block the request pipeline
+    _si_enrichment: dict[str, Any] = {}
+    try:
+        _si_enrichment = _si.process_request(
+            messages=_messages,
+            metadata=_intent_metadata,
+            model_id=call.model_id or "",
+        )
+    except Exception as _si_err:
+        logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
 
     # Override prompt_text with the extracted user question (THE KEY FIX)
     # _concat_messages in adapters joins ALL messages — we replace that
@@ -2040,7 +2061,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     _existing_audit["conversation_context"] = _si_enrichment.get("conversation_context", "")
     _existing_audit["conversation_turns"] = _si_enrichment.get("conversation_turns", 0)
     _existing_audit["question_fingerprint"] = _si_enrichment.get("question_fingerprint", "")
-    _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "")
+    _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "fallback")
     _existing_audit["has_rag_context"] = _si_enrichment.get("has_rag_context", _existing_audit.get("has_rag_context", False))
     _existing_audit["has_files"] = _si_enrichment.get("has_files", _existing_audit.get("has_files", False))
     extra["walacor_audit"] = _existing_audit
@@ -2273,13 +2294,16 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # Use unified SchemaIntelligence for response normalization
     _si = getattr(ctx, "schema_intelligence", None)
     _pre_norm_content = model_response.content
-    if _si:
-        model_response, _norm_report = _si.process_response(model_response, provider)
-        if _norm_report.changes:
-            logger.debug("Normalization: %s", "; ".join(_norm_report.changes))
-    else:
-        from gateway.pipeline.normalizer import normalize_model_response
-        model_response = normalize_model_response(model_response, provider)
+    try:
+        if _si:
+            model_response, _norm_report = _si.process_response(model_response, provider)
+            if _norm_report.changes:
+                logger.debug("Normalization: %s", "; ".join(_norm_report.changes))
+        else:
+            from gateway.pipeline.normalizer import normalize_model_response
+            model_response = normalize_model_response(model_response, provider)
+    except Exception as _norm_err:
+        logger.error("Response normalization failed (non-fatal): %s", _norm_err)
     # If normalizer changed content (e.g. thinking fallback for qwen3), rebuild the
     # client response body so the user sees the actual content, not the raw empty string.
     if model_response.content and model_response.content != _pre_norm_content and http_response.status_code == 200:
