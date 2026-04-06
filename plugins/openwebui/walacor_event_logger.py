@@ -36,7 +36,7 @@ class Filter:
             description="Filter execution order (lower = first)",
         )
         gateway_url: str = Field(
-            default=os.environ.get("WALACOR_GATEWAY_URL", "http://localhost:8002"),
+            default=os.environ.get("WALACOR_GATEWAY_URL", "http://localhost:8000"),
             description="Walacor Gateway base URL",
         )
         gateway_api_key: str = Field(
@@ -81,6 +81,13 @@ class Filter:
     ) -> dict:
         """Fires before the request is sent to the LLM.  Logs the full
         request context — user, messages, files, model, settings."""
+        # Debug: confirm plugin is firing
+        try:
+            with open("C:/Users/singh/OneDrive/Desktop/Gateway/Gateway/plugin_debug.log", "a") as f:
+                f.write(f"[INLET] {datetime.now(timezone.utc).isoformat()} gateway_url={self.valves.gateway_url} enabled={self.valves.enabled}\n")
+        except Exception:
+            pass
+
         if not self.valves.enabled:
             return body
 
