@@ -165,6 +165,44 @@ export default function Execution({ navigate, executionId, sessionId }) {
         )}
       </div>
 
+      {/* Attachments — shown inline between question and response */}
+      {(r.file_metadata && r.file_metadata.length > 0) && (
+        <div className="card">
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
+            📎 Attachments ({r.file_metadata.length})
+          </div>
+          {r.file_metadata.map((f, i) => {
+            const ft = fileTypeInfo(f.mimetype, f.filename);
+            return (
+              <div key={`file-${i}`} style={{ display: 'flex', gap: 14, padding: '12px 14px', background: 'var(--bg-hover)', borderRadius: 8, marginBottom: i < r.file_metadata.length - 1 ? 10 : 0, border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: 32, lineHeight: 1, alignSelf: 'center' }}>{ft.icon}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)', marginBottom: 6 }}>
+                    {f.filename || 'unknown'}
+                  </div>
+                  <div className="detail-grid" style={{ gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 }}>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Type</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span className={`badge ${ft.badgeClass}`} style={{ fontSize: 11 }}>{ft.icon} {ft.label}</span>
+                      <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{f.mimetype || 'unknown'}</span>
+                    </span>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Size</span>
+                    <span className="mono" style={{ color: 'var(--text-primary)' }}>{formatBytes(f.size_bytes)}</span>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Source</span>
+                    <span><span className="badge badge-muted" style={{ fontSize: 11 }}>{f.source || 'unknown'}</span></span>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>SHA3-512</span>
+                    <span className="copy-wrap">
+                      <span className="copy-text mono" style={{ fontSize: 11, color: 'var(--gold)', wordBreak: 'break-all' }}>{f.hash_sha3_512 || '—'}</span>
+                      <CopyBtn text={f.hash_sha3_512} />
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Response */}
       <div className="card">
         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Response</div>
@@ -243,44 +281,6 @@ export default function Execution({ navigate, executionId, sessionId }) {
                     </div>
                   </div>
                 )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Attachments */}
-      {(r.file_metadata && r.file_metadata.length > 0) && (
-        <div className="card">
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
-            📎 Attachments ({r.file_metadata.length})
-          </div>
-          {r.file_metadata.map((f, i) => {
-            const ft = fileTypeInfo(f.mimetype, f.filename);
-            return (
-              <div key={`file-${i}`} style={{ display: 'flex', gap: 14, padding: '12px 14px', background: 'var(--bg-hover)', borderRadius: 8, marginBottom: i < r.file_metadata.length - 1 ? 10 : 0, border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 32, lineHeight: 1, alignSelf: 'center' }}>{ft.icon}</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)', marginBottom: 6 }}>
-                    {f.filename || 'unknown'}
-                  </div>
-                  <div className="detail-grid" style={{ gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 }}>
-                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Type</span>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span className={`badge ${ft.badgeClass}`} style={{ fontSize: 11 }}>{ft.icon} {ft.label}</span>
-                      <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{f.mimetype || 'unknown'}</span>
-                    </span>
-                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Size</span>
-                    <span className="mono" style={{ color: 'var(--text-primary)' }}>{formatBytes(f.size_bytes)}</span>
-                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Source</span>
-                    <span><span className="badge badge-muted" style={{ fontSize: 11 }}>{f.source || 'unknown'}</span></span>
-                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>SHA3-512</span>
-                    <span className="copy-wrap">
-                      <span className="copy-text mono" style={{ fontSize: 11, color: 'var(--gold)', wordBreak: 'break-all' }}>{f.hash_sha3_512 || '—'}</span>
-                      <CopyBtn text={f.hash_sha3_512} />
-                    </span>
-                  </div>
-                </div>
               </div>
             );
           })}
