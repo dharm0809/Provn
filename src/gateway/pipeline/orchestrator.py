@@ -1740,6 +1740,39 @@ async def _build_and_write_record(
     record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
     if params.timings is not None:
         params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
+
+    # ── Anomaly detection (inline, < 2ms) ────────────────────────────
+    _anomaly_detector = getattr(ctx, "anomaly_detector", None)
+    if _anomaly_detector:
+        try:
+            _anomaly_report = _anomaly_detector.detect(record)
+            if _anomaly_report.to_list():
+                meta = record.get("metadata") or {}
+                meta["anomalies"] = _anomaly_report.to_list()
+                record["metadata"] = meta
+        except Exception as _ad_err:
+            logger.debug("Anomaly detection failed (non-fatal): %s", _ad_err)
+
+    # ── Self-healing overflow (capture unknown response fields) ──────
+    _schema_mapper = getattr(ctx, "schema_mapper", None)
+    _field_registry = getattr(ctx, "field_registry", None)
+    if _schema_mapper and _field_registry:
+        try:
+            _canonical = getattr(request.state, "_canonical_response", None)
+            if _canonical and _canonical.overflow:
+                from gateway.schema.overflow import build_overflow_envelope
+                _overflow_env = build_overflow_envelope(
+                    _canonical.overflow,
+                    provider=record.get("provider", "unknown"),
+                    registry=_field_registry,
+                )
+                if _overflow_env:
+                    meta = record.get("metadata") or {}
+                    meta["_overflow"] = _overflow_env
+                    record["metadata"] = meta
+        except Exception as _of_err:
+            logger.debug("Overflow capture failed (non-fatal): %s", _of_err)
+
     await _store_execution(record, request, ctx)
     # Expose governance metadata for response headers (Phase 23)
     request.state.walacor_chain_seq = record.get("sequence_number")
@@ -1781,6 +1814,27 @@ async def _build_and_write_record(
             await ctx.audit_exporter.export(record)
         except Exception:
             logger.debug("Audit exporter failed (non-critical)", exc_info=True)
+
+    # ── Background LLM intelligence (fire-and-forget, zero latency) ──
+    _intel_worker = getattr(ctx, "intelligence_worker", None)
+    if _intel_worker:
+        try:
+            from gateway.intelligence.worker import IntelligenceJob
+            _meta = record.get("metadata") or {}
+            _audit = _meta.get("walacor_audit") or {}
+            job = IntelligenceJob(
+                execution_id=record["execution_id"],
+                prompt_text=record.get("prompt_text") or "",
+                response_content=record.get("response_content") or "",
+                model_id=record.get("model_id") or "",
+                session_id=session_id or "",
+                intent=_meta.get("_intent", "normal"),
+                intent_confidence=_meta.get("_intent_confidence", 1.0),
+                conversation_turns=_audit.get("conversation_turns", 1),
+            )
+            await _intel_worker.enqueue(job)
+        except Exception:
+            pass  # Truly fire-and-forget
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -2340,6 +2394,9 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             if not model_response.thinking_content and _canonical.thinking_content:
                 model_response = dataclasses.replace(model_response, thinking_content=_canonical.thinking_content)
                 logger.info("SchemaMapper recovered thinking_content from ML classification")
+
+            # Store canonical response for overflow capture in _build_and_write_record
+            request.state._canonical_response = _canonical
 
             # Store ML mapping metadata for audit trail
             _mapping_meta = {
