@@ -479,6 +479,83 @@ def _mutate_value(value):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+_VARIED_CONTENT = [
+    # Very short (1-3 words)
+    "Yes.", "No.", "42", "Hello!", "OK", "Paris.", "True",
+    "I agree.", "Done.", "Thanks!",
+    # Short (5-15 words)
+    "The answer is 42.", "Hello! How can I help?",
+    "Python is a programming language.", "Sure, I can help with that.",
+    # Medium (20-50 words)
+    "Machine learning is a subset of artificial intelligence that focuses on building systems that learn from data. It involves training algorithms to find patterns and make predictions.",
+    "The capital of France is Paris. It is known for the Eiffel Tower, the Louvre Museum, and its rich cultural heritage spanning centuries of European history.",
+    # Long (100+ words)
+    "Artificial intelligence has transformed numerous industries over the past decade. From healthcare to finance, AI systems are being deployed to automate complex tasks, improve decision-making, and enhance user experiences. " * 3,
+]
+
+_VARIED_TOKENS = [
+    # Very small
+    {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    # Small
+    {"prompt_tokens": 15, "completion_tokens": 8, "total_tokens": 23},
+    # Medium
+    {"prompt_tokens": 50, "completion_tokens": 120, "total_tokens": 170},
+    # Large
+    {"prompt_tokens": 500, "completion_tokens": 2000, "total_tokens": 2500},
+    {"prompt_tokens": 4096, "completion_tokens": 8192, "total_tokens": 12288},
+]
+
+
+def _generate_content_variants(provider: str, response: dict, labels: dict,
+                                n: int = 10) -> list[tuple[dict, dict]]:
+    """Generate variants with different content lengths and token counts."""
+    variants = []
+    for _ in range(n):
+        new_resp = json.loads(json.dumps(response))  # deep copy
+        content_val = random.choice(_VARIED_CONTENT)
+        tokens = random.choice(_VARIED_TOKENS)
+
+        # Replace content value at any depth
+        _replace_content_value(new_resp, content_val)
+        _replace_token_values(new_resp, tokens)
+
+        variants.append((new_resp, dict(labels)))
+    return variants
+
+
+def _replace_content_value(obj, new_val):
+    """Recursively find and replace content string values."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in ("content", "text", "generated_text", "outputText", "output") and isinstance(v, str):
+                obj[k] = new_val
+            elif isinstance(v, (dict, list)):
+                _replace_content_value(v, new_val)
+    elif isinstance(obj, list):
+        for item in obj:
+            _replace_content_value(item, new_val)
+
+
+def _replace_token_values(obj, tokens):
+    """Recursively find and replace token count values."""
+    if isinstance(obj, dict):
+        for k in list(obj.keys()):
+            kl = k.lower()
+            if ("prompt" in kl or "input" in kl) and ("token" in kl or "count" in kl or "eval" in kl):
+                obj[k] = tokens.get("prompt_tokens", obj[k])
+            elif ("completion" in kl or "output" in kl or k == "eval_count") and ("token" in kl or "count" in kl or k == "eval_count"):
+                obj[k] = tokens.get("completion_tokens", obj[k])
+            elif "total" in kl and ("token" in kl or "count" in kl):
+                obj[k] = tokens.get("total_tokens", obj[k])
+            elif isinstance(obj[k], (dict, list)):
+                _replace_token_values(obj[k], tokens)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                _replace_token_values(item, tokens)
+
+
 def build_training_data() -> list[dict]:
     """Build labeled training samples from all provider examples + augmentation."""
     samples = []
@@ -487,9 +564,13 @@ def build_training_data() -> list[dict]:
         # Original example
         samples.extend(_extract_samples(provider, response, labels))
 
-        # Augmented variants
+        # Augmented variants (name mutations)
         for aug_resp, aug_labels in augment_example(response, labels, n_variants=8):
             samples.extend(_extract_samples(f"{provider}_aug", aug_resp, aug_labels))
+
+        # Content length variants (teach model that content can be any length)
+        for var_resp, var_labels in _generate_content_variants(provider, response, labels, n=10):
+            samples.extend(_extract_samples(f"{provider}_var", var_resp, var_labels))
 
     random.shuffle(samples)
     return samples
