@@ -28,6 +28,7 @@ _SESSIONS_AGG_SUBQUERY = """
                     json_extract(record_json, '$.metadata.walacor_audit.user_question') AS user_question,
                     json_extract(record_json, '$.metadata.walacor_audit.has_rag_context') AS has_rag_context,
                     json_extract(record_json, '$.metadata.walacor_audit.has_files') AS has_files,
+                    json_extract(record_json, '$.metadata.walacor_audit.has_images') AS has_images,
                     json_extract(record_json, '$.metadata.request_type') AS request_type
                 FROM wal_records
                 WHERE session_id IS NOT NULL
@@ -194,6 +195,7 @@ class LineageReader:
                 s.user_question,
                 s.has_rag_context,
                 s.has_files,
+                s.has_images,
                 s.request_type,
                 COALESCE(t.tool_names, '') AS tool_names,
                 COALESCE(t.tool_details, '') AS tool_details
