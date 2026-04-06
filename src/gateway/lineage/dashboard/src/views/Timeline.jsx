@@ -190,7 +190,16 @@ export default function Timeline({ navigate, sessionId }) {
                         : '';
                       return <span key={ti} className={`badge ${cls}`}>⚙ {t.tool_name || 'tool'}{suffix}</span>;
                     })}
-                    {(r.file_metadata && r.file_metadata.length > 0) && <span className="badge badge-file">📎 {r.file_metadata.length} file{r.file_metadata.length > 1 ? 's' : ''}</span>}
+                    {(r.file_metadata && r.file_metadata.length > 0) && r.file_metadata.map((f, fi) => {
+                      const isImg = (f.mimetype || '').startsWith('image/');
+                      return (
+                        <span key={fi} className={`badge ${isImg ? 'badge-blue' : 'badge-file'}`}
+                          title={`${f.filename}\n${f.mimetype} · ${f.size_bytes ? (f.size_bytes / 1024).toFixed(1) + ' KB' : '—'}\nSHA3: ${f.hash_sha3_512 || '—'}`}
+                          style={{ cursor: 'default' }}>
+                          {isImg ? '📷' : '📄'} {f.filename || 'file'}
+                        </span>
+                      );
+                    })}
                     {tokens && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>{tokens} tokens</span>}
                     <span className="hash-gold">
                       <span className="copy-wrap">
@@ -204,6 +213,37 @@ export default function Timeline({ navigate, sessionId }) {
                       </span>
                     )}
                   </div>
+                  {/* File/Image detail */}
+                  {r.file_metadata && r.file_metadata.length > 0 && (
+                    <div style={{ marginTop: 8, padding: '8px 10px', background: 'var(--bg-hover)', borderRadius: 6, fontSize: 11 }}>
+                      {r.file_metadata.map((f, fi) => {
+                        const isImg = (f.mimetype || '').startsWith('image/');
+                        return (
+                          <div key={fi} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: fi < r.file_metadata.length - 1 ? 6 : 0 }}>
+                            <span style={{ fontSize: 16 }}>{isImg ? '🖼️' : '📄'}</span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{f.filename || 'unknown'}</div>
+                              <div style={{ color: 'var(--text-muted)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
+                                <span>{f.mimetype || '—'}</span>
+                                {f.size_bytes > 0 && <span>{(f.size_bytes / 1024).toFixed(1)} KB</span>}
+                                <span style={{ textTransform: 'uppercase', fontSize: 10 }}>{f.source || 'upload'}</span>
+                              </div>
+                              {f.hash_sha3_512 && (
+                                <div style={{ marginTop: 2 }}>
+                                  <span className="copy-wrap">
+                                    <span className="copy-text" style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--gold)' }}>
+                                      SHA3: {truncHash(f.hash_sha3_512, 20)}
+                                    </span>
+                                    <CopyBtn text={f.hash_sha3_512} />
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   {/* Blockchain proof summary row */}
                   {r._envelope && r._envelope.block_id && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>

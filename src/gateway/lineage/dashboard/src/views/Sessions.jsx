@@ -249,6 +249,7 @@ export default function Sessions({ navigate, params = {} }) {
                   const turns = s.user_message_count || s.record_count || 0;
                   const hasRag = s.has_rag_context;
                   const hasFiles = s.has_files || s.file_count > 0;
+                  const hasImages = s.has_images;
                   const expanded = expandedId === s.session_id;
                   const qPreviewClass = narrow && question
                     ? `sessions-q-preview${expanded ? ' is-expanded' : ''}`
@@ -338,8 +339,9 @@ export default function Sessions({ navigate, params = {} }) {
                             });
                           })()}
                           {hasRag && <span className="badge badge-blue" style={{ fontSize: 12 }} title="RAG context detected">📎 RAG</span>}
-                          {hasFiles && <span className="badge" style={{ fontSize: 10, background: 'var(--bg-hover)', color: 'var(--text-secondary)' }} title="Files attached">📄 files</span>}
-                          {!tools.length && !hasRag && !hasFiles && (
+                          {hasImages && <span className="badge badge-blue" style={{ fontSize: 12 }} title="Image attached">📷 image</span>}
+                          {hasFiles && !hasImages && <span className="badge" style={{ fontSize: 10, background: 'var(--bg-hover)', color: 'var(--text-secondary)' }} title="Files attached">📄 files</span>}
+                          {!tools.length && !hasRag && !hasFiles && !hasImages && (
                             <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>—</span>
                           )}
                         </div>

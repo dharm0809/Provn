@@ -115,6 +115,7 @@ class WalacorLineageReader:
                 "user_question": meta.get("user_question"),
                 "has_rag_context": meta.get("has_rag_context"),
                 "has_files": meta.get("has_files"),
+                "has_images": meta.get("has_images"),
                 "request_type": meta.get("request_type"),
                 "tool_names": tools.get("tool_names", ""),
                 "tool_details": tools.get("tool_details", ""),
@@ -140,6 +141,7 @@ class WalacorLineageReader:
             "user_question": audit.get("user_question") or None,
             "has_rag_context": audit.get("has_rag_context", False),
             "has_files": audit.get("has_files", False) or audit.get("file_count", 0) > 0,
+            "has_images": audit.get("has_images", False),
             "request_type": meta.get("request_type"),
             "user_message_count": audit.get("conversation_turns", 0) or 0,
         }
