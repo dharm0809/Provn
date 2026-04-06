@@ -190,9 +190,6 @@ class WalacorClient:
 
     # Fields defined in the Walacor gateway_executions schema (ETId 9000011).
     # Records with unknown fields are silently rejected (HTTP 200 + success:false).
-    # Session chain fields (record_hash, previous_record_hash, sequence_number) and
-    # response policy fields are in the local WAL but NOT yet in the Walacor schema.
-    # They can be added via schema versioning when the Walacor admin UI supports it.
     _EXECUTION_SCHEMA_FIELDS = frozenset({
         "execution_id", "model_attestation_id", "model_id", "provider",
         "policy_version", "policy_result", "tenant_id", "gateway_id",
@@ -201,6 +198,8 @@ class WalacorClient:
         "thinking_content", "latency_ms", "prompt_tokens", "completion_tokens",
         "total_tokens", "cache_hit", "cached_tokens", "cache_creation_tokens",
         "retry_of", "variant_id",
+        # Session chain integrity fields
+        "sequence_number", "record_hash", "previous_record_hash",
     })
 
     async def write_execution(self, record: ExecutionRecord | dict[str, Any]) -> None:

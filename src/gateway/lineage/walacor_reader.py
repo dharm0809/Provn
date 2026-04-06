@@ -33,6 +33,16 @@ def _deserialize_record(r: dict) -> dict:
             r["metadata"] = {}
     elif mj and isinstance(mj, dict):
         r["metadata"] = mj
+    # Promote file_metadata from metadata to top level for dashboard
+    meta = r.get("metadata")
+    if isinstance(meta, dict):
+        fm = meta.pop("file_metadata", None)
+        if fm:
+            r["file_metadata"] = fm
+        # Promote chain fields if stored in metadata (older records)
+        for chain_key in ("sequence_number", "record_hash", "previous_record_hash"):
+            if r.get(chain_key) is None and meta.get(chain_key) is not None:
+                r[chain_key] = meta[chain_key]
     # Strip Walacor internal fields that leak into query results
     for k in ("_id", "ORGId", "UID", "IsDeleted", "SV", "LastModifiedBy"):
         r.pop(k, None)
