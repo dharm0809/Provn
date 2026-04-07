@@ -481,6 +481,20 @@ def _init_content_analyzers(settings, ctx) -> None:
         logger.info("Content analyzer loaded: walacor.toxicity.v1 (extra_terms=%d)", len(extra))
 
 
+def _init_safety_classifier(settings, ctx) -> None:
+    """ONNX Safety Classifier — lightweight Llama Guard replacement. Always-on."""
+    try:
+        from gateway.content.safety_classifier import SafetyClassifier
+        classifier = SafetyClassifier()
+        if classifier._loaded:
+            ctx.content_analyzers.append(classifier)
+            logger.info("Content analyzer loaded: truzenai.safety.v1 (ONNX, %d categories)", len(classifier._labels))
+        else:
+            logger.warning("SafetyClassifier ONNX not found — skipping")
+    except Exception as e:
+        logger.warning("SafetyClassifier init failed (non-fatal): %s", e)
+
+
 def _init_llama_guard(settings, ctx) -> None:
     """Phase 17: Llama Guard 3 content analyzer (local Ollama, fail-open)."""
     from gateway.content.llama_guard import LlamaGuardAnalyzer
@@ -1002,8 +1016,9 @@ async def on_startup() -> None:
         _init_lineage(settings, ctx)
         ctx.redis_client = await _init_redis(settings)
         _init_content_analyzers(settings, ctx)
+        _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard
         if settings.llama_guard_enabled:
-            _init_llama_guard(settings, ctx)
+            _init_llama_guard(settings, ctx)  # Optional Tier 3 — max accuracy when Ollama available
         if settings.prompt_guard_enabled:
             _init_prompt_guard(settings, ctx)
         if settings.presidio_pii_enabled:

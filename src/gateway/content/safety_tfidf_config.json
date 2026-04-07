@@ -1,0 +1,9 @@
+{
+  "analyzer": "char_wb",
+  "ngram_range": [
+    3,
+    5
+  ],
+  "max_features": 10000,
+  "n_svd_components": 200
+}
