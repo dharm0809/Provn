@@ -730,6 +730,98 @@ function StatusView({ refresh, health }) {
         </div>
       )}
 
+      {/* ONNX Intelligence Models */}
+      {s.onnx_models?.length > 0 && (
+        <div className="card">
+          <div className="status-card-header"><span className="icon">◆</span> ONNX Intelligence Models</div>
+          {s.onnx_models.map((m, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: i < s.onnx_models.length - 1 ? '1px solid var(--border)' : 'none' }}>
+              <span className={`badge ${m.loaded ? 'badge-pass' : 'badge-fail'}`} style={{ fontSize: 11, flexShrink: 0 }}>
+                {m.loaded ? 'LOADED' : 'OFFLINE'}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{m.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{m.purpose}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+                  <span className="mono">{m.type}</span>
+                  {m.labels > 0 && <span style={{ marginLeft: 8 }}>{m.labels} classes</span>}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Intelligence Features */}
+      {s.intelligence && (
+        <div className="card">
+          <div className="status-card-header"><span className="icon">◆</span> Intelligence Engine</div>
+          <div className="detail-grid">
+            {s.intelligence.anomaly_detector && (
+              <>
+                <div className="detail-label">Anomaly Detector</div>
+                <div className="detail-value">
+                  {s.intelligence.anomaly_detector.models_tracked} models tracked ·
+                  {' '}{s.intelligence.anomaly_detector.total_records_analyzed} records analyzed
+                </div>
+              </>
+            )}
+            {s.intelligence.consistency_tracker && (
+              <>
+                <div className="detail-label">Consistency Tracker</div>
+                <div className="detail-value">
+                  {s.intelligence.consistency_tracker.total_pairs_stored} pairs ·
+                  {' '}{s.intelligence.consistency_tracker.total_comparisons} comparisons ·
+                  {' '}{s.intelligence.consistency_tracker.recent_inconsistencies} inconsistencies
+                </div>
+              </>
+            )}
+            {s.intelligence.consistency_tracker?.model_reliability && Object.keys(s.intelligence.consistency_tracker.model_reliability).length > 0 && (
+              <>
+                <div className="detail-label">Model Reliability</div>
+                <div className="detail-value">
+                  {Object.entries(s.intelligence.consistency_tracker.model_reliability).map(([model, rel]) => (
+                    <div key={model} style={{ marginBottom: 4 }}>
+                      <span className="mono" style={{ fontSize: 12 }}>{model}</span>
+                      <span className={`badge ${rel.score >= 0.9 ? 'badge-pass' : rel.score >= 0.7 ? 'badge-warn' : 'badge-fail'}`} style={{ fontSize: 10, marginLeft: 6 }}>
+                        {(rel.score * 100).toFixed(0)}%
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>
+                        ({rel.comparisons} comparisons)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            {s.intelligence.field_registry && (
+              <>
+                <div className="detail-label">Schema Overflow</div>
+                <div className="detail-value">
+                  {s.intelligence.field_registry.tracked_fields} fields tracked ·
+                  {' '}{s.intelligence.field_registry.promotion_candidates} promotion candidates
+                </div>
+              </>
+            )}
+            {s.intelligence.background_worker && (
+              <>
+                <div className="detail-label">LLM Worker</div>
+                <div className="detail-value">
+                  <span className={`badge ${s.intelligence.background_worker.running ? 'badge-pass' : 'badge-muted'}`} style={{ fontSize: 10 }}>
+                    {s.intelligence.background_worker.running ? 'RUNNING' : 'STOPPED'}
+                  </span>
+                  {' '}{s.intelligence.background_worker.processed} processed ·
+                  {' '}{s.intelligence.background_worker.distillation_samples} distillation samples
+                  {s.intelligence.background_worker.queue_size > 0 && (
+                    <span style={{ marginLeft: 6, color: 'var(--gold)' }}>({s.intelligence.background_worker.queue_size} queued)</span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="status-card-header"><span className="icon">◆</span> Health</div>
         <div className="detail-grid">

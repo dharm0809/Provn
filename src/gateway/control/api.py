@@ -470,6 +470,74 @@ async def control_status(request: Request) -> JSONResponse:
     except Exception:
         logger.debug("control_status: model_capabilities unavailable", exc_info=True)
 
+    # ── ONNX Intelligence Models ─────────────────────────────────────
+    onnx_models = []
+
+    # 1. Intent Classifier (SchemaIntelligence)
+    _si = getattr(ctx, "schema_intelligence", None)
+    if _si:
+        onnx_models.append({
+            "name": "Intent Classifier",
+            "id": "intent_classifier",
+            "loaded": _si._onnx_session is not None,
+            "type": "TF-IDF + LogisticRegression",
+            "purpose": "Classify request intent (normal, web_search, reasoning, system_task, etc.)",
+            "labels": len(getattr(_si, "_label_map", {})),
+        })
+
+    # 2. SchemaMapper
+    _sm = getattr(ctx, "schema_mapper", None)
+    if _sm:
+        onnx_models.append({
+            "name": "Schema Mapper",
+            "id": "schema_mapper",
+            "loaded": _sm._session is not None,
+            "type": "GradientBoosting (value-aware features)",
+            "purpose": "Map any LLM response format to canonical schema using value semantics",
+            "labels": len(_sm._labels),
+        })
+
+    # 3. Safety Classifier
+    for analyzer in ctx.content_analyzers:
+        if type(analyzer).__name__ == "SafetyClassifier":
+            onnx_models.append({
+                "name": "Safety Classifier",
+                "id": "safety_classifier",
+                "loaded": getattr(analyzer, "_loaded", False),
+                "type": "TF-IDF char n-grams + GradientBoosting",
+                "purpose": "Content safety classification (8 categories, replaces Llama Guard)",
+                "labels": len(getattr(analyzer, "_labels", [])),
+            })
+            break
+
+    status["onnx_models"] = onnx_models
+
+    # ── Intelligence Features ────────────────────────────────────────
+    intelligence = {}
+
+    # Anomaly detector
+    _ad = getattr(ctx, "anomaly_detector", None)
+    if _ad:
+        intelligence["anomaly_detector"] = _ad.get_stats()
+
+    # Consistency tracker
+    _ct = getattr(ctx, "consistency_tracker", None)
+    if _ct:
+        intelligence["consistency_tracker"] = _ct.get_stats()
+
+    # Field registry
+    _fr = getattr(ctx, "field_registry", None)
+    if _fr:
+        intelligence["field_registry"] = _fr.get_stats()
+
+    # Intelligence worker
+    _iw = getattr(ctx, "intelligence_worker", None)
+    if _iw:
+        intelligence["background_worker"] = _iw.get_stats()
+
+    if intelligence:
+        status["intelligence"] = intelligence
+
     return JSONResponse(status)
 
 
