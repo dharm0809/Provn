@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getExecution, getTrace } from '../api';
+import { getExecution, getTrace, getSession } from '../api';
 import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes, copyToClipboard, fileTypeInfo } from '../utils';
 import TraceWaterfall from '../components/TraceWaterfall';
 
@@ -37,6 +37,9 @@ export default function Execution({ navigate, executionId, sessionId }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showMeta, setShowMeta] = useState(false);
+  const [showExecutionRecord, setShowExecutionRecord] = useState(true);
+  const [showChainIntegrity, setShowChainIntegrity] = useState(false);
+  const [questionRecords, setQuestionRecords] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -53,6 +56,22 @@ export default function Execution({ navigate, executionId, sessionId }) {
     })();
   }, [executionId]);
 
+  useEffect(() => {
+    if (!record?.session_id) return;
+    (async () => {
+      try {
+        const data = await getSession(record.session_id);
+        const recs = (data.records || []).filter((rec) => {
+          const rt = rec.metadata?.request_type || '';
+          return !rt.startsWith('system_task');
+        });
+        setQuestionRecords(recs);
+      } catch {
+        setQuestionRecords([]);
+      }
+    })();
+  }, [record?.session_id]);
+
   if (loading) return <div className="skeleton-block" style={{ height: 400 }} />;
   if (error) return <div className="error-card">Error: {error}</div>;
   if (!record) return <div className="error-card">Record not found</div>;
@@ -64,71 +83,110 @@ export default function Execution({ navigate, executionId, sessionId }) {
   const toolIterations = r.metadata?.tool_loop_iterations || 0;
   const decisions = r.metadata?.analyzer_decisions || [];
   const usage = r.metadata?.token_usage;
+  const questionIndex = questionRecords.findIndex((rec) => rec.execution_id === r.execution_id);
+  const hasQuestionNav = questionIndex >= 0;
+  const isFirstQuestion = questionIndex <= 0;
+  const isLastQuestion = questionIndex === questionRecords.length - 1;
+  const prevQuestion = !isFirstQuestion ? questionRecords[questionIndex - 1] : null;
+  const nextQuestion = !isLastQuestion ? questionRecords[questionIndex + 1] : null;
 
   return (
     <div className="fade-child">
-      <div className="breadcrumb">
-        <a onClick={() => navigate('sessions')}>Sessions</a>
-        <span className="sep">▸</span>
-        <a onClick={() => navigate('timeline', { sessionId: sid })}>{formatSessionId(sid)}</a>
-        <span className="sep">▸</span>
-        <span className="current">{truncId(r.execution_id, 20)}</span>
-      </div>
-
-      {/* Two-column layout */}
-      <div className="exec-cols" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        {/* Metadata */}
-        <div className="card">
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
-            Execution Record
-          </div>
-          <div className="detail-grid">
-            <DetailRow label="Execution ID" value={r.execution_id} className="mono" copyable />
-            <DetailRow label="Model" value={displayModel(r.model_id || r.model_attestation_id)} />
-            <DetailRow label="Provider Request" value={r.provider_request_id} className="mono" copyable />
-            <DetailRow label="Policy" value={r.policy_result} className={policyBadgeClass(r.policy_result)} />
-            <DetailRow label="Policy Version" value={r.policy_version} />
-            <DetailRow label="Tenant" value={r.tenant_id} />
-            <DetailRow label="User" value={r.user || r.metadata?.user || '-'} />
-            <DetailRow label="Team" value={r.metadata?.team || '-'} />
-            <DetailRow label="Roles" value={r.metadata?.caller_roles?.join(', ') || '-'} />
-            <DetailRow label="Auth Source" value={r.metadata?.identity_source || '-'} />
-            <DetailRow label="Timestamp" value={formatTime(r.timestamp)} />
-          </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <div className="breadcrumb" style={{ marginBottom: 0 }}>
+          <a onClick={() => navigate('sessions')}>Sessions</a>
+          <span className="sep">▸</span>
+          <a onClick={() => navigate('timeline', { sessionId: sid })}>{formatSessionId(sid)}</a>
+          <span className="sep">▸</span>
+          <span className="current">{truncId(r.execution_id, 20)}</span>
         </div>
 
-        {/* Chain Integrity + Blockchain Proof */}
-        <div className="card">
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
-            ◆ Chain Integrity
+        {hasQuestionNav && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {!isFirstQuestion && prevQuestion && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => navigate('execution', { executionId: prevQuestion.execution_id, sessionId: sid })}
+              >
+                ← Previous Question
+              </button>
+            )}
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-muted)' }}>
+              Question {questionIndex + 1} of {questionRecords.length}
+            </span>
+            {!isLastQuestion && nextQuestion && (
+              <button
+                type="button"
+                className="btn btn-gold"
+                onClick={() => navigate('execution', { executionId: nextQuestion.execution_id, sessionId: sid })}
+              >
+                Next Question →
+              </button>
+            )}
           </div>
-          <div className="detail-grid">
-            <DetailRow label="Sequence" value={r.sequence_number} className="mono" />
-            <DetailRow label="Record Hash" value={r.record_hash} className="gold mono" copyable />
-            <DetailRow label="Previous Hash" value={r.previous_record_hash} className="gold mono" copyable />
-          </div>
+        )}
+      </div>
 
-          {/* Walacor Blockchain Proof */}
-          {(r._walacor_eid || r._envelope || r.EId) && (() => {
-            const env = r._envelope || {};
-            const eid = r._walacor_eid || r.EId || '';
-            return (
-              <>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginTop: 16, marginBottom: 12, paddingTop: 12, paddingBottom: 8, borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
-                  ◆ Walacor Blockchain Proof
-                </div>
-                <div className="detail-grid">
-                  {eid && <DetailRow label="Entity ID (EId)" value={eid} className="mono" copyable />}
-                  {env.block_id && <DetailRow label="Block ID" value={env.block_id} className="gold mono" copyable />}
-                  {env.trans_id && <DetailRow label="Transaction ID" value={env.trans_id} className="gold mono" copyable />}
-                  {env.data_hash && <DetailRow label="Data Hash (DH)" value={env.data_hash} className="gold mono" copyable />}
-                  {env.block_level != null && <DetailRow label="Block Level" value={env.block_level} className="mono" />}
-                  {env.block_index != null && <DetailRow label="Block Index" value={env.block_index} className="mono" />}
-                  {env.created_at && <DetailRow label="Blockchain Timestamp" value={typeof env.created_at === 'number' ? new Date(env.created_at).toISOString() : env.created_at} className="mono" />}
-                </div>
-              </>
-            );
-          })()}
+      {/* Top stack layout */}
+      <div className="exec-cols" style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
+        {/* Metadata */}
+        <div className="card">
+          <div
+            onClick={() => setShowExecutionRecord(!showExecutionRecord)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: showExecutionRecord ? 12 : 0, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}
+          >
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', transition: 'transform 0.2s', transform: showExecutionRecord ? 'rotate(90deg)' : 'none' }}>▸</span>
+            <span>Execution Record</span>
+          </div>
+          {showExecutionRecord && (
+            <div className="detail-grid">
+              <DetailRow label="Execution ID" value={r.execution_id} className="mono" copyable />
+              <DetailRow label="Model" value={displayModel(r.model_id || r.model_attestation_id)} />
+              <DetailRow label="Provider Request" value={r.provider_request_id} className="mono" copyable />
+              <DetailRow label="Policy" value={r.policy_result} className={policyBadgeClass(r.policy_result)} />
+              <DetailRow label="Policy Version" value={r.policy_version} />
+              <DetailRow label="Tenant" value={r.tenant_id} />
+              <DetailRow label="User" value={r.user || r.metadata?.user || '-'} />
+              <DetailRow label="Team" value={r.metadata?.team || '-'} />
+              <DetailRow label="Roles" value={r.metadata?.caller_roles?.join(', ') || '-'} />
+              <DetailRow label="Auth Source" value={r.metadata?.identity_source || '-'} />
+              <DetailRow label="Timestamp" value={formatTime(r.timestamp)} />
+            </div>
+          )}
+        </div>
+
+        {/* TruzenAI Proof */}
+        <div className="card">
+          <div
+            onClick={() => setShowChainIntegrity(!showChainIntegrity)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: showChainIntegrity ? 12 : 0, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}
+          >
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', transition: 'transform 0.2s', transform: showChainIntegrity ? 'rotate(90deg)' : 'none' }}>▸</span>
+            <span>TruzenAI Proof</span>
+          </div>
+          {showChainIntegrity && (
+            <>
+              {/* TruzenAI Proof */}
+              {(r._walacor_eid || r._envelope || r.EId) && (() => {
+                const env = r._envelope || {};
+                const eid = r._walacor_eid || r.EId || '';
+                return (
+                  <>
+                    <div className="detail-grid">
+                      {eid && <DetailRow label="Entity ID (EId)" value={eid} className="mono" copyable />}
+                      {env.block_id && <DetailRow label="Block ID" value={env.block_id} className="gold mono" copyable />}
+                      {env.trans_id && <DetailRow label="Transaction ID" value={env.trans_id} className="gold mono" copyable />}
+                      {env.data_hash && <DetailRow label="Data Hash (DH)" value={env.data_hash} className="gold mono" copyable />}
+                      {env.block_level != null && <DetailRow label="Block Level" value={env.block_level} className="mono" />}
+                      {env.block_index != null && <DetailRow label="Block Index" value={env.block_index} className="mono" />}
+                      {env.created_at && <DetailRow label="Blockchain Timestamp" value={typeof env.created_at === 'number' ? new Date(env.created_at).toISOString() : env.created_at} className="mono" />}
+                    </div>
+                  </>
+                );
+              })()}
+            </>
+          )}
         </div>
       </div>
 
@@ -145,10 +203,10 @@ export default function Execution({ navigate, executionId, sessionId }) {
         </div>
       )}
 
-      {/* User Question + Full Prompt */}
+      {/* Prompt + Full Prompt */}
       <div className="card">
         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>
-          User Question
+          Prompt
           {r.metadata?.request_type && <span className="badge badge-muted" style={{ fontSize: 10, marginLeft: 8 }}>{r.metadata.request_type}</span>}
           {r.metadata?._intent && <span className="badge badge-gold" style={{ fontSize: 10, marginLeft: 4 }}>intent: {r.metadata._intent}</span>}
         </div>
@@ -288,14 +346,17 @@ export default function Execution({ navigate, executionId, sessionId }) {
       )}
 
       {/* Content Analysis */}
-      {decisions.length > 0 && (
+      {decisions.length > 0 && (() => {
+        const available = decisions.filter(d => !(d.reason || '').includes('unavailable') && d.confidence !== 0.0);
+        if (!available.length) return null;
+        return (
         <div className="card">
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Content Analysis</div>
           <div className="table-wrap">
             <table>
               <thead><tr><th>Analyzer</th><th>Verdict</th><th>Confidence</th><th>Category</th><th>Reason</th></tr></thead>
               <tbody>
-                {decisions.map((d, i) => (
+                {available.map((d, i) => (
                   <tr key={i}>
                     <td className="mono">{d.analyzer_id}</td>
                     <td><span className={`badge ${verdictBadgeClass(d.verdict)}`}>{d.verdict || '-'}</span></td>
@@ -307,7 +368,8 @@ export default function Execution({ navigate, executionId, sessionId }) {
               </tbody>
             </table>
           </div>
-        </div>
+        </div>);
+      })()
       )}
 
       {/* Token Usage */}
