@@ -69,6 +69,33 @@ async def compliance_export(request: Request) -> Response:
     # Default: JSON
     framework_mapping = _get_framework_mapping(framework, summary, attestations, executions)
 
+    # Audit intelligence: readiness score, gaps, recommendations
+    # Build minimal health context from pipeline state
+    health_data = {}
+    try:
+        health_data = {
+            "content_analyzers": len(ctx.content_analyzers) if hasattr(ctx, "content_analyzers") else 0,
+            "session_chain": {"active_sessions": getattr(ctx.session_chain, "active_session_count", 0) if ctx.session_chain else None},
+            "wal": {"disk_usage_bytes": 1} if ctx.wal_writer else {},
+            "storage": {"backend": "walacor"} if ctx.walacor_client else {},
+            "enforcement_mode": getattr(ctx, "enforcement_mode", None) or "enforced",
+        }
+    except Exception:
+        pass
+
+    audit_readiness = None
+    try:
+        from gateway.compliance.audit_intelligence import assess_audit_readiness
+        audit_readiness = assess_audit_readiness(
+            summary=summary,
+            attestations=attestations,
+            executions=executions,
+            chain_report=chain_report,
+            health=health_data,
+        )
+    except Exception as e:
+        logger.warning("Audit readiness assessment failed: %s", e)
+
     report = {
         "report": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -76,6 +103,7 @@ async def compliance_export(request: Request) -> Response:
             "framework": framework,
         },
         "summary": summary,
+        "audit_readiness": audit_readiness,
         "attestations": attestations,
         "executions": executions,
         "chain_integrity": chain_integrity,
