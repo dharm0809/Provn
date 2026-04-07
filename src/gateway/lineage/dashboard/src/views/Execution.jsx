@@ -346,31 +346,31 @@ export default function Execution({ navigate, executionId, sessionId }) {
       )}
 
       {/* Content Analysis */}
-      {decisions.length > 0 && (() => {
-        const available = decisions.filter(d => !(d.reason || '').includes('unavailable') && d.confidence !== 0.0);
+      {(() => {
+        const available = (decisions || []).filter(d => !(d.reason || '').includes('unavailable') && d.confidence !== 0.0);
         if (!available.length) return null;
         return (
-        <div className="card">
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Content Analysis</div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Analyzer</th><th>Verdict</th><th>Confidence</th><th>Category</th><th>Reason</th></tr></thead>
-              <tbody>
-                {available.map((d, i) => (
-                  <tr key={i}>
-                    <td className="mono">{d.analyzer_id}</td>
-                    <td><span className={`badge ${verdictBadgeClass(d.verdict)}`}>{d.verdict || '-'}</span></td>
-                    <td>{d.confidence != null ? d.confidence.toFixed(2) : '-'}</td>
-                    <td>{d.category || '-'}</td>
-                    <td>{d.reason || '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="card">
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Content Analysis</div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Analyzer</th><th>Verdict</th><th>Confidence</th><th>Category</th><th>Reason</th></tr></thead>
+                <tbody>
+                  {available.map((d, i) => (
+                    <tr key={i}>
+                      <td className="mono">{d.analyzer_id}</td>
+                      <td><span className={`badge ${verdictBadgeClass(d.verdict)}`}>{d.verdict || '-'}</span></td>
+                      <td>{d.confidence != null ? d.confidence.toFixed(2) : '-'}</td>
+                      <td>{d.category || '-'}</td>
+                      <td>{d.reason || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>);
-      })()
-      )}
+        );
+      })()}
 
       {/* Token Usage */}
       {usage && (
