@@ -186,9 +186,13 @@ async def lineage_attempts(request: Request) -> JSONResponse:
     limit, offset, q, sort, order = _attempts_list_params(request)
     try:
         data = await _call(reader.get_attempts, limit=limit, offset=offset, search=q, sort=sort, order=order)
-        # Normalize key: Walacor reader returns "items", SQLite returns "attempts"
+        # Normalize keys: Walacor reader returns "items" with "model_id",
+        # SQLite reader returns "attempts" with "model". Normalize both.
         if "items" in data and "attempts" not in data:
             data["attempts"] = data.pop("items")
+        for att in data.get("attempts", []):
+            if "model_id" in att and "model" not in att:
+                att["model"] = att["model_id"]
         data = {
             **data,
             "limit": limit,

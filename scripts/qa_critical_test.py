@@ -416,7 +416,7 @@ def test_audit_completeness(base, key, model):
         # Every attempt should have status_code, model, user
         complete = sum(1 for a in att_list
                       if a.get("status_code") is not None
-                      and a.get("model"))
+                      and (a.get("model") or a.get("model_id")))
         check(f"Audit: attempts complete ({complete}/{len(att_list)})",
               complete == len(att_list))
 
