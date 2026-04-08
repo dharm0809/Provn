@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
@@ -95,11 +96,12 @@ class WalacorLineageReader:
         ]
 
         if search and search.strip():
+            safe_search = re.escape(search.strip())  # Prevent regex injection
             pipeline.insert(1, {"$match": {
                 "$or": [
-                    {"session_id": {"$regex": search, "$options": "i"}},
-                    {"model_id": {"$regex": search, "$options": "i"}},
-                    {"user": {"$regex": search, "$options": "i"}},
+                    {"session_id": {"$regex": safe_search, "$options": "i"}},
+                    {"model_id": {"$regex": safe_search, "$options": "i"}},
+                    {"user": {"$regex": safe_search, "$options": "i"}},
                 ]
             }})
 
@@ -248,11 +250,12 @@ class WalacorLineageReader:
             {"$count": "total"},
         ]
         if search and search.strip():
+            safe_search = re.escape(search.strip())
             pipeline.insert(1, {"$match": {
                 "$or": [
-                    {"session_id": {"$regex": search, "$options": "i"}},
-                    {"model_id": {"$regex": search, "$options": "i"}},
-                    {"user": {"$regex": search, "$options": "i"}},
+                    {"session_id": {"$regex": safe_search, "$options": "i"}},
+                    {"model_id": {"$regex": safe_search, "$options": "i"}},
+                    {"user": {"$regex": safe_search, "$options": "i"}},
                 ]
             }})
         rows = await self._client.query_complex(self._exec_etid, pipeline)
@@ -374,13 +377,14 @@ class WalacorLineageReader:
 
         match_stage: dict[str, Any] = {}
         if search and search.strip():
+            safe_search = re.escape(search.strip())
             match_stage = {"$or": [
-                {"request_id": {"$regex": search, "$options": "i"}},
-                {"tenant_id": {"$regex": search, "$options": "i"}},
-                {"provider": {"$regex": search, "$options": "i"}},
-                {"model_id": {"$regex": search, "$options": "i"}},
-                {"disposition": {"$regex": search, "$options": "i"}},
-                {"user": {"$regex": search, "$options": "i"}},
+                {"request_id": {"$regex": safe_search, "$options": "i"}},
+                {"tenant_id": {"$regex": safe_search, "$options": "i"}},
+                {"provider": {"$regex": safe_search, "$options": "i"}},
+                {"model_id": {"$regex": safe_search, "$options": "i"}},
+                {"disposition": {"$regex": safe_search, "$options": "i"}},
+                {"user": {"$regex": safe_search, "$options": "i"}},
             ]}
 
         # Items query
