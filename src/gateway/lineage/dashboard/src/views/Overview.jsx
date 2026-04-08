@@ -366,7 +366,7 @@ export default function Overview({ navigate, health }) {
         const [sessData, attData] = await Promise.all([getSessions(6, 0), getAttempts(8, 0)]);
         if (cancelled) return;
         setSessions(sessData.sessions || []);
-        setAttempts(attData.items || []);
+        setAttempts(attData.attempts || attData.items || []);
         setAttStats(attData.stats || {});
         setAttTotal(attData.total || 0);
         setError(null);

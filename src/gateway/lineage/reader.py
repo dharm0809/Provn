@@ -50,7 +50,10 @@ _SESSIONS_AGG_SUBQUERY = """
                         json_extract(record_json, '$.metadata.request_type'), 'user_message'
                     ) NOT LIKE 'system_task%'
                     THEN json_extract(record_json, '$.metadata.request_type')
-                    ELSE NULL END) AS request_type
+                    ELSE NULL END) AS request_type,
+                    -- Fallback tool info from execution metadata (always present)
+                    MAX(json_extract(record_json, '$.metadata.tool_strategy')) AS meta_tool_strategy,
+                    MAX(json_extract(record_json, '$.metadata.tool_interaction_count')) AS meta_tool_count
                 FROM wal_records
                 WHERE session_id IS NOT NULL
                   AND event_type = 'execution'
@@ -218,6 +221,8 @@ class LineageReader:
                 s.has_files,
                 s.has_images,
                 s.request_type,
+                s.meta_tool_strategy,
+                s.meta_tool_count,
                 COALESCE(t.tool_names, '') AS tool_names,
                 COALESCE(t.tool_details, '') AS tool_details
             FROM ({_SESSIONS_AGG_SUBQUERY}) s
@@ -228,7 +233,51 @@ class LineageReader:
             """
         conn = self._ensure_conn()
         cur = conn.execute(sql, (*extra_params, limit, offset))
-        return [dict(row) for row in cur.fetchall()]
+        results = []
+        for row in cur.fetchall():
+            d = dict(row)
+            # Fallback: if tool JOIN returned empty but metadata says tools were used,
+            # fetch tool names from the execution record's metadata JSON
+            if not d.get("tool_names") and d.get("meta_tool_count") and d.get("meta_tool_count") > 0:
+                d["tool_names"], d["tool_details"] = self._extract_tool_names_from_metadata(
+                    d["session_id"]
+                )
+            d.pop("meta_tool_strategy", None)
+            d.pop("meta_tool_count", None)
+            results.append(d)
+        return results
+
+    def _extract_tool_names_from_metadata(self, session_id: str) -> tuple[str, str]:
+        """Fallback: extract tool names from execution record metadata JSON.
+
+        Used when the tool events JOIN returns empty (tool_call records missing)
+        but the execution metadata says tools were used.
+        """
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """SELECT json_extract(record_json, '$.metadata.tool_interactions') AS ti
+               FROM wal_records
+               WHERE session_id = ? AND event_type = 'execution'
+                 AND json_extract(record_json, '$.metadata.tool_interaction_count') > 0
+               LIMIT 1""",
+            (session_id,),
+        )
+        row = cur.fetchone()
+        if not row or not row["ti"]:
+            return "", ""
+        try:
+            interactions = json.loads(row["ti"])
+            names = set()
+            details = set()
+            for ti in interactions:
+                name = ti.get("tool_name") or ti.get("name") or ""
+                source = ti.get("source") or ti.get("tool_type") or "unknown"
+                if name:
+                    names.add(name)
+                    details.add(f"{name}:{source}")
+            return ",".join(sorted(names)), ",".join(sorted(details))
+        except (json.JSONDecodeError, TypeError):
+            return "", ""
 
     def count_sessions(self, search: str | None = None) -> int:
         """Count sessions matching the same filters as list_sessions (excluding limit/offset)."""

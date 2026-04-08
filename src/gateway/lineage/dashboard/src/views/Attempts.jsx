@@ -187,7 +187,7 @@ export default function Attempts({ navigate, params = {} }) {
     setError(null);
     try {
       const data = await getAttempts(limit, offset, { q: qParam, sort: sortCol, order: sortDir });
-      setItems(data.items || []);
+      setItems(data.attempts || data.items || []);
       setStats(data.stats || {});
       setTotal(Number(data.total) || 0);
     } catch (e) {
