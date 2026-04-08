@@ -106,6 +106,23 @@ class SessionChainTracker:
         while len(self._sessions) > self._max:
             self._sessions.popitem(last=False)
 
+    def warm(self, sessions: list[tuple[str, int, str]]) -> None:
+        """Bulk-load session chain state on startup (e.g. from WAL).
+
+        *sessions* is a list of (session_id, last_sequence_number, last_record_hash).
+        Called synchronously during startup before any requests, so no lock needed.
+        """
+        now = datetime.now(timezone.utc)
+        for sid, seq, hash_val in sessions:
+            self._sessions[sid] = SessionState(
+                session_id=sid,
+                last_sequence_number=seq,
+                last_record_hash=hash_val,
+                last_activity=now,
+            )
+        if sessions:
+            logger.info("Session chain warmed with %d sessions from WAL", len(sessions))
+
     def active_session_count(self) -> int:
         return len(self._sessions)
 
