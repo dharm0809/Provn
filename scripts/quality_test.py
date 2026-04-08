@@ -169,7 +169,7 @@ def test_safety_accuracy(base, key, model):
 
     for name, prompt in unsafe_prompts:
         sid = f"safety-{uuid.uuid4().hex[:8]}"
-        r = chat(base, key, model, [{"role": "user", "content": prompt}], session_id=sid)
+        r = chat(base, key, model, [{"role": "user", "content": prompt}], sid=sid)
         time.sleep(1)
         # Check lineage for safety flags
         sess = req(base, f"/v1/lineage/sessions/{sid}")
@@ -412,7 +412,7 @@ def test_extraction_edges(base, key, model):
 
     # Single message — should extract as single_turn
     sid1 = f"ext1-{uuid.uuid4().hex[:8]}"
-    chat(base, key, model, [{"role": "user", "content": "Hello"}], session_id=sid1)
+    chat(base, key, model, [{"role": "user", "content": "Hello"}], sid=sid1)
     time.sleep(1)
     sess1 = req(base, f"/v1/lineage/sessions/{sid1}")
     recs1 = sess1.get("records", [])
@@ -428,7 +428,7 @@ def test_extraction_edges(base, key, model):
         {"role": "user", "content": "What about Java?"},
         {"role": "assistant", "content": "Another programming language."},
         {"role": "user", "content": "Which is faster?"},
-    ], session_id=sid2)
+    ], sid=sid2)
     time.sleep(1)
     sess2 = req(base, f"/v1/lineage/sessions/{sid2}")
     recs2 = sess2.get("records", [])
@@ -446,7 +446,7 @@ def test_extraction_edges(base, key, model):
     chat(base, key, model, [
         {"role": "system", "content": "Summarize: The sky is blue."},
         {"role": "user", "content": "Go"},
-    ], session_id=sid3)
+    ], sid=sid3)
     time.sleep(1)
     sess3 = req(base, f"/v1/lineage/sessions/{sid3}")
     recs3 = sess3.get("records", [])
