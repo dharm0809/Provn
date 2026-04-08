@@ -69,7 +69,7 @@ function ModelsView({ refresh }) {
   const [attestations, setAttestations] = useState([]);
   const [modelCaps, setModelCaps] = useState({});
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ model_id: '', provider: 'ollama', notes: '' });
+  const [form, setForm] = useState({ model_id: '', provider: 'ollama', endpoint: '', notes: '' });
   const [loading, setLoading] = useState(true);
   const [discovered, setDiscovered] = useState(null);
   const [discovering, setDiscovering] = useState(false);
@@ -109,11 +109,24 @@ function ModelsView({ refresh }) {
     });
   }, [attestations, sortCol, sortDir]);
 
+  const endpointFromNotes = (notes) => {
+    if (!notes) return '';
+    const m = String(notes).match(/(?:^|\n)\s*endpoint:\s*(.+)\s*$/i);
+    return m ? m[1].trim() : '';
+  };
+  const notesWithoutEndpoint = (notes) => {
+    if (!notes) return '';
+    return String(notes).replace(/(?:^|\n)\s*endpoint:\s*.+\s*$/i, '').trim();
+  };
+
   const submit = async () => {
-    if (!form.model_id.trim()) return;
+    if (!form.model_id.trim() || !form.endpoint.trim()) return;
     try {
-      await api.createAttestation({ model_id: form.model_id, provider: form.provider, status: 'active', notes: form.notes });
-      setShowForm(false); setForm({ model_id: '', provider: 'ollama', notes: '' }); load();
+      const mergedNotes = form.notes?.trim()
+        ? `endpoint: ${form.endpoint.trim()}\n${form.notes.trim()}`
+        : `endpoint: ${form.endpoint.trim()}`;
+      await api.createAttestation({ model_id: form.model_id, provider: form.provider, status: 'active', notes: mergedNotes });
+      setShowForm(false); setForm({ model_id: '', provider: 'ollama', endpoint: '', notes: '' }); load();
     } catch (e) { if (e.message === 'AUTH') refresh(); }
   };
 
@@ -191,11 +204,20 @@ function ModelsView({ refresh }) {
               </div>
             </div>
             <div className="form-group">
+              <label className="form-label">Model Endpoint (required)</label>
+              <input
+                className="form-input"
+                placeholder="e.g. http://localhost:11434 or 10.0.0.5:8080"
+                value={form.endpoint}
+                onChange={e => setForm({ ...form, endpoint: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
               <label className="form-label">Notes</label>
               <input className="form-input" placeholder="Optional notes" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
             </div>
             <div className="form-actions">
-              <button className="btn-primary" onClick={submit}>Register</button>
+              <button className="btn-primary" onClick={submit} disabled={!form.model_id.trim() || !form.endpoint.trim()}>Register</button>
               <button className="btn-ghost" onClick={() => setShowForm(false)}>Cancel</button>
             </div>
           </div>
@@ -211,7 +233,7 @@ function ModelsView({ refresh }) {
                 <th className="sortable" onClick={() => toggleSort('provider')}>Provider <SortArrow col="provider" sortCol={sortCol} sortDir={sortDir} /></th>
                 <th className="sortable" onClick={() => toggleSort('status')}>Status <SortArrow col="status" sortCol={sortCol} sortDir={sortDir} /></th>
                 <th className="sortable" onClick={() => toggleSort('verification_level')}>Verification <SortArrow col="verification_level" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th>Notes</th><th style={{ textAlign: 'right' }}>Actions</th>
+                <th>Endpoint</th><th>Notes</th><th style={{ textAlign: 'right' }}>Actions</th>
               </tr></thead>
               <tbody>
                 {sortedAttestations.map(a => (
@@ -220,7 +242,8 @@ function ModelsView({ refresh }) {
                     <td className="mono">{a.provider}</td>
                     <td><span className={`badge ${a.status === 'active' ? 'badge-pass' : a.status === 'revoked' ? 'badge-fail' : 'badge-warn'}`}>{a.status}</span></td>
                     <td><span className="badge badge-muted">{a.verification_level}</span></td>
-                    <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.notes || '-'}</td>
+                    <td className="mono" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{endpointFromNotes(a.notes) || '-'}</td>
+                    <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{notesWithoutEndpoint(a.notes) || '-'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                         {a.status === 'active'
@@ -624,47 +647,76 @@ function StatusView({ refresh, health }) {
   const caps = s.model_capabilities || health?.model_capabilities || {};
   const capKeys = Object.keys(caps);
   const provs = s.providers || [];
+  const StatusRow = ({ label, children }) => (
+    <div className="status-row">
+      <div className="status-row-label">{label}</div>
+      <div className="status-row-value">{children}</div>
+    </div>
+  );
 
   return (
-    <div className="status-grid">
-      <div className="card">
-        <div className="status-card-header"><span className="icon">◆</span> Gateway</div>
-        <div className="detail-grid">
-          <div className="detail-label">Gateway ID</div><div className="detail-value mono">{s.gateway_id || '-'}</div>
-          <div className="detail-label">Tenant</div><div className="detail-value">{s.tenant_id || '-'}</div>
-          <div className="detail-label">Enforcement</div><div className="detail-value">{s.enforcement_mode || '-'}</div>
-          <div className="detail-label">Sync Mode</div><div className="detail-value">{s.sync_mode || '-'}</div>
-          <div className="detail-label">Uptime</div><div className="detail-value">{formatUptime(s.uptime_seconds || 0)}</div>
-        </div>
-      </div>
+    <div className="status-plain">
+      <section className="status-section">
+        <h3 className="status-section-title">Gateway</h3>
+        <StatusRow label="Gateway ID"><span className="mono">{s.gateway_id || '-'}</span></StatusRow>
+        <StatusRow label="Tenant">{s.tenant_id || '-'}</StatusRow>
+        <StatusRow label="Enforcement">{s.enforcement_mode || '-'}</StatusRow>
+        <StatusRow label="Sync Mode">{s.sync_mode || '-'}</StatusRow>
+        <StatusRow label="Uptime">{formatUptime(s.uptime_seconds || 0)}</StatusRow>
+      </section>
 
-      <div className="card">
-        <div className="status-card-header"><span className="icon">◆</span> Caches</div>
-        <div className="detail-grid">
-          {s.attestation_cache && <><div className="detail-label">Attestation Entries</div><div className="detail-value">{s.attestation_cache.entries}</div></>}
-          {s.policy_cache && (
-            <>
-              <div className="detail-label">Policy Version</div><div className="detail-value">{s.policy_cache.version}</div>
-              <div className="detail-label">Policy Stale</div><div className="detail-value">{s.policy_cache.stale ? 'YES' : 'no'}</div>
-              {s.policy_cache.last_sync && <><div className="detail-label">Last Sync</div><div className="detail-value">{formatTime(s.policy_cache.last_sync)}</div></>}
-            </>
-          )}
-        </div>
-      </div>
+      <section className="status-section">
+        <h3 className="status-section-title">Caches</h3>
+        {s.attestation_cache && <StatusRow label="Attestation Entries">{s.attestation_cache.entries}</StatusRow>}
+        {s.policy_cache && (
+          <>
+            <StatusRow label="Policy Version">{s.policy_cache.version}</StatusRow>
+            <StatusRow label="Policy Stale">{s.policy_cache.stale ? 'YES' : 'no'}</StatusRow>
+            {s.policy_cache.last_sync && <StatusRow label="Last Sync">{formatTime(s.policy_cache.last_sync)}</StatusRow>}
+          </>
+        )}
+      </section>
 
       {s.wal && (
-        <div className="card">
-          <div className="status-card-header"><span className="icon">◆</span> WAL Storage</div>
-          <div className="detail-grid">
-            <div className="detail-label">Pending Records</div><div className="detail-value">{s.wal.pending_records}</div>
-            <div className="detail-label">Disk Usage</div><div className="detail-value">{formatNumber(s.wal.disk_usage_bytes)} bytes</div>
-          </div>
-        </div>
+        <section className="status-section">
+          <h3 className="status-section-title">WAL Storage</h3>
+          <StatusRow label="Pending Records">{s.wal.pending_records}</StatusRow>
+          <StatusRow label="Disk Usage">{formatNumber(s.wal.disk_usage_bytes)} bytes</StatusRow>
+        </section>
+      )}
+
+      <section className="status-section">
+        <h3 className="status-section-title">Auth & Security</h3>
+        <StatusRow label="Auth Mode">{s.auth_mode || 'api_key'}</StatusRow>
+        <StatusRow label="JWT Configured">{s.jwt_configured ? 'yes' : 'no'}</StatusRow>
+        {s.content_analyzers ? (
+          <>
+            <StatusRow label="Content Analyzers">{s.content_analyzers.count}</StatusRow>
+            <StatusRow label="Analyzer Types">{s.content_analyzers.types?.join(', ') || '-'}</StatusRow>
+          </>
+        ) : (
+          <StatusRow label="Content Analyzers">0</StatusRow>
+        )}
+        <StatusRow label="Lineage">{s.lineage_enabled ? 'enabled' : 'disabled'}</StatusRow>
+      </section>
+
+      {(s.session_chain || s.token_budget || s.model_routes_count != null) && (
+        <section className="status-section">
+          <h3 className="status-section-title">Runtime State</h3>
+          {s.session_chain && <StatusRow label="Active Sessions">{s.session_chain.active_sessions}</StatusRow>}
+          {s.token_budget && (
+            <>
+              <StatusRow label="Tokens Used">{formatNumber(s.token_budget.tokens_used || 0)}</StatusRow>
+              <StatusRow label="Max Tokens">{formatNumber(s.token_budget.max_tokens || 0)}</StatusRow>
+            </>
+          )}
+          {s.model_routes_count != null && <StatusRow label="Model Routes">{s.model_routes_count}</StatusRow>}
+        </section>
       )}
 
       {capKeys.length > 0 && (
-        <div className="card">
-          <div className="status-card-header"><span className="icon">⚙</span> Model Capabilities</div>
+        <section className="status-section">
+          <h3 className="status-section-title">Model Capabilities</h3>
           <div className="table-wrap">
             <table>
               <thead><tr><th>Model</th><th>Supports Tools</th></tr></thead>
@@ -678,29 +730,12 @@ function StatusView({ refresh, health }) {
               </tbody>
             </table>
           </div>
-        </div>
+        </section>
       )}
 
-      <div className="card">
-        <div className="status-card-header"><span className="icon">◆</span> Auth & Security</div>
-        <div className="detail-grid">
-          <div className="detail-label">Auth Mode</div><div className="detail-value">{s.auth_mode || 'api_key'}</div>
-          <div className="detail-label">JWT Configured</div><div className="detail-value">{s.jwt_configured ? 'yes' : 'no'}</div>
-          {s.content_analyzers ? (
-            <>
-              <div className="detail-label">Content Analyzers</div><div className="detail-value">{s.content_analyzers.count}</div>
-              <div className="detail-label">Analyzer Types</div><div className="detail-value">{s.content_analyzers.types?.join(', ') || '-'}</div>
-            </>
-          ) : (
-            <><div className="detail-label">Content Analyzers</div><div className="detail-value">0</div></>
-          )}
-          <div className="detail-label">Lineage</div><div className="detail-value">{s.lineage_enabled ? 'enabled' : 'disabled'}</div>
-        </div>
-      </div>
-
       {provs.length > 0 && (
-        <div className="card">
-          <div className="status-card-header"><span className="icon">◆</span> Configured Providers</div>
+        <section className="status-section">
+          <h3 className="status-section-title">Configured Providers</h3>
           <div className="table-wrap">
             <table>
               <thead><tr><th>Provider</th><th>URL</th></tr></thead>
@@ -711,31 +746,14 @@ function StatusView({ refresh, health }) {
               </tbody>
             </table>
           </div>
-        </div>
+        </section>
       )}
 
-      {(s.session_chain || s.token_budget) && (
-        <div className="card">
-          <div className="status-card-header"><span className="icon">◆</span> Runtime State</div>
-          <div className="detail-grid">
-            {s.session_chain && <><div className="detail-label">Active Sessions</div><div className="detail-value">{s.session_chain.active_sessions}</div></>}
-            {s.token_budget && (
-              <>
-                <div className="detail-label">Tokens Used</div><div className="detail-value">{formatNumber(s.token_budget.tokens_used || 0)}</div>
-                <div className="detail-label">Max Tokens</div><div className="detail-value">{formatNumber(s.token_budget.max_tokens || 0)}</div>
-              </>
-            )}
-            {s.model_routes_count != null && <><div className="detail-label">Model Routes</div><div className="detail-value">{s.model_routes_count}</div></>}
-          </div>
-        </div>
-      )}
-
-      {/* ONNX Intelligence Models */}
       {s.onnx_models?.length > 0 && (
-        <div className="card">
-          <div className="status-card-header"><span className="icon">◆</span> ONNX Intelligence Models</div>
+        <section className="status-section">
+          <h3 className="status-section-title">ONNX Intelligence Models</h3>
           {s.onnx_models.map((m, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: i < s.onnx_models.length - 1 ? '1px solid var(--border)' : 'none' }}>
+            <div key={i} className="status-inline-item" style={{ borderBottom: i < s.onnx_models.length - 1 ? '1px solid var(--border)' : 'none' }}>
               <span className={`badge ${m.loaded ? 'badge-pass' : 'badge-fail'}`} style={{ fontSize: 11, flexShrink: 0 }}>
                 {m.loaded ? 'LOADED' : 'OFFLINE'}
               </span>
@@ -749,88 +767,61 @@ function StatusView({ refresh, health }) {
               </div>
             </div>
           ))}
-        </div>
+        </section>
       )}
 
-      {/* Intelligence Features */}
       {s.intelligence && (
-        <div className="card">
-          <div className="status-card-header"><span className="icon">◆</span> Intelligence Engine</div>
-          <div className="detail-grid">
-            {s.intelligence.anomaly_detector && (
-              <>
-                <div className="detail-label">Anomaly Detector</div>
-                <div className="detail-value">
-                  {s.intelligence.anomaly_detector.models_tracked} models tracked ·
-                  {' '}{s.intelligence.anomaly_detector.total_records_analyzed} records analyzed
-                </div>
-              </>
-            )}
-            {s.intelligence.consistency_tracker && (
-              <>
-                <div className="detail-label">Consistency Tracker</div>
-                <div className="detail-value">
-                  {s.intelligence.consistency_tracker.total_pairs_stored} pairs ·
-                  {' '}{s.intelligence.consistency_tracker.total_comparisons} comparisons ·
-                  {' '}{s.intelligence.consistency_tracker.recent_inconsistencies} inconsistencies
-                </div>
-              </>
-            )}
-            {s.intelligence.consistency_tracker?.model_reliability && Object.keys(s.intelligence.consistency_tracker.model_reliability).length > 0 && (
-              <>
-                <div className="detail-label">Model Reliability</div>
-                <div className="detail-value">
-                  {Object.entries(s.intelligence.consistency_tracker.model_reliability).map(([model, rel]) => (
-                    <div key={model} style={{ marginBottom: 4 }}>
-                      <span className="mono" style={{ fontSize: 12 }}>{model}</span>
-                      <span className={`badge ${rel.score >= 0.9 ? 'badge-pass' : rel.score >= 0.7 ? 'badge-warn' : 'badge-fail'}`} style={{ fontSize: 10, marginLeft: 6 }}>
-                        {(rel.score * 100).toFixed(0)}%
-                      </span>
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>
-                        ({rel.comparisons} comparisons)
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-            {s.intelligence.field_registry && (
-              <>
-                <div className="detail-label">Schema Overflow</div>
-                <div className="detail-value">
-                  {s.intelligence.field_registry.tracked_fields} fields tracked ·
-                  {' '}{s.intelligence.field_registry.promotion_candidates} promotion candidates
-                </div>
-              </>
-            )}
-            {s.intelligence.background_worker && (
-              <>
-                <div className="detail-label">LLM Worker</div>
-                <div className="detail-value">
-                  <span className={`badge ${s.intelligence.background_worker.running ? 'badge-pass' : 'badge-muted'}`} style={{ fontSize: 10 }}>
-                    {s.intelligence.background_worker.running ? 'RUNNING' : 'STOPPED'}
+        <section className="status-section">
+          <h3 className="status-section-title">Intelligence Engine</h3>
+          {s.intelligence.anomaly_detector && (
+            <StatusRow label="Anomaly Detector">
+              {s.intelligence.anomaly_detector.models_tracked} models tracked · {s.intelligence.anomaly_detector.total_records_analyzed} records analyzed
+            </StatusRow>
+          )}
+          {s.intelligence.consistency_tracker && (
+            <StatusRow label="Consistency Tracker">
+              {s.intelligence.consistency_tracker.total_pairs_stored} pairs · {s.intelligence.consistency_tracker.total_comparisons} comparisons · {s.intelligence.consistency_tracker.recent_inconsistencies} inconsistencies
+            </StatusRow>
+          )}
+          {s.intelligence.consistency_tracker?.model_reliability && Object.keys(s.intelligence.consistency_tracker.model_reliability).length > 0 && (
+            <StatusRow label="Model Reliability">
+              {Object.entries(s.intelligence.consistency_tracker.model_reliability).map(([model, rel]) => (
+                <div key={model} style={{ marginBottom: 4 }}>
+                  <span className="mono" style={{ fontSize: 12 }}>{model}</span>
+                  <span className={`badge ${rel.score >= 0.9 ? 'badge-pass' : rel.score >= 0.7 ? 'badge-warn' : 'badge-fail'}`} style={{ fontSize: 10, marginLeft: 6 }}>
+                    {(rel.score * 100).toFixed(0)}%
                   </span>
-                  {' '}{s.intelligence.background_worker.processed} processed ·
-                  {' '}{s.intelligence.background_worker.distillation_samples} distillation samples
-                  {s.intelligence.background_worker.queue_size > 0 && (
-                    <span style={{ marginLeft: 6, color: 'var(--gold)' }}>({s.intelligence.background_worker.queue_size} queued)</span>
-                  )}
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>({rel.comparisons} comparisons)</span>
                 </div>
-              </>
-            )}
-          </div>
-        </div>
+              ))}
+            </StatusRow>
+          )}
+          {s.intelligence.field_registry && (
+            <StatusRow label="Schema Overflow">
+              {s.intelligence.field_registry.tracked_fields} fields tracked · {s.intelligence.field_registry.promotion_candidates} promotion candidates
+            </StatusRow>
+          )}
+          {s.intelligence.background_worker && (
+            <StatusRow label="LLM Worker">
+              <span className={`badge ${s.intelligence.background_worker.running ? 'badge-pass' : 'badge-muted'}`} style={{ fontSize: 10 }}>
+                {s.intelligence.background_worker.running ? 'RUNNING' : 'STOPPED'}
+              </span>
+              {' '}{s.intelligence.background_worker.processed} processed · {s.intelligence.background_worker.distillation_samples} distillation samples
+              {s.intelligence.background_worker.queue_size > 0 && (
+                <span style={{ marginLeft: 6, color: 'var(--gold)' }}>({s.intelligence.background_worker.queue_size} queued)</span>
+              )}
+            </StatusRow>
+          )}
+        </section>
       )}
 
-      <div className="card">
-        <div className="status-card-header"><span className="icon">◆</span> Health</div>
-        <div className="detail-grid">
-          <div className="detail-label">Status</div><div className="detail-value">{health?.status || '-'}</div>
-          <div className="detail-label">Uptime</div><div className="detail-value">{formatUptime(health?.uptime_seconds || 0)}</div>
-          {health?.session_chain && <><div className="detail-label">Active Sessions</div><div className="detail-value">{health.session_chain.active_sessions}</div></>}
-          {health?.token_budget && <><div className="detail-label">Token Usage</div><div className="detail-value">{health.token_budget.tokens_used} / {health.token_budget.max_tokens}</div></>}
-        </div>
-      </div>
+      <section className="status-section">
+        <h3 className="status-section-title">Health</h3>
+        <StatusRow label="Status">{health?.status || '-'}</StatusRow>
+        <StatusRow label="Uptime">{formatUptime(health?.uptime_seconds || 0)}</StatusRow>
+        {health?.session_chain && <StatusRow label="Active Sessions">{health.session_chain.active_sessions}</StatusRow>}
+        {health?.token_budget && <StatusRow label="Token Usage">{health.token_budget.tokens_used} / {health.token_budget.max_tokens}</StatusRow>}
+      </section>
     </div>
   );
 }
@@ -845,20 +836,24 @@ export default function Control({ navigate, params = {}, health }) {
 
   if (!authed) return <AuthGate onAuth={() => setAuthed(true)} />;
 
-  const subTabs = ['models', 'policies', 'budgets', 'status'];
+  const subTabs = ['models', 'governance', 'status'];
 
   return (
     <div className="fade-child">
       <div className="control-subnav">
         {subTabs.map(t => (
           <button key={t} className={`control-subtab${sub === t ? ' active' : ''}`} onClick={() => setSub(t)}>
-            {t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === 'governance' ? 'Policies & Budgets' : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
       {sub === 'models' && <ModelsView refresh={refresh} />}
-      {sub === 'policies' && <PoliciesView refresh={refresh} />}
-      {sub === 'budgets' && <BudgetsView refresh={refresh} health={health} />}
+      {sub === 'governance' && (
+        <div style={{ display: 'grid', gap: 16 }}>
+          <PoliciesView refresh={refresh} />
+          <BudgetsView refresh={refresh} health={health} />
+        </div>
+      )}
       {sub === 'status' && <StatusView refresh={refresh} health={health} />}
     </div>
   );
