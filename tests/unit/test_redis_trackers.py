@@ -51,13 +51,13 @@ def _mock_budget_redis():
 @pytest.mark.anyio
 async def test_redis_session_next_chain_values_first_call_returns_genesis():
     client, pipe = _mock_redis()
-    # First call: no existing seq or hash (HGET returns None for both)
-    pipe.execute = AsyncMock(return_value=[None, None, True])
+    # First call: HINCRBY on non-existent key returns 1, HGET hash returns None
+    pipe.execute = AsyncMock(return_value=[1, None, True])
 
     tracker = RedisSessionChainTracker(client, ttl=3600)
     seq, prev = await tracker.next_chain_values("sess-abc")
 
-    # First record should be seq=0, matching in-memory SessionChainTracker (Finding 1 fix)
+    # First record should be seq=0 (HINCRBY returns 1, minus 1 = 0)
     assert seq == 0
     assert prev == GENESIS_HASH
 
@@ -66,8 +66,8 @@ async def test_redis_session_next_chain_values_first_call_returns_genesis():
 async def test_redis_session_next_chain_values_subsequent_call_returns_stored_hash():
     client, pipe = _mock_redis()
     stored_hash = "a" * 128
-    # Redis stores seq=1 (last written); next call returns (2, stored_hash)
-    pipe.execute = AsyncMock(return_value=[b"1", stored_hash.encode(), True])
+    # HINCRBY increments to 3, HGET returns stored hash
+    pipe.execute = AsyncMock(return_value=[3, stored_hash.encode(), True])
 
     tracker = RedisSessionChainTracker(client, ttl=3600)
     seq, prev = await tracker.next_chain_values("sess-abc")
@@ -490,8 +490,8 @@ async def test_redis_session_next_chain_values_str_hash_decoded_correctly():
     """prev_hash is returned correctly whether Redis returns bytes or str."""
     client, pipe = _mock_redis()
     stored_hash = "b" * 128
-    # Return str instead of bytes (decode_responses=True Redis client)
-    pipe.execute = AsyncMock(return_value=[b"2", stored_hash, True])  # hash is already str
+    # HINCRBY returns 4 (incremented), HGET returns str hash (decode_responses=True)
+    pipe.execute = AsyncMock(return_value=[4, stored_hash, True])
 
     tracker = RedisSessionChainTracker(client, ttl=3600)
     seq, prev = await tracker.next_chain_values("sess-str")
