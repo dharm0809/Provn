@@ -68,6 +68,9 @@ export function dispositionClass(d) {
 
 export function dispositionLabel(d) {
   if (!d) return '-';
+  if (d === 'allowed' || d === 'forwarded') return 'ALLOWED';
+  if (d === 'error_provider') return 'ERROR PROVIDER';
+  if (d.startsWith('error')) return 'ERROR';
   return d.replace(/_/g, ' ').toUpperCase();
 }
 

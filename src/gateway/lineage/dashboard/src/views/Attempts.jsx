@@ -269,7 +269,7 @@ export default function Attempts({ navigate, params = {} }) {
         rangeEnd={rangeEnd}
       />
 
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card" style={{ padding: 0, minHeight: 'calc(100vh - 220px)', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '16px 18px 0' }}>
           <div className="card-head" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 12 }}>
             <div>
@@ -296,7 +296,7 @@ export default function Attempts({ navigate, params = {} }) {
           </div>
         </div>
 
-        <div className="table-wrap sessions-table-wrap">
+        <div className="table-wrap sessions-table-wrap" style={{ flex: 1 }}>
           <table className="sessions-table" style={{ width: '100%' }}>
             <thead>
               <tr>

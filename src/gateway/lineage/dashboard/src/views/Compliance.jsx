@@ -15,6 +15,44 @@ const FRAMEWORKS = [
   { id: 'soc2', label: 'SOC 2 Type II' },
   { id: 'iso42001', label: 'ISO 42001' },
 ];
+const FRAMEWORK_INFO = {
+  eu_ai_act: {
+    summary: 'EU AI Act readiness report focused on governance, transparency, human oversight, and technical robustness.',
+    includes: [
+      'Risk and policy enforcement evidence',
+      'Audit trail and chain integrity verification',
+      'Model usage and accountability metadata',
+      'Content safety and monitoring posture',
+    ],
+  },
+  nist: {
+    summary: 'NIST AI RMF mapping report aligned to Govern, Map, Measure, and Manage outcomes.',
+    includes: [
+      'Operational governance controls and gaps',
+      'Measurement evidence from requests and decisions',
+      'Monitoring and incident-readiness indicators',
+      'Recommended improvements by risk area',
+    ],
+  },
+  soc2: {
+    summary: 'SOC 2 Type II-oriented control evidence summary for security, availability, and processing integrity.',
+    includes: [
+      'Access/auth mode and security configuration snapshot',
+      'Audit logging and retention evidence',
+      'Change and policy enforcement signals',
+      'Integrity checks and operational reliability metrics',
+    ],
+  },
+  iso42001: {
+    summary: 'ISO 42001 AI management system evidence package for policy, risk, operations, and continual improvement.',
+    includes: [
+      'AI governance process evidence',
+      'Risk and control implementation posture',
+      'Traceability and lifecycle accountability artifacts',
+      'Monitoring metrics and improvement recommendations',
+    ],
+  },
+};
 
 const FORMAT_MIME = { json: 'application/json', csv: 'text/csv', pdf: 'application/pdf' };
 
@@ -35,6 +73,7 @@ export default function Compliance() {
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(null);
   const [error, setError] = useState(null);
+  const selectedFramework = FRAMEWORK_INFO[framework];
 
   const fetchPreview = async () => {
     setLoading(true);
@@ -107,6 +146,20 @@ export default function Compliance() {
           </button>
         </div>
       </div>
+      {selectedFramework && (
+        <div className="compliance-framework-info">
+          <div className="compliance-framework-title">
+            {FRAMEWORKS.find(f => f.id === framework)?.label} report
+          </div>
+          <p className="compliance-framework-summary">{selectedFramework.summary}</p>
+          <div className="compliance-framework-includes-title">This report includes:</div>
+          <ul className="compliance-framework-list">
+            {selectedFramework.includes.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {error && <div className="compliance-error">{error}</div>}
 
