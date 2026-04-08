@@ -222,6 +222,12 @@ class WalacorClient:
         data = validate_execution(data)
         meta = data.pop("metadata", None)
         fm = data.pop("file_metadata", None)
+        # Preserve chain fields inside metadata (Walacor schema doesn't have top-level columns)
+        for _chain_key in ("sequence_number", "record_hash", "previous_record_hash"):
+            if data.get(_chain_key) is not None:
+                if meta is None:
+                    meta = {}
+                meta[_chain_key] = data[_chain_key]
         # Store file_metadata inside metadata (no separate Walacor schema field needed)
         if fm and meta:
             meta["file_metadata"] = fm

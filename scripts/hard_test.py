@@ -168,9 +168,9 @@ def test_schema_enrichment(base, key, model):
     r = chat(base, key, model, [
         {"role": "user", "content": "Name three colors."},
     ], sid=sid)
-    time.sleep(2)
+    time.sleep(3)
 
-    recs = get_record(base, key, sid)
+    recs = get_record(base, key, sid, retries=8, delay=2)
     if not recs:
         check("Record exists", False, "No records found")
         return
