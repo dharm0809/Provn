@@ -58,10 +58,13 @@ def clear_analysis_cache() -> None:
 async def _run_analyzer(analyzer: ContentAnalyzer, text: str) -> Decision | None:
     """Run a single analyzer under its declared timeout. Returns fail-open Decision on timeout/error."""
     try:
-        return await asyncio.wait_for(
-            analyzer.analyze(text),
-            timeout=analyzer.timeout_ms / 1000.0,
-        )
+        result = analyzer.analyze(text)
+        # Support both sync and async analyzers:
+        # - Sync analyzers (PII, toxicity, DLP, SafetyClassifier) return Decision directly
+        # - Async analyzers (LlamaGuard) return a coroutine
+        if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+            return await asyncio.wait_for(result, timeout=analyzer.timeout_ms / 1000.0)
+        return result
     except asyncio.TimeoutError:
         logger.warning(
             "Content analyzer %s timed out after %dms — returning fail-open PASS",
