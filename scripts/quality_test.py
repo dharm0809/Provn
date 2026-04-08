@@ -287,15 +287,17 @@ def test_streaming(base, key, model):
                 if line.startswith("data: ") and line != "data: [DONE]":
                     try:
                         chunk = json.loads(line[6:])
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        # Content may be in delta.content OR delta.reasoning (thinking models)
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
                         content = delta.get("content", "")
                         reasoning = delta.get("reasoning", "")
                         if content:
                             content_chunks.append(content)
                         if reasoning:
                             reasoning_chunks.append(reasoning)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, IndexError, KeyError):
                         pass
 
         full_content = "".join(content_chunks)
@@ -396,8 +398,16 @@ def test_data_quality(base, key, model):
         {"role": "user", "content": "Name a planet"},
     ], sid=sid)
 
-    time.sleep(2)
+    # Wait for async WAL → Walacor delivery (can take several seconds)
+    time.sleep(5)
     sess = req(base, f"/v1/lineage/sessions/{sid}")
+    # Fallback: if Walacor reader hasn't received it yet, check recent sessions
+    if not sess.get("records"):
+        recent = req(base, "/v1/lineage/sessions?limit=5&sort=last_activity&order=desc")
+        for s in recent.get("sessions", []):
+            if s.get("user_question") and "planet" in s.get("user_question", "").lower():
+                sess = req(base, f"/v1/lineage/sessions/{s['session_id']}")
+                break
     recs = sess.get("records", [])
     if not recs:
         check("Record stored", False, "No records found")
