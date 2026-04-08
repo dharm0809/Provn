@@ -659,6 +659,15 @@ def _init_session_chain(settings, ctx) -> None:
         settings.session_chain_ttl,
     )
 
+    # Warm in-memory tracker from WAL so chains survive gateway restarts
+    if ctx.redis_client is None and ctx.wal_writer is not None:
+        try:
+            heads = ctx.wal_writer.get_chain_heads(ttl_hours=settings.session_chain_ttl // 3600 or 1)
+            if heads and hasattr(ctx.session_chain, 'warm'):
+                ctx.session_chain.warm(heads)
+        except Exception:
+            logger.warning("Chain warm from WAL failed — new sessions will start fresh", exc_info=True)
+
 
 async def _init_tool_registry(settings, ctx) -> None:
     """Phase 14: MCP tool registry for the active tool strategy."""
