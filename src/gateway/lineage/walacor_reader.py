@@ -122,6 +122,9 @@ class WalacorLineageReader:
             if not meta.get("user_question") and sid in user_meta_map:
                 meta.update(user_meta_map[sid])
             tools = tool_map.get(sid, {})
+            # Fallback: extract tool info from execution metadata when tool events query returned empty
+            if not tools.get("tool_names") and meta.get("tool_names"):
+                tools = {"tool_names": meta["tool_names"], "tool_details": meta.get("tool_details", "")}
             results.append({
                 "session_id": sid,
                 "record_count": r.get("record_count", 0),
@@ -159,6 +162,24 @@ class WalacorLineageReader:
         # for the session display (the real user question is in an earlier record).
         # But ALWAYS preserve the actual request_type so system tasks are identifiable.
         is_system = request_type.startswith("system_task")
+
+        # Extract tool info from metadata.tool_interactions (always present in execution records)
+        tool_names = ""
+        tool_details = ""
+        tool_interactions = meta.get("tool_interactions", [])
+        if tool_interactions and isinstance(tool_interactions, list):
+            names = set()
+            details = set()
+            for ti in tool_interactions:
+                if isinstance(ti, dict):
+                    name = ti.get("tool_name") or ti.get("name") or ""
+                    source = ti.get("source") or ti.get("tool_type") or "unknown"
+                    if name:
+                        names.add(name)
+                        details.add(f"{name}:{source}")
+            tool_names = ",".join(sorted(names))
+            tool_details = ",".join(sorted(details))
+
         return {
             "user_question": None if is_system else (audit.get("user_question") or None),
             "has_rag_context": False if is_system else audit.get("has_rag_context", False),
@@ -166,6 +187,8 @@ class WalacorLineageReader:
             "has_images": False if is_system else audit.get("has_images", False),
             "request_type": request_type,  # Always preserve — don't mask system_task
             "user_message_count": audit.get("conversation_turns", 0) or 0,
+            "tool_names": tool_names,
+            "tool_details": tool_details,
         }
 
     async def _get_user_record_metadata(self, session_ids: list[str]) -> dict[str, dict]:
@@ -221,7 +244,7 @@ class WalacorLineageReader:
         try:
             rows = await self._client.query_complex(self._tool_etid, pipeline)
         except Exception:
-            logger.debug("Tool event indicator query failed", exc_info=True)
+            logger.warning("Tool event indicator query failed (falling back to metadata)", exc_info=True)
             return {}
 
         # Aggregate in Python: collect unique tool names and sources per session
