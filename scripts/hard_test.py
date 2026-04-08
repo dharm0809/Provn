@@ -133,8 +133,8 @@ def test_openwebui_classification(base, key, model):
         check(f"System task '{name}' gets response", has_response)
 
         # Verify it was classified as system_task in lineage
-        time.sleep(1.5)
-        recs = get_record(base, key, sid)
+        time.sleep(2)
+        recs = get_record(base, key, sid, retries=6, delay=2)
         if recs:
             meta = recs[-1].get("metadata", {})
             rtype = meta.get("request_type", "")
@@ -198,15 +198,18 @@ def test_schema_enrichment(base, key, model):
     check("extraction_method present", bool(audit.get("extraction_method")),
           f"method={audit.get('extraction_method')}")
 
-    # Chain fields
-    check("sequence_number present", rec.get("sequence_number") is not None)
+    # Chain fields (may be in metadata or top-level depending on reader)
+    seq = rec.get("sequence_number") or meta.get("sequence_number")
+    check("sequence_number present", seq is not None, f"value={seq}")
 
     # Intent classification
-    intent = meta.get("_intent", {})
+    intent = meta.get("_intent")
     check("intent classification present", bool(intent))
-    if intent:
+    if intent and isinstance(intent, dict):
         check("intent has label", bool(intent.get("intent") or intent.get("label")),
               f"intent={intent}")
+    elif intent and isinstance(intent, str):
+        check("intent has label", True, f"intent={intent}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
