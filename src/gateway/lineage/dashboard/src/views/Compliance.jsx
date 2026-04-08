@@ -161,6 +161,18 @@ export default function Compliance() {
         </div>
       )}
 
+      {loading && (
+        <div className="card" style={{ padding: '32px 24px', textAlign: 'center', marginBottom: 16 }}>
+          <div style={{ display: 'inline-block', width: 24, height: 24, border: '3px solid var(--border)', borderTopColor: 'var(--gold)', borderRadius: '50%', animation: 'spin 0.8s linear infinite', marginBottom: 12 }} />
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-secondary)' }}>
+            Generating {FRAMEWORKS.find(f => f.id === framework)?.label} report…
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+            Verifying chain integrity across all sessions. This may take 30–60 seconds.
+          </div>
+        </div>
+      )}
+
       {error && <div className="compliance-error">{error}</div>}
 
       {preview && (
