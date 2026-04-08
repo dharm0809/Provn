@@ -156,14 +156,15 @@ class WalacorLineageReader:
         audit = meta.get("walacor_audit", {})
         request_type = meta.get("request_type") or ""
         # If the last record is a system task, don't use its question/flags
-        # (the real user question is in an earlier record)
+        # for the session display (the real user question is in an earlier record).
+        # But ALWAYS preserve the actual request_type so system tasks are identifiable.
         is_system = request_type.startswith("system_task")
         return {
             "user_question": None if is_system else (audit.get("user_question") or None),
             "has_rag_context": False if is_system else audit.get("has_rag_context", False),
             "has_files": False if is_system else (audit.get("has_files", False) or audit.get("file_count", 0) > 0),
             "has_images": False if is_system else audit.get("has_images", False),
-            "request_type": "user_message" if is_system else request_type,
+            "request_type": request_type,  # Always preserve — don't mask system_task
             "user_message_count": audit.get("conversation_turns", 0) or 0,
         }
 
@@ -608,8 +609,8 @@ class WalacorLineageReader:
         rows = await self._client.query_complex(self._exec_etid, pipeline)
         return [
             {
-                "model_id": r["_id"]["model_id"],
-                "provider": r["_id"]["provider"],
+                "model_id": (r.get("_id") or {}).get("model_id", "unknown"),
+                "provider": (r.get("_id") or {}).get("provider", "unknown"),
                 "attestation_id": r.get("attestation_id"),
                 "request_count": r.get("request_count", 0),
                 "total_tokens": r.get("total_tokens", 0),
