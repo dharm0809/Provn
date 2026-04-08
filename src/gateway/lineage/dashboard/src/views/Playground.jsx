@@ -4,10 +4,8 @@ import { displayModel, verdictBadgeClass } from '../utils';
 
 
 function generateUUID() {
-  // generateUUID() requires secure context (HTTPS or localhost).
-  // Fallback for plain HTTP deployments.
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    try { return generateUUID(); } catch {}
+    try { return crypto.randomUUID(); } catch {}
   }
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = Math.random() * 16 | 0;
@@ -161,7 +159,10 @@ export default function Playground({ navigate }) {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await fetch('/v1/models');
+        const apiKey = getApiKey();
+        const resp = await fetch('/v1/models', {
+          headers: apiKey ? { 'X-API-Key': apiKey } : {},
+        });
         if (resp.ok) {
           const data = await resp.json();
           const ids = (data?.data || []).map(m => m.id).filter(Boolean);
