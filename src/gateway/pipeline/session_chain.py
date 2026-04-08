@@ -71,12 +71,21 @@ class SessionChainTracker:
             return next_seq, prev_hash
 
     async def update(self, session_id: str, sequence_number: int, record_hash: str) -> None:
-        """Record the chain state after a WAL write. Evicts stale sessions when over limit."""
+        """Record the chain hash after a WAL write. Evicts stale sessions when over limit.
+
+        Uses max(current, incoming) for sequence_number so that a slow request's
+        update() cannot regress the counter that a faster concurrent request
+        already advanced via next_chain_values().
+        """
         now = datetime.now(timezone.utc)
         async with self._lock:
+            existing = self._sessions.get(session_id)
+            # Never regress the sequence number — a concurrent next_chain_values()
+            # may have already advanced it past what this update() carries.
+            effective_seq = max(sequence_number, existing.last_sequence_number) if existing else sequence_number
             self._sessions[session_id] = SessionState(
                 session_id=session_id,
-                last_sequence_number=sequence_number,
+                last_sequence_number=effective_seq,
                 last_record_hash=record_hash,
                 last_activity=now,
             )
