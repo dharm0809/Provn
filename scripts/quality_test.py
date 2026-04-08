@@ -200,7 +200,7 @@ def test_anomaly_detection(base, key, model):
     sid_prefix = f"anomaly-{uuid.uuid4().hex[:6]}"
     for i in range(10):
         chat(base, key, model, [{"role": "user", "content": f"What is {i+1} + {i+1}?"}],
-             session_id=f"{sid_prefix}-{i}")
+             sid=f"{sid_prefix}-{i}")
 
     time.sleep(2)
 
@@ -225,9 +225,9 @@ def test_consistency_quality(base, key, model):
     q2 = "At what temperature in Celsius does water boil?"
 
     r1 = chat(base, key, model, [{"role": "user", "content": q1}],
-              session_id=f"cons-{uuid.uuid4().hex[:8]}")
+              sid=f"cons-{uuid.uuid4().hex[:8]}")
     r2 = chat(base, key, model, [{"role": "user", "content": q2}],
-              session_id=f"cons-{uuid.uuid4().hex[:8]}")
+              sid=f"cons-{uuid.uuid4().hex[:8]}")
 
     c1 = r1.get("choices", [{}])[0].get("message", {}).get("content", "").lower()
     c2 = r2.get("choices", [{}])[0].get("message", {}).get("content", "").lower()
@@ -363,7 +363,7 @@ def test_data_quality(base, key, model):
     r = chat(base, key, model, [
         {"role": "system", "content": "Be brief."},
         {"role": "user", "content": "Name a planet"},
-    ], session_id=sid)
+    ], sid=sid)
 
     time.sleep(2)
     sess = req(base, f"/v1/lineage/sessions/{sid}")
