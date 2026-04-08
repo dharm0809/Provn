@@ -245,7 +245,9 @@ class WalacorClient:
                 _keep = {"session_id", "prompt_id", "client_context", "request_type",
                          "user", "identity_source", "walacor_audit", "_intent",
                          "_intent_confidence", "_intent_tier", "_intent_reason",
-                         "chat_id", "user_email", "user_name"}
+                         "chat_id", "user_email", "user_name",
+                         "tool_strategy", "tool_interaction_count", "tool_interactions",
+                         "sequence_number", "record_hash", "previous_record_hash"}
                 meta = {k: v for k, v in meta.items() if k in _keep}
                 raw = json.dumps(meta)
             data["metadata_json"] = raw
@@ -310,11 +312,13 @@ class WalacorClient:
             # Swallow — attempt records are best-effort
 
     # Fields defined in the Walacor gateway_tool_events schema (ETId 9000013).
+    # NOTE: "sources" is NOT in the Walacor ETId 9000013 schema — adding it
+    # causes a 400 rejection. Sources data is preserved in the WAL (local SQLite).
     _TOOL_EVENT_SCHEMA_FIELDS = frozenset({
         "event_id", "execution_id", "session_id", "tenant_id", "gateway_id",
         "timestamp", "tool_name", "tool_type", "tool_source", "input_data",
         "input_hash", "output_data", "output_hash", "duration_ms", "iteration",
-        "is_error", "content_analysis", "sources", "metadata_json",
+        "is_error", "content_analysis", "metadata_json",
     })
 
     async def write_tool_event(self, record: dict[str, Any]) -> None:
