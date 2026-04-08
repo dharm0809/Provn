@@ -411,11 +411,15 @@ def _init_wal(settings, ctx) -> None:
     wal_dir.mkdir(parents=True, exist_ok=True)
     ctx.wal_writer = WALWriter(str(wal_dir / "wal.db"))
     ctx.wal_writer.start()
-    if settings.walacor_storage_enabled or settings.control_plane_url:
+    if settings.control_plane_url:
+        # Delivery worker ships WAL records to a remote control plane aggregator.
+        # Only needed when a separate control plane URL is configured.
+        # When walacor_storage_enabled=True, records go directly to Walacor
+        # via the storage router (dual-write) — no delivery worker needed.
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
-    else:
-        logger.info("Delivery worker skipped: no Walacor backend configured")
+    elif not settings.walacor_storage_enabled:
+        logger.info("Delivery worker skipped: no Walacor backend or control plane configured")
 
 
 async def _init_batch_writer(settings, ctx) -> None:
