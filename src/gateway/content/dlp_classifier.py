@@ -41,8 +41,8 @@ _HEALTH_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("icd10_code", re.compile(r"\b[A-Z]\d{2}(?:\.\d{1,4})?\b")),
     # Medical Record Numbers
     ("mrn", re.compile(r"\bMRN[\s:]*\d{6,10}\b", re.IGNORECASE)),
-    # NHS numbers: 3-3-4 digit pattern with space or hyphen separators
-    ("nhs_number", re.compile(r"\b\d{3}[ \-]\d{3}[ \-]\d{4}\b")),
+    # NHS numbers: 3-3-4 digit pattern — exclude common US phone prefixes (555, 800, 888, etc.)
+    ("nhs_number", re.compile(r"\b(?!(?:555|800|888|877|866|900)\b)\d{3}[ \-]\d{3}[ \-]\d{4}\b")),
     # Drug dosages: number + unit (mg, mcg, ml, IU)
     ("drug_dosage", re.compile(r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|ml|IU)\b", re.IGNORECASE)),
 ]
