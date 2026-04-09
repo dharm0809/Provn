@@ -338,18 +338,14 @@ class OpenAIAdapter(ProviderAdapter):
             metadata["has_multimodal_input"] = True
             metadata["multimodal_input_count"] = mm_count
         # Tag for Responses API routing: reasoning models always, others when web search enabled.
-        # gateway_web_search_enabled takes priority — keeps OpenAI on Chat Completions path
-        # and routes web search through the gateway's active tool loop instead.
+        # Web search is always gateway-executed (active tool loop) for full audit trail.
         is_openai_direct = self._base_url.rstrip("/").endswith("api.openai.com")
         settings = get_settings()
         if is_openai_direct:
             if _is_reasoning_model(model_id):
                 metadata["_responses_api"] = True
-            elif settings.gateway_web_search_enabled:
+            elif settings.web_search_enabled:
                 metadata["_gateway_web_search"] = True
-            elif settings.openai_web_search_enabled:
-                metadata["_responses_api"] = True
-                metadata["_openai_web_search"] = True
         # Strip non-standard fields from body before forwarding to provider.
         # OpenWebUI adds "metadata", "chat_id", etc. that OpenAI rejects.
         _OPENAI_STANDARD_FIELDS = {

@@ -1049,7 +1049,7 @@ async def on_startup() -> None:
             logger.warning("SECURITY: Rate limiting is DISABLED — enable WALACOR_RATE_LIMIT_ENABLED=true for production")
         if settings.tool_aware_enabled and settings.mcp_servers_json:
             await _init_tool_registry(settings, ctx)
-        if settings.tool_aware_enabled and (settings.web_search_enabled or settings.gateway_web_search_enabled):
+        if settings.tool_aware_enabled and settings.web_search_enabled:
             await _init_web_search_tool(settings, ctx)
         if settings.otel_enabled:
             _init_otel(settings, ctx)

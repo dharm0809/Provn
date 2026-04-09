@@ -298,30 +298,26 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("WALACOR_PASSWORD", "walacor_password"),
     )
     walacor_executions_etid: int = Field(
-        default=9000011,
-        description="Walacor ETId for gateway execution records table",
+        default=9000021,
+        description="Walacor ETId for gateway execution records table (v2 schema with chain+tool fields)",
         validation_alias=AliasChoices("WALACOR_EXECUTIONS_ETID", "walacor_executions_etid"),
     )
     walacor_attempts_etid: int = Field(
-        default=9000012,
+        default=9000022,
         description="Walacor ETId for gateway attempts table",
         validation_alias=AliasChoices("WALACOR_ATTEMPTS_ETID", "walacor_attempts_etid"),
     )
     walacor_tool_events_etid: int = Field(
-        default=9000013,
-        description="Walacor ETId for gateway tool event records table",
+        default=9000023,
+        description="Walacor ETId for gateway tool events table (v2 schema with sources+prompt_id)",
         validation_alias=AliasChoices("WALACOR_TOOL_EVENTS_ETID", "walacor_tool_events_etid"),
     )
 
     # Phase 14: Tool-aware gateway
-    tool_aware_enabled: bool = Field(default=True, description="Enable tool-call awareness and auditing (Phase 14)")
-    tool_strategy: str = Field(
-        default="auto",
-        description="Tool strategy: 'auto' (detect from provider), 'passive', 'active', or 'disabled'",
-    )
+    tool_aware_enabled: bool = Field(default=True, description="Enable tool-call awareness and auditing")
     tool_max_iterations: int = Field(
         default=10,
-        description="Max tool-call loop iterations for the active strategy (guard against infinite loops)",
+        description="Max tool-call loop iterations (guard against infinite loops)",
     )
     tool_loop_total_timeout_ms: int = Field(
         default=300_000,
@@ -329,7 +325,7 @@ class Settings(BaseSettings):
     )
     tool_execution_timeout_ms: int = Field(
         default=30_000,
-        description="Per-tool execution timeout in ms (active strategy)",
+        description="Per-tool execution timeout in ms",
     )
     tool_max_output_bytes: int = Field(
         default=1_048_576,
@@ -337,11 +333,11 @@ class Settings(BaseSettings):
     )
     tool_content_analysis_enabled: bool = Field(
         default=True,
-        description="Run content analyzers on tool inputs/outputs (active strategy)",
+        description="Run content analyzers on tool inputs/outputs",
     )
     mcp_servers_json: str = Field(
         default="",
-        description="JSON array of MCP server configs, or path to a JSON file. Required for active strategy.",
+        description="JSON array of MCP server configs, or path to a JSON file.",
     )
     mcp_allowed_commands: str = Field(
         default="",
@@ -354,8 +350,8 @@ class Settings(BaseSettings):
     web_search_enabled: bool = Field(
         default=True,
         description=(
-            "Enable built-in web search tool for local/private models (Ollama active strategy). "
-            "When enabled, the 'web_search' tool is auto-registered and injected into Ollama requests."
+            "Enable built-in web search tool. Gateway executes searches and injects results "
+            "into the model context with full audit trail. Works with all providers."
         ),
     )
     web_search_provider: str = Field(
@@ -370,26 +366,10 @@ class Settings(BaseSettings):
         default=5,
         description="Default number of search results returned per query.",
     )
-    openai_web_search_enabled: bool = Field(
-        default=False,
-        description=(
-            "Enable OpenAI's native web search via the Responses API. "
-            "When enabled, OpenAI models (gpt-4o, gpt-4o-mini, etc.) are routed through "
-            "the Responses API with the web_search tool, giving them live internet access. "
-            "Superseded by gateway_web_search_enabled when both are set."
-        ),
-    )
-    gateway_web_search_enabled: bool = Field(
-        default=True,
-        description=(
-            "Route ALL web search through the gateway's built-in WebSearchTool. "
-            "When enabled, OpenAI requests stay on Chat Completions (not Responses API) "
-            "and web_search is injected as a function tool executed by the gateway. "
-            "This gives full audit trail with actual search results, content analysis, "
-            "and uses the same active tool loop as Ollama. "
-            "Takes priority over openai_web_search_enabled."
-        ),
-    )
+    # Backward compat: old flags that mapped to web_search_enabled
+    openai_web_search_enabled: bool = Field(default=False, description="Deprecated — use web_search_enabled")
+    gateway_web_search_enabled: bool = Field(default=True, description="Deprecated — use web_search_enabled")
+    tool_strategy: str = Field(default="auto", description="Deprecated — strategy is automatic per-request")
 
     # OpenWebUI auto-integration
     openwebui_url: str = Field(

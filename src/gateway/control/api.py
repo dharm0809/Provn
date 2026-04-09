@@ -464,9 +464,11 @@ async def control_status(request: Request) -> JSONResponse:
 
     # Model capabilities
     try:
-        from gateway.pipeline.orchestrator import _model_capabilities
-        if _model_capabilities:
-            status["model_capabilities"] = dict(_model_capabilities)
+        _cap_reg = getattr(ctx, "capability_registry", None)
+        if _cap_reg is not None and type(_cap_reg).__name__ == "CapabilityRegistry":
+            caps = _cap_reg.all_capabilities()
+            if caps and isinstance(caps, dict):
+                status["model_capabilities"] = caps
     except Exception:
         logger.debug("control_status: model_capabilities unavailable", exc_info=True)
 

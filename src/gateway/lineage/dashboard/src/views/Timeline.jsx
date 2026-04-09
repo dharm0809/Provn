@@ -207,6 +207,11 @@ export default function Timeline({ navigate, sessionId }) {
                         <CopyBtn text={r.record_hash} />
                       </span>
                     </span>
+                    {r.record_signature && (
+                      <span className="badge badge-gold" title={`Ed25519: ${r.record_signature}`} style={{ cursor: 'default', fontSize: 10 }}>
+                        signed
+                      </span>
+                    )}
                     {(r._envelope || r._walacor_eid || r.EId) && (
                       <span className="badge badge-gold" title={`EId: ${r._walacor_eid || r.EId || ''}\nBlock: ${(r._envelope || {}).block_id || '—'}`} style={{ cursor: 'default' }}>
                         ◆ on-chain
