@@ -188,21 +188,28 @@ class WalacorClient:
 
     # ── Public write methods ─────────────────────────────────────────────────
 
-    # Fields defined in the Walacor gateway_executions schema (ETId 9000011).
+    # Fields defined in the Walacor gateway_executions schema (ETId 9000021).
     # Records with unknown fields are silently rejected (HTTP 200 + success:false).
+    # Run scripts/setup_walacor_schemas.py to create schemas with all fields.
     _EXECUTION_SCHEMA_FIELDS = frozenset({
+        # Core identity
         "execution_id", "model_attestation_id", "model_id", "provider",
-        "policy_version", "policy_result", "tenant_id", "gateway_id",
-        "timestamp", "user", "session_id", "metadata_json", "prompt_text",
-        "response_content", "provider_request_id", "model_hash",
-        "thinking_content", "latency_ms", "prompt_tokens", "completion_tokens",
-        "total_tokens", "cache_hit", "cached_tokens", "cache_creation_tokens",
-        "retry_of", "variant_id",
-        # NOTE: sequence_number, record_hash, previous_record_hash are in the
-        # local WAL but NOT in the Walacor sandbox schema (ETId 9000011).
-        # Adding them here causes Walacor to reject writes with
-        # "This field is not defined in schema". Keep them WAL-only until
-        # the Walacor admin adds these columns to the schema.
+        "tenant_id", "gateway_id", "timestamp", "user", "session_id",
+        # Policy
+        "policy_version", "policy_result",
+        # Content
+        "prompt_text", "response_content", "thinking_content", "metadata_json",
+        # Provider details
+        "provider_request_id", "model_hash",
+        # Token usage
+        "prompt_tokens", "completion_tokens", "total_tokens",
+        "cached_tokens", "cache_creation_tokens", "cache_hit", "latency_ms",
+        # Session chain (Merkle integrity)
+        "sequence_number", "record_hash", "previous_record_hash", "record_signature",
+        # Tool awareness
+        "tool_strategy", "tool_count",
+        # Routing
+        "variant_id", "retry_of",
     })
 
     async def write_execution(self, record: ExecutionRecord | dict[str, Any]) -> None:
@@ -222,12 +229,12 @@ class WalacorClient:
         data = validate_execution(data)
         meta = data.pop("metadata", None)
         fm = data.pop("file_metadata", None)
-        # Preserve chain fields inside metadata (Walacor schema doesn't have top-level columns)
-        for _chain_key in ("sequence_number", "record_hash", "previous_record_hash"):
-            if data.get(_chain_key) is not None:
-                if meta is None:
-                    meta = {}
-                meta[_chain_key] = data[_chain_key]
+        # Extract tool_strategy and tool_count from metadata to top-level fields
+        if meta:
+            if meta.get("tool_strategy") and "tool_strategy" not in data:
+                data["tool_strategy"] = meta["tool_strategy"]
+            if meta.get("tool_interaction_count") and "tool_count" not in data:
+                data["tool_count"] = meta["tool_interaction_count"]
         # Store file_metadata inside metadata (no separate Walacor schema field needed)
         if fm and meta:
             meta["file_metadata"] = fm
@@ -311,14 +318,18 @@ class WalacorClient:
             )
             # Swallow — attempt records are best-effort
 
-    # Fields defined in the Walacor gateway_tool_events schema (ETId 9000013).
-    # NOTE: "sources" is NOT in the Walacor ETId 9000013 schema — adding it
-    # causes a 400 rejection. Sources data is preserved in the WAL (local SQLite).
+    # Fields defined in the Walacor gateway_tool_events schema (ETId 9000023).
+    # Run scripts/setup_walacor_schemas.py to create schemas with all fields.
     _TOOL_EVENT_SCHEMA_FIELDS = frozenset({
+        # Identity
         "event_id", "execution_id", "session_id", "tenant_id", "gateway_id",
-        "timestamp", "tool_name", "tool_type", "tool_source", "input_data",
-        "input_hash", "output_data", "output_hash", "duration_ms", "iteration",
-        "is_error", "content_analysis", "metadata_json",
+        "prompt_id", "timestamp",
+        # Tool details
+        "tool_name", "tool_type", "tool_source", "mcp_server_name",
+        # Input/output
+        "input_data", "input_hash", "output_data", "output_hash", "sources",
+        # Execution metadata
+        "duration_ms", "iteration", "is_error", "content_analysis",
     })
 
     async def write_tool_event(self, record: dict[str, Any]) -> None:
@@ -333,11 +344,11 @@ class WalacorClient:
         # Field mapping: gateway uses "source", schema uses "tool_source"
         if "source" in data:
             data["tool_source"] = data.pop("source")
-        # Serialise dict/list fields to JSON strings
-        for key in ("input_data", "sources", "content_analysis"):
+        # Serialise dict/list fields to JSON strings for Walacor LongText columns
+        for key in ("input_data", "output_data", "sources", "content_analysis"):
             if key in data and isinstance(data[key], (dict, list)):
                 data[key] = json.dumps(data[key], default=str)
-        # Drop prompt_id and other fields not in schema
+        # Strip fields not in the Walacor schema
         data = {k: v for k, v in data.items()
                 if v is not None and k in self._TOOL_EVENT_SCHEMA_FIELDS}
         try:

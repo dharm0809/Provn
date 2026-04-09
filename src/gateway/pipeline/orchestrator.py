@@ -79,14 +79,6 @@ def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
         )
     return lim
 
-# ── Model Capability Registry ─────────────────────────────────────────────────
-# Caches per-model capabilities discovered at runtime so the gateway never
-# wastes a retry on a model that has already been probed.  Thread-safe for
-# asyncio (single writer, dict mutation is atomic in CPython).
-
-_model_capabilities: LRUCache = LRUCache(maxsize=500)
-# e.g.  {"gemma3:1b": {"supports_tools": False}, "qwen3:1.7b": {"supports_tools": True}}
-
 # PIISanitizer singleton — avoid recompiling regex patterns on every request.
 _pii_sanitizer_instance = None
 _pii_sanitizer_types: set[str] | None = None
@@ -101,18 +93,6 @@ def _get_pii_sanitizer(settings):
         _pii_sanitizer_instance = PIISanitizer(sanitize_types=types)
         _pii_sanitizer_types = types
     return _pii_sanitizer_instance
-
-
-def _model_supports_tools(model_id: str) -> bool | None:
-    """Return True/False if known, None if not yet probed."""
-    return _model_capabilities.get(model_id, {}).get("supports_tools")
-
-
-def _record_model_capability(model_id: str, supports_tools: bool) -> None:
-    """Cache a discovered capability for a model."""
-    caps = _model_capabilities.setdefault(model_id, {})
-    caps["supports_tools"] = supports_tools
-    logger.info("Model capability cached: %s supports_tools=%s", model_id, supports_tools)
 
 
 # ── A/B test cache (B.9) ─────────────────────────────────────────────────────
@@ -508,401 +488,20 @@ class _ToolStrategyResult:
     http_response: Response | None = None  # final HTTP response from tool loop (replaces original)
 
 
-# ── Phase 14: tool strategy helpers ──────────────────────────────────────────
-
-def _select_tool_strategy(adapter: ProviderAdapter, settings, call: ModelCall | None = None) -> str:
-    """Return 'passive', 'active', or 'disabled' based on config and provider."""
-    if not settings.tool_aware_enabled:
-        return "disabled"
-    # Gateway web search: force active strategy so the gateway executes web_search
-    # via the built-in WebSearchTool instead of letting the provider do it natively.
-    if call and call.metadata.get("_gateway_web_search"):
-        return "active"
-    if settings.tool_strategy != "auto":
-        return settings.tool_strategy
-    # Auto mode: use passive for all providers by default. Active is only used
-    # when explicitly requested via _gateway_web_search (above) or MCP tools.
-    # This prevents the active strategy from forcing stream=false on every
-    # Ollama request, which breaks OpenWebUI's streaming expectation.
-    return "passive"
-
-
-def _strip_tools_from_call(call: ModelCall) -> ModelCall:
-    """Remove tool definitions from request body — used when model rejects tools."""
-    try:
-        body = json.loads(call.raw_body)
-        body.pop("tools", None)
-        body.pop("tool_choice", None)
-        new_body = json.dumps_bytes(body)
-        return dataclasses.replace(call, raw_body=new_body)
-    except Exception:
-        logger.warning("_strip_tools_from_call: failed to strip tools from model=%s — sending original body", call.model_id, exc_info=True)
-        return call
-
-
-_TOOL_UNSUPPORTED_PHRASES = (
-    "does not support tools",
-    "tool use is not supported",
-    "tools are not supported",
-    "tool_use is not supported",
-    "does not support function",
-    "function calling is not supported",
-    "does not support tool_use",
+# ── Tool executor (extracted to gateway.pipeline.tool_executor) ──────────────
+from gateway.pipeline.tool_executor import (
+    prepare_tools, execute_tools, ToolPrepResult, ToolExecResult,
+    build_tool_audit_metadata, write_tool_events, emit_tool_metrics,
+    strip_tools_from_call, filter_tools_for_key, is_tool_unsupported_error,
 )
-
-
-def _is_tool_unsupported_error(status_code: int, body: bytes | memoryview | None) -> bool:
-    """Check if a provider error indicates the model doesn't support tools."""
-    if status_code not in (400, 422) or body is None:
-        return False
-    try:
-        text = bytes(body).decode("utf-8", errors="replace").lower()
-        return any(phrase in text for phrase in _TOOL_UNSUPPORTED_PHRASES)
-    except Exception:
-        return False
-
-
-def _filter_tools_for_key(
-    tool_definitions: list[dict],
-    api_key: str | None,
-    ctx,
-) -> list[dict]:
-    """Filter tool definitions based on per-key allow-list stored in the control plane.
-
-    Returns:
-      - All tools unchanged if api_key is None, control_store is None, or key has no
-        restrictions (get_allowed_tools returns None → unrestricted).
-      - Empty list if the key has an explicit empty allow-list (all tools blocked).
-      - Filtered list containing only the tools whose name appears in the allow-list.
-    """
-    if not api_key or ctx.control_store is None:
-        return tool_definitions
-    import hashlib
-    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    allowed = ctx.control_store.get_allowed_tools(key_hash)
-    if allowed is None:
-        return tool_definitions  # no restrictions for this key
-    if not allowed:
-        return []  # explicitly blocked all tools
-    return [
-        t for t in tool_definitions
-        if (t.get("function", {}).get("name") in allowed or t.get("name") in allowed)
-    ]
-
-
-def _inject_tools_into_call(call: ModelCall, tool_definitions: list[dict]) -> ModelCall:
-    """Transparently add MCP tool definitions to request body (active strategy)."""
-    if not tool_definitions:
-        return call
-    try:
-        body = json.loads(call.raw_body)
-        if not body.get("tools"):
-            body["tools"] = tool_definitions
-            new_body = json.dumps_bytes(body)
-            return ModelCall(
-                provider=call.provider, model_id=call.model_id,
-                prompt_text=call.prompt_text, raw_body=new_body,
-                is_streaming=call.is_streaming, metadata=call.metadata,
-            )
-    except Exception:
-        logger.warning(
-            "Failed to inject tool definitions into call: model=%s", call.model_id,
-            exc_info=True,
-        )
-    return call
-
-
-def _serialize_tool_interaction(t: ToolInteraction, source: str) -> dict[str, Any]:
-    """Serialize one ToolInteraction to audit metadata dict (hashes input/output)."""
-    from gateway.core import compute_sha3_512_string
-    d: dict[str, Any] = {"tool_id": t.tool_id, "tool_type": t.tool_type, "tool_name": t.tool_name, "source": source}
-    if t.input_data is not None:
-        d["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
-    if t.output_data is not None:
-        d["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
-    if t.sources:
-        d["sources"] = t.sources
-    if t.metadata:
-        d.update(t.metadata)
-    return d
-
-
-def _build_tool_audit_metadata(
-    interactions: list[ToolInteraction], strategy: str, iterations: int
-) -> dict[str, Any]:
-    """Build tool_* keys to merge into audit_metadata."""
-    if not interactions:
-        return {}
-    source = "provider" if strategy == "passive" else "gateway"
-    result: dict[str, Any] = {
-        "tool_strategy": strategy,
-        "tool_interaction_count": len(interactions),
-        "tool_interactions": [_serialize_tool_interaction(t, source) for t in interactions],
-    }
-    if iterations > 0:
-        result["tool_loop_iterations"] = iterations
-    return result
-
-
-def _build_tool_event_record(
-    t: ToolInteraction,
-    execution_id: str,
-    session_id: str | None,
-    prompt_id: str,
-    source: str,
-    tenant_id: str,
-    gateway_id: str,
-) -> dict[str, Any]:
-    """Build a first-class tool event record for Walacor/WAL (ETId 9000003)."""
-    from gateway.core import compute_sha3_512_string
-    record: dict[str, Any] = {
-        "event_id": str(uuid.uuid4()),
-        "execution_id": execution_id,
-        "session_id": session_id,
-        "prompt_id": prompt_id,
-        "tenant_id": tenant_id,
-        "gateway_id": gateway_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event_type": "tool_call",
-        "tool_id": t.tool_id,
-        "tool_type": t.tool_type,
-        "tool_name": t.tool_name or t.tool_type,
-        "source": source,
-    }
-    if t.input_data is not None:
-        record["input_data"] = t.input_data
-        record["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
-    if t.output_data is not None:
-        record["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
-    elif t.sources:
-        # For passive provider tools (e.g. OpenAI web_search), output_data is
-        # unavailable but sources are captured — hash sources as output proxy.
-        record["output_hash"] = compute_sha3_512_string(json.dumps(t.sources, default=str, sort_keys=True))
-    if t.sources:
-        record["sources"] = t.sources
-    if t.metadata:
-        record["iteration"] = t.metadata.get("iteration")
-        record["duration_ms"] = t.metadata.get("duration_ms")
-        record["is_error"] = t.metadata.get("is_error")
-    return record
-
-
-async def _write_tool_events(
-    interactions: list[ToolInteraction],
-    execution_id: str,
-    call: ModelCall,
-    strategy: str,
-    ctx: Any,
-    settings: Any,
-) -> None:
-    """Write each tool interaction as a first-class audit event record (dual-write: Walacor + WAL)."""
-    if not interactions:
-        return
-    session_id = call.metadata.get("session_id")
-    prompt_id = call.metadata.get("prompt_id", "")
-    source = "provider" if strategy == "passive" else "gateway"
-    for t in interactions:
-        record = _build_tool_event_record(
-            t, execution_id, session_id, prompt_id, source,
-            settings.gateway_tenant_id, settings.gateway_id,
-        )
-        # Analyze tool output for indirect prompt injection
-        if ctx.content_analyzers and t.output_data is not None:
-            output_text = (t.output_data if isinstance(t.output_data, str)
-                           else json.dumps(t.output_data, default=str))
-            analysis = await analyze_text(output_text, ctx.content_analyzers)
-            if analysis:
-                record["content_analysis"] = analysis
-        # Schema validation ALWAYS runs before write
-        try:
-            _si = getattr(ctx, "schema_intelligence", None)
-            if _si:
-                record, _ = _si.validate_tool_event(record)
-            else:
-                from gateway.classifier.unified import validate_tool_event as _sv_te
-                record, _ = _sv_te(record)
-        except Exception as _val_err:
-            logger.error("Tool event schema validation failed: %s", _val_err)
-        if ctx.storage:
-            await ctx.storage.write_tool_event(record)
-
-
-def _emit_tool_metrics(interactions: list[ToolInteraction], provider: str, source: str) -> None:
-    for t in interactions:
-        try:
-            tool_calls_total.labels(provider=provider, tool_type=t.tool_type, source=source).inc()
-        except Exception:
-            logger.debug("Metric increment failed (tool_calls_total)", exc_info=True)
-
-
-async def _execute_one_tool(
-    tc: ToolInteraction, ctx, settings, provider: str, iteration: int
-) -> tuple[ToolInteraction, dict]:
-    """Execute one MCP tool call. Returns (enriched_interaction, result_dict)."""
-    # Validate arguments against tool schema before calling MCP
-    if tc.tool_name and ctx.tool_registry:
-        schema = ctx.tool_registry.get_tool_schema(tc.tool_name)
-        if schema:
-            required = schema.get("required", [])
-            args = tc.input_data if isinstance(tc.input_data, dict) else {}
-            missing = [f for f in required if f not in args]
-            if missing:
-                logger.warning("Tool arg validation failed: tool=%s missing=%s", tc.tool_name, missing)
-                enriched = ToolInteraction(
-                    tool_id=tc.tool_id, tool_type=tc.tool_type, tool_name=tc.tool_name,
-                    input_data=tc.input_data, output_data=None, sources=None,
-                    metadata={"iteration": iteration, "duration_ms": 0.0, "is_error": True,
-                              "validation_error": f"missing required args: {missing}"},
-                )
-                return enriched, {"tool_call_id": tc.tool_id,
-                                  "content": f"Tool call rejected: missing required arguments {missing}"}
-
-    t_start = time.perf_counter()
-    result = await ctx.tool_registry.execute_tool(
-        tc.tool_name or "",
-        tc.input_data if isinstance(tc.input_data, dict) else {},
-        timeout_ms=settings.tool_execution_timeout_ms,
-    )
-    duration_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
-
-    # Truncate oversized tool output to prevent memory/token exhaustion
-    if result.content and len(result.content) > settings.tool_max_output_bytes:
-        logger.warning(
-            "Tool %s output truncated: %d > %d bytes",
-            tc.tool_name, len(result.content), settings.tool_max_output_bytes,
-        )
-        from gateway.mcp.client import ToolResult as _ToolResult
-        result = _ToolResult(
-            content=result.content[:settings.tool_max_output_bytes] + "\n[TRUNCATED]",
-            is_error=result.is_error,
-            duration_ms=getattr(result, "duration_ms", None),
-            sources=getattr(result, "sources", None),
-        )
-
-    # Heuristic check for indirect prompt injection patterns in tool output
-    _injection_detected = False
-    if not result.is_error and result.content:
-        _injection_patterns = [
-            "ignore previous instructions",
-            "ignore all previous",
-            "disregard your instructions",
-            "you are now",
-            "new instructions:",
-            "system prompt:",
-            "override:",
-            "<system>",
-        ]
-        content_lower = result.content if isinstance(result.content, str) else str(result.content)
-        content_lower = content_lower.lower()
-        for pattern in _injection_patterns:
-            if pattern in content_lower:
-                logger.warning(
-                    "Potential indirect prompt injection in tool output: tool=%s pattern='%s'",
-                    tc.tool_name, pattern,
-                )
-                _injection_detected = True
-                break
-
-    try:
-        tool_calls_total.labels(provider=provider, tool_type=tc.tool_type, source="gateway").inc()
-    except Exception:
-        logger.debug("Metric increment failed (tool_calls_total gateway)", exc_info=True)
-
-    # Analyse tool output BEFORE feeding back to the LLM (blocks indirect prompt injection)
-    output_content = result.content
-    is_error = result.is_error
-    _is_web_search = tc.tool_name in ("web_search",) or tc.tool_type == "web_search"
-    if (settings.tool_content_analysis_enabled
-            and ctx.content_analyzers
-            and output_content
-            and not is_error):
-        analysis = await analyze_text(output_content, ctx.content_analyzers)
-        blocking = [d for d in analysis if d.get("verdict") == "block"]
-        if blocking:
-            top = blocking[0]
-            # Web search results contain URLs, tracking tokens, and page IDs that
-            # false-positive match PII patterns (api_key, credit_card). Downgrade
-            # to warning — external web content should not be blocked by PII analysis.
-            if _is_web_search and top.get("category") == "pii":
-                logger.info(
-                    "Tool output PII finding downgraded to warn (web search): tool=%s analyzer=%s",
-                    tc.tool_name, top["analyzer_id"],
-                )
-            else:
-                logger.warning(
-                    "Tool output blocked before LLM injection: tool=%s category=%s analyzer=%s",
-                    tc.tool_name, top["category"], top["analyzer_id"],
-                )
-                output_content = f"[Tool output blocked by content policy: {top['category']}]"
-                is_error = True
-
-    _meta: dict = {"iteration": iteration, "duration_ms": duration_ms, "is_error": is_error}
-    if _injection_detected:
-        _meta["injection_warning"] = True
-    enriched = ToolInteraction(
-        tool_id=tc.tool_id, tool_type=tc.tool_type, tool_name=tc.tool_name,
-        input_data=tc.input_data, output_data=output_content, sources=result.sources,
-        metadata=_meta,
-    )
-    return enriched, {"tool_call_id": tc.tool_id, "content": output_content}
-
-
-async def _run_active_tool_loop(
-    adapter: ProviderAdapter,
-    call: ModelCall,
-    request: Request,
-    model_response: ModelResponse,
-    ctx,
-    settings,
-    provider: str,
-) -> tuple[ModelCall, ModelResponse, Response | None, list[ToolInteraction], int, Response | None]:
-    """Gateway-side tool-call loop for local/private models (active strategy).
-
-    Returns (final_call, final_model_response, error_response_or_None, all_interactions, iterations, final_http_response).
-    """
-    all_interactions: list[ToolInteraction] = []
-    iterations = 0
-    current_call = call
-    current_model = model_response
-    final_http_resp: Response | None = None
-    loop_deadline = time.perf_counter() + (settings.tool_loop_total_timeout_ms / 1000.0)
-
-    while (
-        current_model.has_pending_tool_calls
-        and current_model.tool_interactions
-        and iterations < settings.tool_max_iterations
-        and time.perf_counter() < loop_deadline
-    ):
-        iterations += 1
-        pending = current_model.tool_interactions
-        tool_results: list[dict] = []
-
-        for tc in pending:
-            enriched, result_dict = await _execute_one_tool(tc, ctx, settings, provider, iterations)
-            all_interactions.append(enriched)
-            tool_results.append(result_dict)
-
-        try:
-            current_call = adapter.build_tool_result_call(current_call, pending, tool_results)
-        except NotImplementedError:
-            logger.warning("Adapter %s does not support build_tool_result_call — stopping tool loop", adapter.get_provider_name())
-            break
-
-        http_resp, current_model = await forward(adapter, current_call, request)
-        final_http_resp = http_resp
-        if http_resp.status_code >= 500:
-            return current_call, current_model, http_resp, all_interactions, iterations, None
-
-    if time.perf_counter() >= loop_deadline:
-        logger.warning("Tool loop wall-clock timeout reached (%.0fms)", settings.tool_loop_total_timeout_ms)
-
-    if iterations > 0:
-        try:
-            tool_loop_iterations.labels(provider=provider).observe(iterations)
-        except Exception:
-            logger.debug("Metric increment failed (tool_loop_iterations)", exc_info=True)
-
-    return current_call, current_model, None, all_interactions, iterations, final_http_resp
+# Backward-compat aliases for tests/external imports
+_build_tool_audit_metadata = build_tool_audit_metadata
+_write_tool_events = write_tool_events
+_emit_tool_metrics = emit_tool_metrics
+_filter_tools_for_key = filter_tools_for_key
+_inject_tools_into_call = None  # removed — use tool_executor.prepare_tools()
+_run_active_tool_loop = None    # removed — use tool_executor.execute_tools()
+_is_tool_unsupported_error = is_tool_unsupported_error
 
 
 # ── Session chain + record write helpers ─────────────────────────────────────
@@ -1478,24 +1077,9 @@ async def _run_pre_checks(
         except Exception as e:
             logger.warning("Shadow policy evaluation failed: %s", e)
 
-    tool_strategy = _select_tool_strategy(adapter, settings, call)
-    if tool_strategy == "active" and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
-        # Skip tool injection if we already know this model doesn't support tools
-        _sup = None
-        if ctx.capability_registry:
-            _sup = ctx.capability_registry.supports_tools(call.model_id)
-        if _sup is None:
-            _sup = _model_supports_tools(call.model_id)
-        if _sup is False:
-            logger.debug("Skipping tool injection for %s — known to not support tools", call.model_id)
-            tool_strategy = "none"
-        else:
-            from gateway.auth.api_key import get_api_key_from_request as _get_key
-            _api_key = _get_key(request)
-            _tool_defs = _filter_tools_for_key(
-                ctx.tool_registry.get_tool_definitions(), _api_key, ctx
-            )
-            call = _inject_tools_into_call(call, _tool_defs)
+    tool_prep = await prepare_tools(call, request, ctx, settings)
+    call = tool_prep.call
+    tool_strategy = tool_prep.strategy
 
     audit_metadata: dict = {}
     if is_audit_only:
@@ -1575,41 +1159,7 @@ async def _maybe_fetch_ollama_hash(
     return model_response
 
 
-async def _route_tool_strategy(
-    tool_strategy: str,
-    model_response: ModelResponse,
-    call: ModelCall,
-    adapter: ProviderAdapter,
-    ctx,
-    settings,
-    request: Request,
-    provider: str,
-) -> _ToolStrategyResult:
-    """Step 3.5: passive — collect tool interactions; active — run tool loop."""
-    if tool_strategy == "passive" and model_response.tool_interactions:
-        interactions = list(model_response.tool_interactions)
-        _emit_tool_metrics(interactions, provider, "provider")
-        return _ToolStrategyResult(
-            call=call, model_response=model_response,
-            interactions=interactions, iterations=0, error=None,
-        )
-    if tool_strategy == "active" and ctx.tool_registry and model_response.has_pending_tool_calls:
-        try:
-            call, model_response, loop_err, interactions, iters, final_http = await _run_active_tool_loop(
-                adapter, call, request, model_response, ctx, settings, provider
-            )
-        except Exception:
-            logger.error("Active tool loop failed — falling back to original response", exc_info=True)
-            return _ToolStrategyResult(
-                call=call, model_response=model_response,
-                interactions=[], iterations=0, error=None,
-            )
-        return _ToolStrategyResult(
-            call=call, model_response=model_response,
-            interactions=interactions, iterations=iters, error=loop_err,
-            http_response=final_http,
-        )
-    return _ToolStrategyResult(call=call, model_response=model_response, interactions=[], iterations=0, error=None)
+# _route_tool_strategy removed — replaced by tool_executor.execute_tools()
 
 
 # ── Input content analysis (B.7: parallel mode) ───────────────────────────────
@@ -2214,22 +1764,14 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         except Exception:
             logger.debug("Metric increment failed (cache_misses)", exc_info=True)
 
-    # Active tool strategy requires non-streaming: we need to intercept the
-    # response, execute tools, and loop before returning anything to the client.
+    # Active tool strategy: force non-streaming for the tool loop (need full
+    # response to parse tool_calls). The final answer is re-streamed by
+    # tool_executor if the original request was streaming.
+    _original_streaming = call.is_streaming
     if pre.tool_strategy == "active" and call.is_streaming:
-        try:
-            body = json.loads(call.raw_body)
-            body["stream"] = False
-            call = dataclasses.replace(
-                call, is_streaming=False, raw_body=json.dumps_bytes(body)
-            )
-            logger.debug("Active tool strategy: overriding stream=False for %s/%s", provider, model)
-        except Exception:
-            logger.warning(
-                "Active tool strategy: failed to override stream=False for %s/%s — "
-                "tool loop will be skipped; proceeding on streaming path",
-                provider, model, exc_info=True,
-            )
+        from gateway.pipeline.tool_executor import _force_non_streaming
+        call = _force_non_streaming(call)
+        logger.debug("Active tool strategy: stream=False for tool loop %s/%s", provider, model)
 
     # ── Step 2.9: PII Sanitization (pre-forward, non-streaming only) ─────────
     # Strip high-risk PII from the prompt before it reaches the LLM.
@@ -2287,14 +1829,9 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
 
     # ── Step 3: Forward ───────────────────────────────────────────────────────
     if call.is_streaming:
-        # For streaming, we do a quick non-streaming probe only if tools were
-        # injected and the model might not support them.  Actually, the easier
-        # path: strip tools from streaming requests and let the stream proceed;
-        # tool-loop already forces non-streaming for active strategy.  If we
-        # reach here with is_streaming=True and tools injected, it means the
-        # active strategy override failed — just strip tools to be safe.
+        # If we reach here streaming with active strategy, the override failed — strip tools
         if pre.tool_strategy == "active":
-            call = _strip_tools_from_call(call)
+            call = strip_tools_from_call(call)
         _set_disposition(request, "allowed")
         buf: list[bytes] = []
         governance_meta: dict = {
@@ -2350,25 +1887,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     else:
         http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
 
-    # ── Tool-unsupported retry: if the model rejects tools, strip and retry ──
-    if _is_tool_unsupported_error(http_response.status_code, bytes(http_response.body)):
-        if ctx.capability_registry:
-            ctx.capability_registry.record(call.model_id, supports_tools=False, provider=provider)
-        else:
-            _record_model_capability(call.model_id, supports_tools=False)
-        logger.info(
-            "Model %s does not support tools — retrying without tool definitions",
-            call.model_id,
-        )
-        call = _strip_tools_from_call(call)
-        pre = dataclasses.replace(pre, tool_strategy="none")
-        http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
-    elif pre.tool_strategy == "active" and http_response.status_code < 400:
-        # Model accepted tools successfully — cache this
-        if ctx.capability_registry:
-            ctx.capability_registry.record(call.model_id, supports_tools=True, provider=provider)
-        else:
-            _record_model_capability(call.model_id, supports_tools=True)
+    # ── Tool-unsupported retry: handled by execute_tools() below ──
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
     # Use unified SchemaIntelligence for response normalization
@@ -2494,10 +2013,15 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
         return http_response
 
-    # ── Step 3.5: Tool strategy router ───────────────────────────────────────
-    tool_result = await _route_tool_strategy(
-        pre.tool_strategy, model_response, call, adapter, ctx, settings, request, provider
+    # ── Step 3.5: Tool executor (handles retry, capability cache, active loop) ─
+    tool_result = await execute_tools(
+        pre.tool_strategy, call, model_response, http_response,
+        adapter, request, ctx, settings, provider,
+        original_streaming=_original_streaming,
     )
+    # If tool executor retried without tools, update our references
+    if tool_result.http_response is not None and tool_result.http_response is not http_response:
+        http_response = tool_result.http_response
     if tool_result.error is not None:
         _set_disposition(request, "error_provider")
         _inc_request(provider, model, "error")
@@ -2519,8 +2043,28 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         return tool_result.error
 
     call, model_response = tool_result.call, tool_result.model_response
-    # If the active tool loop ran and produced a final HTTP response, use it instead of the
-    # original http_response (which still has finish_reason=tool_calls from the first forward).
+
+    # If the tool executor streamed the final answer, return it directly
+    # (with after-stream background task for audit record writing).
+    if tool_result.streaming_response is not None and tool_result.stream_buffer is not None:
+        buf = tool_result.stream_buffer
+        task = BackgroundTask(
+            _after_stream_record, buf, call, adapter,
+            pre.att_id, pre.pv, pre.pr,
+            {**pre.audit_metadata, **build_tool_audit_metadata(tool_result.interactions, pre.tool_strategy, tool_result.iterations)},
+            pre.budget_estimated, t0, None, request,
+        )
+        tool_result.streaming_response.background = task
+        if _concurrency_acquired and _concurrency_limiter is not None:
+            _concurrency_limiter.release(time.perf_counter() - t0)
+        pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
+        outcome = "audit_only_allowed" if (is_audit_only and pre.whb) else "allowed"
+        _set_disposition(request, "allowed")
+        _inc_request(provider, model, outcome)
+        _record_status(200, source="provider")
+        return tool_result.streaming_response
+
+    # If the active tool loop ran and produced a final HTTP response, use it
     if tool_result.http_response is not None:
         http_response = tool_result.http_response
 

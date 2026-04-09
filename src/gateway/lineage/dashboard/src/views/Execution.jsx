@@ -156,23 +156,40 @@ export default function Execution({ navigate, executionId, sessionId }) {
           )}
         </div>
 
-        {/* TruzenAI Proof */}
+        {/* Data Integrity & Chain */}
         <div className="card">
           <div
             onClick={() => setShowChainIntegrity(!showChainIntegrity)}
             style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: showChainIntegrity ? 12 : 0, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}
           >
             <span style={{ fontSize: 10, color: 'var(--text-muted)', transition: 'transform 0.2s', transform: showChainIntegrity ? 'rotate(90deg)' : 'none' }}>▸</span>
-            <span>TruzenAI Proof</span>
+            <span>Data Integrity</span>
+            {r.record_hash && <span className="badge badge-pass" style={{ fontSize: 10, marginLeft: 8 }}>chain linked</span>}
+            {r.record_signature && <span className="badge badge-gold" style={{ fontSize: 10, marginLeft: 4 }}>signed</span>}
           </div>
           {showChainIntegrity && (
             <>
-              {/* TruzenAI Proof */}
+              {/* Session Chain (Merkle) */}
+              {(r.sequence_number != null || r.record_hash) && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--gold)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 8 }}>Session Chain</div>
+                  <div className="detail-grid">
+                    <DetailRow label="Sequence #" value={r.sequence_number ?? r.metadata?.sequence_number ?? '-'} className="mono" />
+                    <DetailRow label="Record Hash" value={r.record_hash || r.metadata?.record_hash || '-'} className="hash-gold" copyable />
+                    <DetailRow label="Previous Hash" value={r.previous_record_hash || r.metadata?.previous_record_hash || '-'} className="hash-gold" copyable />
+                    {(r.record_signature || r.metadata?.record_signature) && (
+                      <DetailRow label="Ed25519 Signature" value={r.record_signature || r.metadata?.record_signature} className="hash-gold" copyable />
+                    )}
+                  </div>
+                </div>
+              )}
+              {/* TruzenAI Proof (Walacor blockchain) */}
               {(r._walacor_eid || r._envelope || r.EId) && (() => {
                 const env = r._envelope || {};
                 const eid = r._walacor_eid || r.EId || '';
                 return (
-                  <>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--gold)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 8 }}>TruzenAI Proof</div>
                     <div className="detail-grid">
                       {eid && <DetailRow label="Entity ID (EId)" value={eid} className="mono" copyable />}
                       {env.block_id && <DetailRow label="Block ID" value={env.block_id} className="gold mono" copyable />}
@@ -182,7 +199,7 @@ export default function Execution({ navigate, executionId, sessionId }) {
                       {env.block_index != null && <DetailRow label="Block Index" value={env.block_index} className="mono" />}
                       {env.created_at && <DetailRow label="Blockchain Timestamp" value={typeof env.created_at === 'number' ? new Date(env.created_at).toISOString() : env.created_at} className="mono" />}
                     </div>
-                  </>
+                  </div>
                 );
               })()}
             </>
@@ -293,7 +310,8 @@ export default function Execution({ navigate, executionId, sessionId }) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
                   <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: 'var(--gold)', letterSpacing: '0.3px' }}>{te.tool_name || 'unknown'}</span>
                   <span className={`badge ${te.tool_type === 'web_search' ? 'badge-gold' : 'badge-muted'}`}>{te.tool_type || 'function'}</span>
-                  <span className={`badge ${te.source === 'gateway' ? 'badge-pass' : 'badge-muted'}`}>{te.source || '-'}</span>
+                  <span className={`badge ${(te.source || te.tool_source) === 'gateway' ? 'badge-pass' : 'badge-muted'}`}>{te.source || te.tool_source || '-'}</span>
+                  {(te.mcp_server_name) && <span className="badge badge-blue" title="MCP Server">{te.mcp_server_name}</span>}
                   {isErr && <span className="badge badge-fail">error</span>}
                   {!isErr && (te.tool_type === 'web_search' || te.tool_name === 'web_search') && sources.length === 0 && <span className="badge badge-warn">no results</span>}
                   {te.duration_ms != null && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto', padding: '2px 8px', background: 'var(--bg-inset)', borderRadius: 3 }}>{te.duration_ms.toFixed(0)}ms</span>}
@@ -305,6 +323,19 @@ export default function Execution({ navigate, executionId, sessionId }) {
                       <span style={{ position: 'absolute', left: 5, top: 10, color: 'var(--gold-dim)', fontWeight: 700 }}>›</span>
                       {inputDisplay}
                     </div>
+                  </div>
+                )}
+                {te.output_data && !sources.length && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Output</div>
+                    <details>
+                      <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-muted)' }}>
+                        Show output ({typeof te.output_data === 'string' ? te.output_data.length : JSON.stringify(te.output_data).length} chars)
+                      </summary>
+                      <div style={{ background: 'var(--bg-inset)', border: '1px solid var(--border)', borderRadius: 4, padding: '10px 14px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.5, marginTop: 6, maxHeight: 200, overflow: 'auto' }}>
+                        {typeof te.output_data === 'string' ? te.output_data : JSON.stringify(te.output_data, null, 2)}
+                      </div>
+                    </details>
                   </div>
                 )}
                 {sources.length > 0 && (
@@ -372,17 +403,28 @@ export default function Execution({ navigate, executionId, sessionId }) {
         );
       })()}
 
-      {/* Token Usage */}
-      {usage && (
-        <div className="card">
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Token Usage</div>
-          <div className="detail-grid">
-            <DetailRow label="Prompt Tokens" value={usage.prompt_tokens} />
-            <DetailRow label="Completion Tokens" value={usage.completion_tokens} />
-            <DetailRow label="Total" value={usage.total_tokens} className="mono" />
+      {/* Token Usage + Performance */}
+      {(r.prompt_tokens || r.total_tokens || usage) && (() => {
+        const pt = r.prompt_tokens || usage?.prompt_tokens || 0;
+        const ct = r.completion_tokens || usage?.completion_tokens || 0;
+        const tt = r.total_tokens || usage?.total_tokens || 0;
+        const cached = r.cached_tokens || usage?.cached_tokens;
+        const latency = r.latency_ms || r.metadata?.latency_ms;
+        const cost = r.estimated_cost_usd;
+        return (
+          <div className="card">
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--border)' }}>Performance</div>
+            <div className="detail-grid">
+              <DetailRow label="Prompt Tokens" value={pt || '-'} />
+              <DetailRow label="Completion Tokens" value={ct || '-'} />
+              <DetailRow label="Total Tokens" value={tt || '-'} className="mono" />
+              {cached > 0 && <DetailRow label="Cached Tokens" value={cached} />}
+              {latency != null && <DetailRow label="Latency" value={`${Number(latency).toFixed(0)}ms`} className="mono" />}
+              {cost != null && <DetailRow label="Estimated Cost" value={`$${Number(cost).toFixed(6)}`} className="mono" />}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Raw Metadata */}
       {r.metadata && (
