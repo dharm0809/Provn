@@ -38,18 +38,192 @@ from gateway.util.session_id import resolve_session_id
 _DEFAULT_MAX_TOKENS = 4096
 _ANTHROPIC_VERSION = "2023-06-01"
 
+# Map OpenAI `reasoning_effort` → Anthropic `thinking.budget_tokens`.
+# Budgets are conservative — clients can override via explicit `thinking` in metadata.
+_REASONING_EFFORT_BUDGET = {
+    "low": 2000,
+    "medium": 8000,
+    "high": 16000,
+}
 
-def _extract_text_from_oai_content(content: Any) -> str:
-    """Pull plain text out of an OpenAI message content (str or list of blocks)."""
+
+def _parse_data_url(url: str) -> tuple[str | None, str | None]:
+    """Parse a data: URL and return (media_type, base64_data). Returns (None, None) on failure."""
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None, None
+    try:
+        header, _, data = url[5:].partition(",")
+        media_type = header.split(";")[0] or "image/png"
+        # `;base64` presence indicates b64-encoded payload; we always assume base64
+        return media_type, data
+    except Exception:
+        return None, None
+
+
+def _oai_image_to_anthropic_block(image_url: Any) -> dict | None:
+    """Convert an OpenAI image_url block value to an Anthropic image content block."""
+    if isinstance(image_url, dict):
+        url = image_url.get("url")
+    else:
+        url = image_url
+    if not isinstance(url, str):
+        return None
+    if url.startswith("data:"):
+        media_type, data = _parse_data_url(url)
+        if not data:
+            return None
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type or "image/png", "data": data},
+        }
+    # Any http(s) URL → Anthropic URL image source
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
+def _oai_content_to_anthropic_blocks(content: Any) -> list[dict]:
+    """Convert an OpenAI message `content` value into a list of Anthropic content blocks.
+
+    Handles:
+      - plain string          → [{"type": "text", "text": ...}]
+      - list of OpenAI blocks → text / image_url / existing anthropic image/text pass-through
+    Returns an empty list when there's nothing to translate.
+    """
+    if content is None:
+        return []
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return ""
+        return [{"type": "text", "text": content}] if content else []
+    if not isinstance(content, list):
+        return [{"type": "text", "text": str(content)}]
+
+    out: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text") or ""
+            if txt:
+                out.append({"type": "text", "text": txt})
+        elif btype == "image_url":
+            converted = _oai_image_to_anthropic_block(block.get("image_url"))
+            if converted:
+                out.append(converted)
+        elif btype == "image":
+            # Already Anthropic shape — pass through
+            out.append(block)
+        elif btype == "input_audio":
+            # Anthropic has no equivalent today; drop but mark so audit can see it was stripped.
+            pass
+        # Unknown block types silently dropped (fail-open)
+    return out
+
+
+def _oai_tool_calls_to_anthropic_content(tool_calls: list[dict]) -> list[dict]:
+    """Translate an OpenAI assistant's `tool_calls[]` into Anthropic `tool_use` content blocks."""
+    out: list[dict] = []
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        raw_args = fn.get("arguments")
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args) if raw_args else {}
+            except Exception:
+                parsed = {"_raw": raw_args}
+        elif isinstance(raw_args, dict):
+            parsed = raw_args
+        else:
+            parsed = {}
+        out.append({
+            "type": "tool_use",
+            "id": tc.get("id") or "",
+            "name": fn.get("name") or "",
+            "input": parsed if isinstance(parsed, dict) else {},
+        })
+    return out
+
+
+def _oai_messages_to_anthropic_messages(messages: list[dict]) -> tuple[list[dict], list[str]]:
+    """Translate an OpenAI messages array to Anthropic messages + collected system prompts.
+
+    Responsibilities:
+      - Extract role:system messages into a separate list (caller joins into `system`).
+      - Translate role:assistant messages with `tool_calls` to an Anthropic assistant
+        message containing `tool_use` content blocks (alongside any text).
+      - Translate role:tool / role:function messages to user-role messages containing
+        `tool_result` content blocks. Consecutive tool results are merged into a single
+        user message (Anthropic convention).
+      - Translate multimodal content blocks (text + image) via _oai_content_to_anthropic_blocks.
+      - Coerce unknown roles to user (Anthropic only accepts user/assistant).
+    """
+    systems: list[str] = []
+    out: list[dict] = []
+
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "user")
+
+        if role == "system":
+            txt_blocks = _oai_content_to_anthropic_blocks(m.get("content"))
+            joined = "".join(b.get("text", "") for b in txt_blocks if b.get("type") == "text")
+            if joined:
+                systems.append(joined)
+            continue
+
+        if role in ("tool", "function"):
+            # Convert to Anthropic tool_result content block under a user message.
+            content_val = m.get("content")
+            if isinstance(content_val, list):
+                # If the client already sent Anthropic-style blocks, pass through;
+                # otherwise, stringify text blocks.
+                result_content: Any = "".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in content_val
+                )
+            else:
+                result_content = content_val if isinstance(content_val, str) else str(content_val or "")
+            block = {
+                "type": "tool_result",
+                "tool_use_id": m.get("tool_call_id") or m.get("name") or "",
+                "content": result_content,
+            }
+            # Merge into previous user message if it's already a tool_result group.
+            if out and out[-1]["role"] == "user" and isinstance(out[-1].get("content"), list):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
+            continue
+
+        if role == "assistant":
+            # Assistant messages may carry both text content AND tool_calls.
+            blocks = _oai_content_to_anthropic_blocks(m.get("content"))
+            tool_calls = m.get("tool_calls")
+            if tool_calls:
+                blocks = blocks + _oai_tool_calls_to_anthropic_content(tool_calls)
+            # Anthropic requires non-empty content; drop empty assistant turns.
+            if not blocks:
+                continue
+            # Collapse to string form when it's a single text block (reduces overhead).
+            if len(blocks) == 1 and blocks[0].get("type") == "text":
+                out.append({"role": "assistant", "content": blocks[0]["text"]})
+            else:
+                out.append({"role": "assistant", "content": blocks})
+            continue
+
+        # user (and any unknown role coerced to user)
+        if role != "user":
+            role = "user"
+        blocks = _oai_content_to_anthropic_blocks(m.get("content"))
+        if not blocks:
+            continue
+        if len(blocks) == 1 and blocks[0].get("type") == "text":
+            out.append({"role": "user", "content": blocks[0]["text"]})
+        else:
+            out.append({"role": "user", "content": blocks})
+
+    return out, systems
 
 
 def translate_oai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
@@ -82,28 +256,14 @@ def translate_oai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
 def translate_oai_chat_to_anthropic(data: dict) -> dict:
     """Convert OpenAI /v1/chat/completions body → Anthropic /v1/messages body.
 
-    Scope (Phase 24.1): text-only chat. System messages collapsed into top-level
-    `system` field; tool calls and multimodal content blocks pass through if they
-    happen to be Anthropic-shaped, otherwise they're dropped.
+    Phase 24.3 scope: text + images + client-originated tool calls / tool results +
+    reasoning_effort → extended thinking budget. Extracts system messages to the
+    top-level `system` field; merges consecutive role:tool messages into a single
+    user-role tool_result group.
     """
     out: dict[str, Any] = {"model": data.get("model", "")}
 
-    system_parts: list[str] = []
-    msgs_out: list[dict] = []
-    for m in data.get("messages") or []:
-        role = m.get("role", "user")
-        text = _extract_text_from_oai_content(m.get("content"))
-        if role == "system":
-            if text:
-                system_parts.append(text)
-            continue
-        if role == "tool" or role == "function":
-            # OpenAI tool result format — skip for v1, tools are an extension.
-            continue
-        # Anthropic only allows user/assistant; coerce anything else to user.
-        if role not in ("user", "assistant"):
-            role = "user"
-        msgs_out.append({"role": role, "content": text})
+    msgs_out, system_parts = _oai_messages_to_anthropic_messages(data.get("messages") or [])
 
     if system_parts:
         out["system"] = "\n\n".join(system_parts)
@@ -120,6 +280,27 @@ def translate_oai_chat_to_anthropic(data: dict) -> dict:
     if stop:
         out["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
 
+    # Extended thinking: honour OpenAI-style reasoning_effort OR an explicit
+    # `thinking` object if the client passed one through.
+    thinking_param = data.get("thinking")
+    if isinstance(thinking_param, dict) and thinking_param.get("type") == "enabled":
+        out["thinking"] = thinking_param
+    else:
+        effort = data.get("reasoning_effort") or data.get("reasoning")
+        if isinstance(effort, dict):
+            effort = effort.get("effort")
+        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_BUDGET:
+            budget = _REASONING_EFFORT_BUDGET[effort.lower()]
+            out["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+    # Anthropic constraint: when extended thinking is enabled, temperature must be 1.0.
+    if "thinking" in out:
+        out["temperature"] = 1.0
+        # budget_tokens must be < max_tokens
+        budget = out["thinking"].get("budget_tokens", 0)
+        if budget >= out["max_tokens"]:
+            out["max_tokens"] = budget + 1024
+
     # Tools: translate OpenAI function-calling schema to Anthropic if the client sent any
     tools = data.get("tools")
     if tools:
@@ -127,6 +308,8 @@ def translate_oai_chat_to_anthropic(data: dict) -> dict:
     tool_choice = data.get("tool_choice")
     if tool_choice == "auto" or tool_choice == "none":
         out["tool_choice"] = {"type": tool_choice}
+    elif tool_choice == "required":
+        out["tool_choice"] = {"type": "any"}
     elif isinstance(tool_choice, dict):
         # {"type": "function", "function": {"name": "x"}} → {"type": "tool", "name": "x"}
         fn = tool_choice.get("function") or {}
@@ -145,20 +328,68 @@ _ANTHROPIC_STOP_TO_OAI_FINISH = {
 
 
 def translate_anthropic_response_to_oai(data: dict, model_id: str) -> dict:
-    """Convert an Anthropic /v1/messages response dict → OpenAI chat.completion dict."""
-    text_parts = []
+    """Convert an Anthropic /v1/messages response dict → OpenAI chat.completion dict.
+
+    Extracts:
+      - `text` blocks → message.content (joined)
+      - `tool_use` blocks → message.tool_calls[] (OpenAI function-calling shape)
+      - `thinking` / `redacted_thinking` blocks → message.reasoning_content (for audit clients)
+    Cache token breakdown from usage is surfaced in OpenAI's
+    prompt_tokens_details.cached_tokens shape.
+    """
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: list[dict] = []
+
     for block in data.get("content") or []:
-        if isinstance(block, dict) and block.get("type") == "text":
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
             text_parts.append(block.get("text", ""))
+        elif btype == "thinking":
+            reasoning_parts.append(block.get("thinking", ""))
+        elif btype == "redacted_thinking":
+            reasoning_parts.append("[redacted]")
+        elif btype in ("tool_use", "server_tool_use"):
+            args = block.get("input")
+            tool_calls.append({
+                "id": block.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": block.get("name", ""),
+                    "arguments": json.dumps(args) if args is not None else "{}",
+                },
+            })
+
     content = "".join(text_parts)
 
-    finish_reason = _ANTHROPIC_STOP_TO_OAI_FINISH.get(
-        data.get("stop_reason") or "", "stop"
-    )
+    stop_reason = data.get("stop_reason") or ""
+    if stop_reason == "tool_use" and tool_calls:
+        finish_reason = "tool_calls"
+    else:
+        finish_reason = _ANTHROPIC_STOP_TO_OAI_FINISH.get(stop_reason, "stop")
+
+    message: dict[str, Any] = {"role": "assistant", "content": content or None}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
 
     usage = data.get("usage") or {}
     input_tok = int(usage.get("input_tokens") or 0)
     output_tok = int(usage.get("output_tokens") or 0)
+    cache_create = int(usage.get("cache_creation_input_tokens") or 0)
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    # Anthropic's input_tokens excludes cache_read; OpenAI's prompt_tokens includes it.
+    prompt_tok = input_tok + cache_read + cache_create
+    usage_out: dict[str, Any] = {
+        "prompt_tokens": prompt_tok,
+        "completion_tokens": output_tok,
+        "total_tokens": prompt_tok + output_tok,
+    }
+    if cache_read or cache_create:
+        usage_out["prompt_tokens_details"] = {"cached_tokens": cache_read}
 
     return {
         "id": data.get("id") or f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -168,17 +399,57 @@ def translate_anthropic_response_to_oai(data: dict, model_id: str) -> dict:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": finish_reason,
                 "logprobs": None,
             }
         ],
-        "usage": {
-            "prompt_tokens": input_tok,
-            "completion_tokens": output_tok,
-            "total_tokens": input_tok + output_tok,
-        },
+        "usage": usage_out,
     }
+
+
+# ── Error body translation ────────────────────────────────────────────────────
+# Anthropic: {"type": "error", "error": {"type": "...", "message": "..."}}
+# OpenAI:    {"error": {"message": "...", "type": "...", "code": null, "param": null}}
+
+_ANTHROPIC_TO_OAI_ERROR_TYPE = {
+    "invalid_request_error": "invalid_request_error",
+    "authentication_error": "authentication_error",
+    "permission_error": "permission_denied",
+    "not_found_error": "not_found_error",
+    "request_too_large": "invalid_request_error",
+    "rate_limit_error": "rate_limit_exceeded",
+    "api_error": "server_error",
+    "overloaded_error": "server_error",
+}
+
+
+def translate_anthropic_error_to_oai(raw_body: bytes) -> bytes:
+    """Translate an Anthropic error response body to OpenAI error shape.
+
+    Fail-open: returns the original bytes if parsing fails or the body isn't
+    recognizably an Anthropic error.
+    """
+    try:
+        data = json.loads(raw_body)
+    except Exception:
+        return raw_body
+    if not isinstance(data, dict):
+        return raw_body
+    err = data.get("error")
+    if not isinstance(err, dict):
+        return raw_body
+    msg = err.get("message") or "upstream error"
+    anthropic_type = err.get("type") or "api_error"
+    out = {
+        "error": {
+            "message": msg,
+            "type": _ANTHROPIC_TO_OAI_ERROR_TYPE.get(anthropic_type, "server_error"),
+            "code": anthropic_type,
+            "param": None,
+        }
+    }
+    return json.dumps_bytes(out)
 
 
 class _AnthropicToOpenAISSE:
@@ -187,6 +458,18 @@ class _AnthropicToOpenAISSE:
     Anthropic emits one event per `\\n\\n`-delimited block. Each block has
     `event: <type>` and `data: <json>` lines. We parse the JSON and convert
     each event into zero or more OpenAI chat.completion.chunk SSE chunks.
+
+    Supported translations:
+      - message_start              → delta {role: assistant, content: ""}
+      - text_delta                 → delta {content: ...}
+      - content_block_start (tool) → delta {tool_calls: [{id, type, function:{name}}]}
+      - input_json_delta           → delta {tool_calls: [{function:{arguments}}]}
+      - thinking_delta             → suppressed client-side (kept for audit)
+      - message_delta              → delta {} with finish_reason
+      - message_stop               → [DONE]
+
+    Tool-call streaming uses `_tool_index_map` to preserve OpenAI's `index` ordering
+    for incremental tool_calls updates.
     """
 
     def __init__(self, model_id: str) -> None:
@@ -196,6 +479,10 @@ class _AnthropicToOpenAISSE:
         self._chatcmpl_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         self._role_emitted = False
         self._done = False
+        self._has_tool_calls = False
+        # maps Anthropic content_block index → OpenAI tool_calls array index
+        self._tool_index_map: dict[int, int] = {}
+        self._next_tool_index = 0
 
     def feed(self, chunk: bytes) -> bytes:
         self._buf += chunk
@@ -227,7 +514,6 @@ class _AnthropicToOpenAISSE:
         return b"data: " + json.dumps_bytes(payload) + b"\n\n"
 
     def _translate_block(self, block: bytes) -> bytes:
-        # Find the data: line; ignore event: header (the JSON has 'type' too).
         data_json: dict | None = None
         for line in block.splitlines():
             if line.startswith(b"data: "):
@@ -253,24 +539,79 @@ class _AnthropicToOpenAISSE:
             self._role_emitted = True
             return self._make_chunk({"role": "assistant", "content": ""})
 
+        if ev_type == "content_block_start":
+            block_body = data_json.get("content_block") or {}
+            if block_body.get("type") in ("tool_use", "server_tool_use"):
+                anth_idx = data_json.get("index", 0)
+                oai_idx = self._next_tool_index
+                self._next_tool_index += 1
+                self._tool_index_map[anth_idx] = oai_idx
+                self._has_tool_calls = True
+                return self._make_chunk({
+                    "tool_calls": [{
+                        "index": oai_idx,
+                        "id": block_body.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": block_body.get("name", ""),
+                            "arguments": "",
+                        },
+                    }]
+                })
+            # text / thinking / server_tool_use other → no client emit at start
+            return b""
+
         if ev_type == "content_block_delta":
             delta = data_json.get("delta") or {}
-            if delta.get("type") == "text_delta":
+            dtype = delta.get("type")
+            if dtype == "text_delta":
                 text = delta.get("text", "")
                 if text:
                     return self._make_chunk({"content": text})
+                return b""
+            if dtype == "input_json_delta":
+                anth_idx = data_json.get("index", 0)
+                oai_idx = self._tool_index_map.get(anth_idx)
+                if oai_idx is None:
+                    return b""
+                partial = delta.get("partial_json", "")
+                if not partial:
+                    return b""
+                return self._make_chunk({
+                    "tool_calls": [{
+                        "index": oai_idx,
+                        "function": {"arguments": partial},
+                    }]
+                })
+            if dtype in ("thinking_delta", "signature_delta"):
+                # Claude extended-thinking: suppressed client-side; captured by the
+                # gateway audit path via parse_streamed_response.
+                return b""
+            if dtype == "citations_delta":
+                # Drop for now — only emitted when using Anthropic's native web_search tool.
+                return b""
             return b""
 
         if ev_type == "message_delta":
             stop_reason = (data_json.get("delta") or {}).get("stop_reason")
-            finish = _ANTHROPIC_STOP_TO_OAI_FINISH.get(stop_reason or "", "stop")
+            if stop_reason == "tool_use" and self._has_tool_calls:
+                finish = "tool_calls"
+            else:
+                finish = _ANTHROPIC_STOP_TO_OAI_FINISH.get(stop_reason or "", "stop")
             return self._make_chunk({}, finish_reason=finish)
 
         if ev_type == "message_stop":
             self._done = True
             return b"data: [DONE]\n\n"
 
-        # ping, content_block_start, content_block_stop → no client-visible output
+        if ev_type == "error":
+            # Upstream error surfaced mid-stream. Emit a plain SSE error event so
+            # well-behaved clients see something; OpenWebUI logs this as a stream abort.
+            err = (data_json.get("error") or {})
+            msg = (err.get("message") or "upstream error").replace("\n", " ")
+            return f'event: error\ndata: {{"error": {{"message": "{msg}", "type": "server_error"}}}}\n\n'.encode()
+
+        # ping, content_block_stop → no client-visible output
         return b""
 
 
@@ -288,15 +629,21 @@ def _concat_messages_anthropic(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _parse_content_block(block: dict) -> tuple[str, ToolInteraction | None]:
-    """Return (text_fragment, interaction_or_None) for one Anthropic content block."""
+def _parse_content_block(block: dict) -> tuple[str, str, ToolInteraction | None]:
+    """Return (text_fragment, thinking_fragment, interaction_or_None) for one Anthropic content block."""
     block_type = block.get("type", "")
 
     if block_type == "text":
-        return block.get("text", ""), None
+        return block.get("text", ""), "", None
+
+    if block_type == "thinking":
+        return "", block.get("thinking", ""), None
+
+    if block_type == "redacted_thinking":
+        return "", "[redacted]", None
 
     if block_type in ("tool_use", "server_tool_use"):
-        return "", ToolInteraction(
+        return "", "", ToolInteraction(
             tool_id=block.get("id", ""),
             tool_type="function" if block_type == "tool_use" else "server_tool",
             tool_name=block.get("name"),
@@ -306,7 +653,7 @@ def _parse_content_block(block: dict) -> tuple[str, ToolInteraction | None]:
             metadata=None,
         )
 
-    return "", None
+    return "", "", None
 
 
 def _iter_sse_objects(chunks: list[bytes]):
@@ -347,14 +694,19 @@ def _build_tool_interactions_from_map(tool_block_map: dict[int, dict]) -> list[T
 def _handle_stream_event(
     obj: dict,
     content_parts: list[str],
+    thinking_parts: list[str],
     tool_block_map: dict[int, dict],
     state: dict,
 ) -> None:
-    """Process one decoded SSE event object (mutates content_parts, tool_block_map, state)."""
+    """Process one decoded SSE event object (mutates content/thinking/tool_block_map/state)."""
     obj_type = obj.get("type", "")
 
     if obj_type == "message_start":
-        state["provider_request_id"] = (obj.get("message") or {}).get("id")
+        msg = obj.get("message") or {}
+        state["provider_request_id"] = msg.get("id")
+        # Usage may start here (input_tokens) and be updated on message_delta
+        if msg.get("usage"):
+            state["usage"] = msg["usage"]
 
     elif obj_type == "content_block_start":
         block = obj.get("content_block") or {}
@@ -369,22 +721,38 @@ def _handle_stream_event(
     elif obj_type == "content_block_delta":
         idx = obj.get("index", 0)
         delta = obj.get("delta") or {}
-        if delta.get("type") == "text_delta":
+        dtype = delta.get("type")
+        if dtype == "text_delta":
             content_parts.append(delta.get("text", ""))
-        elif delta.get("type") == "input_json_delta" and idx in tool_block_map:
+        elif dtype == "thinking_delta":
+            thinking_parts.append(delta.get("thinking", ""))
+        elif dtype == "input_json_delta" and idx in tool_block_map:
             tool_block_map[idx]["input_json"] += delta.get("partial_json", "")
 
     elif obj_type == "message_delta":
         state["stop_reason"] = (obj.get("delta") or {}).get("stop_reason")
+        # Anthropic updates usage on message_delta (output_tokens mainly)
+        if obj.get("usage"):
+            prev = state.get("usage") or {}
+            state["usage"] = {**prev, **obj["usage"]}
 
 
 class AnthropicAdapter(ProviderAdapter):
     """Adapter for Anthropic /v1/messages API."""
 
-    def __init__(self, base_url: str, api_key: str, *, prompt_caching: bool = True) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        prompt_caching: bool = True,
+        beta_headers: str = "",
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._prompt_caching = prompt_caching
+        # Comma-separated list of anthropic-beta flags (e.g. "prompt-caching-2024-07-31")
+        self._beta_headers = beta_headers.strip()
 
     def get_provider_name(self) -> str:
         return "anthropic"
@@ -486,6 +854,9 @@ class AnthropicAdapter(ProviderAdapter):
                 headers["x-api-key"] = self._api_key
             headers.setdefault("anthropic-version", _ANTHROPIC_VERSION)
 
+        if self._beta_headers:
+            headers["anthropic-beta"] = self._beta_headers
+
         body = call.raw_body
 
         # Phase 24.2: if the gateway injected OpenAI-format tools after parse_request
@@ -572,13 +943,18 @@ class AnthropicAdapter(ProviderAdapter):
             return ModelResponse(content="", usage=None, raw_body=response.content)
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_interactions: list[ToolInteraction] = []
         stop_reason = data.get("stop_reason")
 
         for block in (data.get("content") or []):
-            text_frag, interaction = _parse_content_block(block)
+            if not isinstance(block, dict):
+                continue
+            text_frag, thinking_frag, interaction = _parse_content_block(block)
             if text_frag:
                 text_parts.append(text_frag)
+            if thinking_frag:
+                thinking_parts.append(thinking_frag)
             if interaction:
                 tool_interactions.append(interaction)
 
@@ -596,34 +972,37 @@ class AnthropicAdapter(ProviderAdapter):
             provider_request_id=data.get("id"),
             tool_interactions=tool_interactions if tool_interactions else None,
             has_pending_tool_calls=has_pending,
+            thinking_content="".join(thinking_parts) if thinking_parts else None,
         )
 
     def parse_streamed_response(self, chunks: list[bytes]) -> ModelResponse:
-        """Assemble response from SSE chunks, capturing tool_use blocks for audit.
+        """Assemble response from SSE chunks, capturing text, thinking, and tool_use for audit.
 
         Anthropic streaming events used:
-          message_start      → provider_request_id
-          content_block_start → detect tool_use blocks by index
-          content_block_delta → accumulate text_delta and input_json_delta
-          message_delta      → stop_reason (tool_use triggers has_pending_tool_calls)
+          message_start        → provider_request_id, initial usage
+          content_block_start  → detect tool_use blocks by index
+          content_block_delta  → text_delta, thinking_delta, input_json_delta
+          message_delta        → stop_reason + final usage
         """
         content_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_block_map: dict[int, dict] = {}
-        state: dict = {"provider_request_id": None, "stop_reason": None}
+        state: dict = {"provider_request_id": None, "stop_reason": None, "usage": None}
 
         for obj in _iter_sse_objects(chunks):
-            _handle_stream_event(obj, content_parts, tool_block_map, state)
+            _handle_stream_event(obj, content_parts, thinking_parts, tool_block_map, state)
 
         tool_interactions = _build_tool_interactions_from_map(tool_block_map)
         has_pending = state["stop_reason"] == "tool_use" and bool(tool_interactions)
 
         return ModelResponse(
             content="".join(content_parts),
-            usage=None,
+            usage=state.get("usage"),
             raw_body=b"".join(chunks),
             provider_request_id=state["provider_request_id"],
             tool_interactions=tool_interactions if tool_interactions else None,
             has_pending_tool_calls=has_pending,
+            thinking_content="".join(thinking_parts) if thinking_parts else None,
         )
 
     def build_tool_result_call(

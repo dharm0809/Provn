@@ -197,6 +197,19 @@ async def forward(
             status_code=upstream_resp.status_code,
             headers=resp_headers,
         )
+    elif (
+        call.metadata.get("_translated_from_openai")
+        and upstream_resp.status_code >= 400
+    ):
+        # Phase 24.3: Anthropic error body → OpenAI error shape for translated requests.
+        from gateway.adapters.anthropic import translate_anthropic_error_to_oai
+        translated_err = translate_anthropic_error_to_oai(upstream_resp.content)
+        resp_headers["content-type"] = "application/json"
+        response = Response(
+            content=translated_err,
+            status_code=upstream_resp.status_code,
+            headers=resp_headers,
+        )
     else:
         response = Response(
             content=upstream_resp.content,

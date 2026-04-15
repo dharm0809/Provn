@@ -366,6 +366,7 @@ def _make_adapter_for_route(route: dict) -> ProviderAdapter | None:
             base_url=url or settings.provider_anthropic_url,
             api_key=key or settings.provider_anthropic_key,
             prompt_caching=settings.prompt_caching_enabled,
+            beta_headers=settings.provider_anthropic_beta_headers,
         )
     if provider == "huggingface":
         return HuggingFaceAdapter(
@@ -395,7 +396,12 @@ def _resolve_adapter(path: str, model_id: str = "") -> ProviderAdapter | None:
             )
         return OpenAIAdapter(base_url=settings.provider_openai_url, api_key=settings.provider_openai_key)
     if path.startswith("/v1/messages"):
-        return AnthropicAdapter(base_url=settings.provider_anthropic_url, api_key=settings.provider_anthropic_key, prompt_caching=settings.prompt_caching_enabled)
+        return AnthropicAdapter(
+            base_url=settings.provider_anthropic_url,
+            api_key=settings.provider_anthropic_key,
+            prompt_caching=settings.prompt_caching_enabled,
+            beta_headers=settings.provider_anthropic_beta_headers,
+        )
     if settings.provider_huggingface_url and (path.startswith("/generate") or path.startswith("/v1/models")):
         return HuggingFaceAdapter(base_url=settings.provider_huggingface_url, api_key=settings.provider_huggingface_key)
     if settings.generic_upstream_url and path.startswith("/v1/custom"):
