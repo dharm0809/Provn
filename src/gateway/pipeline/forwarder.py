@@ -181,6 +181,22 @@ async def forward(
             status_code=upstream_resp.status_code,
             headers=resp_headers,
         )
+    elif (
+        call.metadata.get("_translated_from_openai")
+        and upstream_resp.status_code == 200
+        and hasattr(adapter, "translate_response_body_for_client")
+    ):
+        # Phase 24: Anthropic upstream response → OpenAI chat.completion for clients.
+        translated_body = adapter.translate_response_body_for_client(
+            upstream_resp.content, call,
+        )
+        # Drop content-type charset weirdness; force application/json.
+        resp_headers["content-type"] = "application/json"
+        response = Response(
+            content=translated_body,
+            status_code=upstream_resp.status_code,
+            headers=resp_headers,
+        )
     else:
         response = Response(
             content=upstream_resp.content,
@@ -222,7 +238,11 @@ async def stream_with_tee(
     shared = client is get_pipeline_context().http_client
 
     # Inject stream_options so provider returns token usage in final SSE chunk.
-    content = _inject_stream_options(upstream_req.content)
+    # Skip for Anthropic — that field is OpenAI-specific and Anthropic rejects it (400).
+    if adapter.get_provider_name() == "anthropic":
+        content = upstream_req.content
+    else:
+        content = _inject_stream_options(upstream_req.content)
     headers = dict(upstream_req.headers)
     if content is not upstream_req.content:
         # Body changed — drop Content-Length so httpx recomputes it.
@@ -248,6 +268,19 @@ async def stream_with_tee(
     upstream = await upstream_ctx.__aenter__()
     actual_status = upstream.status_code
 
+    # Phase 24: when an OpenAI client is talking to an Anthropic upstream, wrap the
+    # chunk stream with the adapter's SSE translator. The buffer keeps the ORIGINAL
+    # upstream chunks so parse_streamed_response (audit) still sees Anthropic format.
+    _translate_stream = (
+        call.metadata.get("_translated_from_openai")
+        and hasattr(adapter, "translate_stream_for_client")
+    )
+    _stream_translator = None
+    if _translate_stream:
+        # Lazy import to avoid circular at module load
+        from gateway.adapters.anthropic import _AnthropicToOpenAISSE
+        _stream_translator = _AnthropicToOpenAISSE(call.model_id)
+
     async def generate():
         buffer_size = 0
         accumulated_text = ""
@@ -270,7 +303,18 @@ async def stream_with_tee(
                 pii_found, pii_checked_len = check_stream_pii(accumulated_text, pii_checked_len)
                 if pii_found:
                     logger.warning("PII detected in stream, logging warning")
-                yield chunk
+
+                if _stream_translator is not None:
+                    translated = _stream_translator.feed(chunk)
+                    if translated:
+                        yield translated
+                else:
+                    yield chunk
+            # End of stream — flush any pending [DONE] marker for the translator
+            if _stream_translator is not None:
+                tail = _stream_translator.flush()
+                if tail:
+                    yield tail
         except BaseException as e:
             _exc = e
             logger.warning(
