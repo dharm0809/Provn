@@ -52,6 +52,33 @@ def _extract_text_from_oai_content(content: Any) -> str:
     return ""
 
 
+def translate_oai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
+    """Translate OpenAI-style tool definitions → Anthropic tool schema.
+
+    OpenAI format:  {"type": "function", "function": {"name", "description", "parameters"}}
+    Anthropic:      {"name", "description", "input_schema"}
+
+    Already-Anthropic-shaped entries pass through unchanged.
+    """
+    out: list[dict] = []
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        if t.get("type") == "function" and isinstance(t.get("function"), dict):
+            fn = t["function"]
+            out.append({
+                "name": fn.get("name") or "",
+                "description": fn.get("description") or "",
+                "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+            })
+        elif "name" in t and ("input_schema" in t or "parameters" in t):
+            # Already Anthropic shape (or close to it)
+            entry = {"name": t["name"], "description": t.get("description", "")}
+            entry["input_schema"] = t.get("input_schema") or t.get("parameters") or {}
+            out.append(entry)
+    return out
+
+
 def translate_oai_chat_to_anthropic(data: dict) -> dict:
     """Convert OpenAI /v1/chat/completions body → Anthropic /v1/messages body.
 
@@ -92,6 +119,19 @@ def translate_oai_chat_to_anthropic(data: dict) -> dict:
     stop = data.get("stop")
     if stop:
         out["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
+
+    # Tools: translate OpenAI function-calling schema to Anthropic if the client sent any
+    tools = data.get("tools")
+    if tools:
+        out["tools"] = translate_oai_tools_to_anthropic(tools)
+    tool_choice = data.get("tool_choice")
+    if tool_choice == "auto" or tool_choice == "none":
+        out["tool_choice"] = {"type": tool_choice}
+    elif isinstance(tool_choice, dict):
+        # {"type": "function", "function": {"name": "x"}} → {"type": "tool", "name": "x"}
+        fn = tool_choice.get("function") or {}
+        if fn.get("name"):
+            out["tool_choice"] = {"type": "tool", "name": fn["name"]}
 
     return out
 
@@ -447,7 +487,33 @@ class AnthropicAdapter(ProviderAdapter):
             headers.setdefault("anthropic-version", _ANTHROPIC_VERSION)
 
         body = call.raw_body
-        if self._prompt_caching:
+
+        # Phase 24.2: if the gateway injected OpenAI-format tools after parse_request
+        # ran (via prepare_tools), translate them here so Anthropic accepts the body.
+        # Idempotent — already-Anthropic tools pass through translate_oai_tools_to_anthropic.
+        if translated:
+            try:
+                data = json.loads(body)
+                tools = data.get("tools")
+                if tools and any(
+                    isinstance(t, dict) and t.get("type") == "function" for t in tools
+                ):
+                    data["tools"] = translate_oai_tools_to_anthropic(tools)
+                    # tool_choice: translate if in OpenAI shape
+                    tc = data.get("tool_choice")
+                    if isinstance(tc, str) and tc in ("auto", "none"):
+                        data["tool_choice"] = {"type": tc}
+                    elif isinstance(tc, dict) and tc.get("type") == "function":
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            data["tool_choice"] = {"type": "tool", "name": fn["name"]}
+                    body = json.dumps_bytes(data)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        if self._prompt_caching and not translated:
+            # Skip cache_control injection for translated bodies — messages have string
+            # content (not the list-of-blocks shape inject_cache_control expects).
             try:
                 data = json.loads(body)
                 messages = data.get("messages")
