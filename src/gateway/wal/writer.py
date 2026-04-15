@@ -65,6 +65,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     _add_columns = [
         # gateway_attempts (Phase 21)
         ("gateway_attempts", "user", "TEXT"),
+        ("gateway_attempts", "reason", "TEXT"),
         # wal_records — extracted hot columns for indexed lineage queries
         ("wal_records", "event_type", "TEXT NOT NULL DEFAULT 'execution'"),
         ("wal_records", "session_id", "TEXT"),
@@ -329,13 +330,14 @@ class WALWriter:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None),
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
         )
         logger.debug("WAL (thread) gateway_attempts request_id=%s disposition=%s", request_id, disposition)
 
@@ -376,11 +378,12 @@ class WALWriter:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Non-blocking enqueue of an attempt record to the dedicated writer thread."""
         self._queue.put((
             self._do_write_attempt,
-            (request_id, tenant_id, path, disposition, status_code, provider, model_id, execution_id, user),
+            (request_id, tenant_id, path, disposition, status_code, provider, model_id, execution_id, user, reason),
         ))
 
     def enqueue_write_tool_event(self, record: dict[str, Any]) -> None:
@@ -561,15 +564,16 @@ class WALWriter:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Append one row to gateway_attempts for the completeness invariant."""
         conn = self._ensure_conn()
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None),
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
         )
         conn.commit()
         logger.debug("gateway_attempts request_id=%s disposition=%s user=%s", request_id, disposition, user)

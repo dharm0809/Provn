@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { getAttempts } from '../api';
 import {
   displayModel, timeAgo, dispositionClass, dispositionLabel, dispositionSummaryLabel,
+  dispositionDetailedHelp,
   statusCodeClass, formatTime, truncId, formatNumber,
 } from '../utils';
 
@@ -150,6 +152,10 @@ function TableSkeletonRows({ cols }) {
 
 const SORT_COLS = ['timestamp', 'disposition', 'request_id', 'user', 'model_id', 'path', 'status_code'];
 
+function attemptRowKey(a) {
+  return a.request_id || `${a.timestamp}-${a.path}`;
+}
+
 export default function Attempts({ navigate, params = {} }) {
   const limit = 100;
   const offset = Math.max(0, params.offset || 0);
@@ -165,8 +171,31 @@ export default function Attempts({ navigate, params = {} }) {
   const [error, setError] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [draftQ, setDraftQ] = useState(qParam);
+  const [dispositionPopover, setDispositionPopover] = useState(null);
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
+
+  useEffect(() => {
+    if (!dispositionPopover) return undefined;
+    const close = () => setDispositionPopover(null);
+    const onMouseDown = (e) => {
+      if (e.target.closest?.('[data-disposition-root]')) return;
+      close();
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('mousedown', onMouseDown, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [dispositionPopover]);
 
   useEffect(() => { setDraftQ(qParam); }, [qParam]);
 
@@ -229,6 +258,26 @@ export default function Attempts({ navigate, params = {} }) {
 
   const openExecution = (executionId) => {
     if (executionId) navigate('execution', { executionId });
+  };
+
+  const toggleDispositionPopover = (e, a) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rid = attemptRowKey(a);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const minW = Math.max(280, rect.width);
+    const left = Math.min(rect.left, Math.max(8, window.innerWidth - minW - 16));
+    setDispositionPopover((prev) =>
+      prev?.requestId === rid
+        ? null
+        : {
+            requestId: rid,
+            top: rect.bottom + 6,
+            left,
+            minW,
+            attempt: a,
+          }
+    );
   };
 
   const SortBtn = ({ col, label, width }) => (
@@ -323,21 +372,24 @@ export default function Attempts({ navigate, params = {} }) {
                 </tr>
               ) : (
                 items.map(a => (
-                  <tr
-                    key={a.request_id || `${a.timestamp}-${a.path}`}
-                    className={a.execution_id ? 'clickable sessions-row' : 'sessions-row'}
-                    tabIndex={a.execution_id ? 0 : undefined}
-                    role="row"
-                    onClick={() => openExecution(a.execution_id)}
-                    onKeyDown={(e) => {
-                      if (!a.execution_id) return;
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        openExecution(a.execution_id);
-                      }
-                    }}
-                  >
-                    <td><span className={`badge ${dispositionClass(a.disposition)}`}>{dispositionLabel(a.disposition)}</span></td>
+                  <tr key={attemptRowKey(a)} className="sessions-row" role="row">
+                    <td>
+                      <div className="disposition-cell-wrap" data-disposition-root>
+                        <button
+                          type="button"
+                          className="disposition-trigger"
+                          aria-expanded={dispositionPopover?.requestId === attemptRowKey(a)}
+                          aria-haspopup="dialog"
+                          aria-label={`${dispositionLabel(a.disposition)}, show details`}
+                          onClick={(e) => toggleDispositionPopover(e, a)}
+                        >
+                          <span className={`badge ${dispositionClass(a.disposition)}`}>
+                            {dispositionLabel(a.disposition)}
+                          </span>
+                          <span className="disposition-chevron" aria-hidden>▾</span>
+                        </button>
+                      </div>
+                    </td>
                     <td className="mono" style={{ fontSize: 12, color: 'var(--text-muted)' }} title={a.request_id || ''}>
                       {truncId(a.request_id, 14) || '—'}
                     </td>
@@ -359,6 +411,105 @@ export default function Attempts({ navigate, params = {} }) {
           <Pagination current={currentPage} total={totalPages} onPage={p => goAttempts({ offset: (p - 1) * limit })} />
         </div>
       </div>
+
+      {dispositionPopover &&
+        createPortal(
+          (() => {
+            const a = dispositionPopover.attempt;
+            const help = dispositionDetailedHelp(a.disposition, a.status_code);
+            return (
+              <div
+                data-disposition-root
+                className="disposition-popover-floating"
+                style={{
+                  position: 'fixed',
+                  top: dispositionPopover.top,
+                  left: dispositionPopover.left,
+                  minWidth: dispositionPopover.minW,
+                  zIndex: 10020,
+                }}
+                role="dialog"
+                aria-label="Disposition details"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <div className="disposition-popover-panel">
+                  <div className="disposition-popover-head">
+                    <span className={`badge ${dispositionClass(a.disposition)}`}>
+                      {dispositionLabel(a.disposition)}
+                    </span>
+                    <span className="disposition-popover-sub">{dispositionSummaryLabel(a.disposition)}</span>
+                  </div>
+                  {a.reason ? (
+                    <div className="disposition-popover-reason">
+                      <div className="disposition-popover-reason-label">Gateway reason</div>
+                      <p className="disposition-popover-reason-text">{a.reason}</p>
+                    </div>
+                  ) : null}
+                  <div className="disposition-popover-body">
+                    {help.paragraphs.map((p, i) => (
+                      <p key={i}>{p}</p>
+                    ))}
+                  </div>
+                  <dl className="disposition-popover-meta">
+                    <div>
+                      <dt>Time</dt>
+                      <dd title={a.timestamp ? formatTime(a.timestamp) : undefined}>
+                        {timeAgo(a.timestamp)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>
+                        <span className={`badge ${statusCodeClass(a.status_code)}`}>{a.status_code}</span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Model</dt>
+                      <dd className="mono">{displayModel(a.model_id) || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>Provider</dt>
+                      <dd className="mono">{a.provider || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>User</dt>
+                      <dd className="mono">{a.user || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>Path</dt>
+                      <dd className="mono">{a.path || '—'}</dd>
+                    </div>
+                    <div className="disposition-popover-meta-wide">
+                      <dt>Request</dt>
+                      <dd className="mono" title={a.request_id || ''}>
+                        {truncId(a.request_id, 24) || '—'}
+                      </dd>
+                    </div>
+                  </dl>
+                  {a.execution_id ? (
+                    <div className="disposition-popover-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => {
+                          openExecution(a.execution_id);
+                          setDispositionPopover(null);
+                        }}
+                      >
+                        Open execution trace
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="disposition-popover-foot muted">
+                      No execution id — this attempt did not produce a stored trace row to open.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })(),
+          document.body
+        )}
     </div>
   );
 }

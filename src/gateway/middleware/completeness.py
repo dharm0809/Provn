@@ -45,6 +45,7 @@ async def completeness_middleware(request: Request, call_next) -> Response:
             model_id = getattr(request.state, "walacor_model_id", model_id_var.get())
             execution_id = getattr(request.state, "walacor_execution_id", execution_id_var.get())
             user_id = getattr(request.state, "walacor_user_id", None)
+            reason = getattr(request.state, "walacor_reason", None)
             try:
                 await asyncio.wait_for(
                     ctx.storage.write_attempt({
@@ -57,6 +58,7 @@ async def completeness_middleware(request: Request, call_next) -> Response:
                         "model_id": model_id,
                         "execution_id": execution_id,
                         "user": user_id,
+                        "reason": reason,
                     }),
                     timeout=settings.completeness_timeout,
                 )

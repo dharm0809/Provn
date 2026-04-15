@@ -283,6 +283,7 @@ class WalacorClient:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Persist one gateway_attempts row to Walacor (ETId=walacor_attempts_etid).
 
@@ -305,6 +306,8 @@ class WalacorClient:
             record["execution_id"] = execution_id
         if user:
             record["user"] = user
+        if reason:
+            record["reason"] = reason
         try:
             await self._submit(self._attempts_etid, [record])
             logger.debug(

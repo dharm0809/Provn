@@ -104,6 +104,7 @@ ATTEMPTS_FIELDS = [
     {"FieldName": "model_id",       "DataType": "TEXT", "MaxLength": 255, "Required": False},
     {"FieldName": "execution_id",   "DataType": "TEXT", "MaxLength": 255, "Required": False},
     {"FieldName": "user",           "DataType": "TEXT", "MaxLength": 255, "Required": False},
+    {"FieldName": "reason",         "DataType": "TEXT", "MaxLength": 1024, "Required": False},
 ]
 
 TOOL_EVENTS_FIELDS = [
