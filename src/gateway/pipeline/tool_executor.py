@@ -175,30 +175,41 @@ def _select_strategy(call: ModelCall, ctx, settings) -> str:
     """Determine tool strategy for this request. Fully automatic — no config knob.
 
     Returns:
-      "active"   — web search triggered OR external MCP tools configured
+      "active"   — tools will be injected and the gateway runs the tool loop
       "passive"  — tool_aware enabled but no active tools for this request
       "disabled" — tool awareness off
 
-    IMPORTANT: Built-in web search (WebSearchTool) is "on-demand" — only active
-    when SchemaIntelligence sets _gateway_web_search=True (intent classification
-    or metadata.features.web_search=true). External MCP servers are "always-on"
-    — every request gets tool injection when MCP is configured.
+    Rules (Phase 24.4):
+      1. tool_aware_enabled=false                       → "disabled"
+      2. `_gateway_web_search` flag (from classifier or features.web_search)
+         was explicitly set                              → "active"
+      3. External MCP servers configured                 → "active" on every request
+      4. Built-in web search enabled AND the registry
+         has any tool                                    → "active" on every request
+         (lets the model decide when to call it rather than relying on the
+         intent classifier, which is unreliable for varied phrasings)
+      5. otherwise                                       → "passive"
+
+    Models that don't support tools (detected via the capability_registry) are
+    handled upstream in prepare_tools(): "active" is downgraded to "none" before
+    any injection happens.
     """
     if not settings.tool_aware_enabled:
         return "disabled"
 
-    # Web search explicitly requested → active (gateway executes the search)
     if call.metadata.get("_gateway_web_search"):
         return "active"
 
-    # External MCP servers configured → active for every request
-    # (Distinguished from built-in web search by checking mcp_servers_json config,
-    # not tool_registry count — tool_registry includes the built-in web_search tool
-    # which should NOT force active on every request.)
     if settings.mcp_servers_json and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
         return "active"
 
-    # No gateway-side tools needed — just observe what the provider reports
+    if (
+        settings.web_search_enabled
+        and ctx.tool_registry
+        and ctx.tool_registry.get_tool_count() > 0
+    ):
+        return "active"
+
     return "passive"
 
 
@@ -490,6 +501,34 @@ async def execute_tools(
             return ToolExecResult(
                 call=call, model_response=model_response,
                 interactions=[], iterations=0,
+            )
+
+    # Phase 24.4: Active strategy was requested but the model didn't call any
+    # tools. If the client originally asked for streaming, we forced non-streaming
+    # upstream for the tool-call peek; restore streaming with a fresh forward so
+    # the client still gets progressive output.
+    if (
+        strategy == "active"
+        and original_streaming
+        and not model_response.has_pending_tool_calls
+        and http_response.status_code < 400
+    ):
+        try:
+            streaming_call = _restore_streaming(strip_tools_from_call(call))
+            buf: list[bytes] = []
+            from gateway.pipeline.forwarder import stream_with_tee as _stream
+            streaming_resp, _ = await _stream(adapter, streaming_call, request, buffer=buf)
+            return ToolExecResult(
+                call=streaming_call, model_response=model_response,
+                interactions=[], iterations=0,
+                http_response=http_response,
+                streaming_response=streaming_resp,
+                stream_buffer=buf,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to re-stream after no-tool-call active pass — returning non-streaming response",
+                exc_info=True,
             )
 
     # No tool activity
