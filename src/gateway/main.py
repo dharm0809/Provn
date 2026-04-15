@@ -193,6 +193,7 @@ async def api_key_middleware(request: Request, call_next):
             _cross_validate_identity(request, settings)
             return await call_next(request)
         request.state.walacor_disposition = "denied_auth"
+        request.state.walacor_reason = "jwt_mode: missing or invalid JWT token"
         return JSONResponse({"error": "Missing or invalid JWT"}, status_code=401)
 
     if mode == "both":
@@ -205,6 +206,7 @@ async def api_key_middleware(request: Request, call_next):
         err = require_api_key_if_configured(request, settings.api_keys_list)
         if err is not None:
             request.state.walacor_disposition = "denied_auth"
+            request.state.walacor_reason = "both_mode: JWT failed and API key missing/invalid"
             return err
         _resolve_header_identity_fallback(request)
         _cross_validate_identity(request, settings)
@@ -214,6 +216,7 @@ async def api_key_middleware(request: Request, call_next):
     err = require_api_key_if_configured(request, settings.api_keys_list)
     if err is not None:
         request.state.walacor_disposition = "denied_auth"
+        request.state.walacor_reason = "api_key missing or not in allowlist"
         return err
     _resolve_header_identity_fallback(request)
     _cross_validate_identity(request, settings)
@@ -724,30 +727,28 @@ def _init_lineage(settings, ctx) -> None:
     if not settings.lineage_enabled:
         return
 
-    # Walacor-backed reader: reads from Walacor API via getcomplex
-    if ctx.walacor_client is not None:
-        from gateway.lineage.walacor_reader import WalacorLineageReader
-        ctx.lineage_reader = WalacorLineageReader(
-            client=ctx.walacor_client,
-            executions_etid=settings.walacor_executions_etid,
-            attempts_etid=settings.walacor_attempts_etid,
-            tool_events_etid=settings.walacor_tool_events_etid,
+    # Dashboard reads exclusively from Walacor. The local SQLite WAL remains a
+    # durability sink for the delivery worker (replay on outage), but is never
+    # used as a read source for the dashboard. Lineage requires a Walacor client.
+    if ctx.walacor_client is None:
+        logger.warning(
+            "Lineage dashboard disabled: no Walacor client configured. "
+            "Set WALACOR_SERVER + credentials to enable the dashboard."
         )
-        logger.info("Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
-                     settings.walacor_executions_etid, settings.walacor_attempts_etid,
-                     settings.walacor_tool_events_etid)
         return
 
-    # Fallback: local SQLite reader
-    from gateway.lineage.reader import LineageReader
-    wal_db = Path(settings.wal_path) / "wal.db"
-    if not wal_db.exists() and ctx.wal_writer:
-        ctx.wal_writer._ensure_conn()
-    if not wal_db.exists():
-        logger.info("Lineage dashboard: WAL db not found at %s — skipping", wal_db)
-        return
-    ctx.lineage_reader = LineageReader(str(wal_db))
-    logger.info("Lineage dashboard enabled: reading from local SQLite %s", wal_db)
+    from gateway.lineage.walacor_reader import WalacorLineageReader
+    ctx.lineage_reader = WalacorLineageReader(
+        client=ctx.walacor_client,
+        executions_etid=settings.walacor_executions_etid,
+        attempts_etid=settings.walacor_attempts_etid,
+        tool_events_etid=settings.walacor_tool_events_etid,
+    )
+    logger.info(
+        "Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
+        settings.walacor_executions_etid, settings.walacor_attempts_etid,
+        settings.walacor_tool_events_etid,
+    )
 
 
 def _init_otel(settings, ctx) -> None:

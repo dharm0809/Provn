@@ -119,9 +119,10 @@ def _attempts_search_where(search: str | None) -> tuple[str, tuple]:
             INSTR(LOWER(COALESCE(disposition, '')), LOWER(?)) > 0 OR
             INSTR(LOWER(COALESCE(user, '')), LOWER(?)) > 0 OR
             INSTR(LOWER(COALESCE(execution_id, '')), LOWER(?)) > 0 OR
+            INSTR(LOWER(COALESCE(reason, '')), LOWER(?)) > 0 OR
             INSTR(LOWER(CAST(status_code AS TEXT)), LOWER(?)) > 0
         )"""
-    return clause, (n, n, n, n, n, n, n, n, n)
+    return clause, (n, n, n, n, n, n, n, n, n, n)
 
 
 def _metrics_timeline_labels(range_key: str) -> tuple[list[str], str, str]:
@@ -378,7 +379,7 @@ class LineageReader:
         cur = conn.execute(
             f"""
             SELECT request_id, timestamp, tenant_id, provider, model_id,
-                   path, disposition, execution_id, status_code, user
+                   path, disposition, execution_id, status_code, user, reason
             {base}
             ORDER BY {order_expr} {order_sql}
             LIMIT ? OFFSET ?

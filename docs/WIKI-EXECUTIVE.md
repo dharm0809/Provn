@@ -1,4 +1,4 @@
-# Walacor Gateway — Executive Briefing
+# TruzenAI — Executive Briefing
 
 **Audience:** CEO, Engineering leadership, Product leadership
 **Purpose:** What we built, why we built it this way, what it captures, and how we think about enterprise AI governance.
@@ -15,7 +15,7 @@ Enterprise AI adoption is running years ahead of enterprise AI governance. Every
 
 Most existing approaches address one of these at a time — and incompletely. Metadata logging tells you a call was made, not what was said. Input filters check the prompt, not the response. Session logging captures turns, but doesn't prove their integrity.
 
-**Our position is that none of these partial solutions are sufficient for regulated industries or high-stakes AI deployments.** Governance requires proof, not trust. The Walacor Gateway is built around that belief end to end.
+**Our position is that none of these partial solutions are sufficient for regulated industries or high-stakes AI deployments.** Governance requires proof, not trust. TruzenAI is built around that belief end to end.
 
 ---
 
@@ -24,7 +24,7 @@ Most existing approaches address one of these at a time — and incompletely. Me
 The gateway is a **security and audit proxy**. Applications point at it instead of the LLM provider. It intercepts every request, enforces policies, and records a cryptographic audit trail — then forwards the call to the actual model. From the application's perspective, nothing changes.
 
 ```
-Your App  →  Walacor Gateway  →  LLM (OpenAI / Anthropic / Ollama / …)
+Your App  →  TruzenAI  →  LLM (OpenAI / Anthropic / Ollama / …)
                    │
                    └── Cryptographic audit record → Walacor backend
 ```
@@ -275,7 +275,7 @@ The fix is one setting change in Open WebUI:
 
 ```
 Before:  Open WebUI → Ollama              (no governance, no audit)
-After:   Open WebUI → Walacor Gateway → Ollama   (fully governed and audited)
+After:   Open WebUI → TruzenAI → Ollama   (fully governed and audited)
 ```
 
 Open WebUI supports configuring a custom OpenAI-compatible API endpoint. Set that endpoint to the gateway URL (`http://gateway:8000`) and every conversation through the UI — every prompt, every response, every tool call — is now intercepted, enforced, and recorded. Open WebUI does not know or care that a gateway is in between. Ollama does not know or care. Nothing changes for the user.
@@ -299,7 +299,7 @@ Put a second gateway after the LLM specifically to intercept MCP tool calls. Thi
 The gateway detects which kind of provider it is talking to and applies one of two strategies automatically. There is no second component.
 
 ```
-Your App → Walacor Gateway ──────────────► LLM Provider
+Your App → TruzenAI ──────────────► LLM Provider
                 │                               │
                 │          ┌────────────────────┘
                 │          │

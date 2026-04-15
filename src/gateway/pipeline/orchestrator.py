@@ -211,10 +211,17 @@ class _ProviderHTTPError(Exception):
 
 # ── Basic helpers ─────────────────────────────────────────────────────────────
 
-def _set_disposition(request: Request, value: str) -> None:
-    """Set disposition on both ContextVar and request.state (crosses BaseHTTPMiddleware boundary)."""
+def _set_disposition(request: Request, value: str, reason: str | None = None) -> None:
+    """Set disposition on both ContextVar and request.state (crosses BaseHTTPMiddleware boundary).
+
+    When provided, `reason` is a short human-readable explanation of why this disposition
+    was set (e.g. the failing policy rule, the provider error message, the parse error).
+    It is clamped to 500 chars and surfaced in the lineage dashboard Attempts popover.
+    """
     disposition_var.set(value)
     request.state.walacor_disposition = value
+    if reason:
+        request.state.walacor_reason = str(reason)[:500]
 
 
 def _inc_request(provider: str, model: str, outcome: str) -> None:
@@ -795,7 +802,11 @@ async def _attestation_check(
             _inject_caller_role(att_ctx, request)
             return att_id, att_ctx, True, "attestation", None
         # Model was explicitly revoked — block with clear message
-        _set_disposition(request, "denied_attestation")
+        _set_disposition(
+            request,
+            "denied_attestation",
+            reason=f"model {model!r} provider={provider} not attested or revoked in control plane",
+        )
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_attestation")
         _inject_caller_role(att_ctx, request)
         return att_id, att_ctx, False, None, err
@@ -852,7 +863,7 @@ async def _pre_policy_check(
             if is_audit_only:
                 logger.warning("AUDIT_ONLY: Would have blocked (OPA) provider=%s model=%s reason=%s", provider, model, opa_reason)
                 return 0, opa_reason, True, reason or "opa", None
-            _set_disposition(request, "denied_by_opa")
+            _set_disposition(request, "denied_by_opa", reason=f"OPA: {opa_reason}")
             _inc_request(provider, model, "blocked_policy")
             return 0, opa_reason, whb, reason, JSONResponse(
                 {"error": "Blocked by OPA policy", "reason": opa_reason},
@@ -875,23 +886,23 @@ async def _pre_policy_check(
         from gateway.cache.policy_cache import PolicyCache
         per_key_cache = PolicyCache(staleness_threshold_seconds=86400)
         per_key_cache.set_policies(ctx.policy_cache.version if ctx.policy_cache else 0, per_key_policies)
-        _, pv, pr, err = evaluate_pre_inference(per_key_cache, call, att_id, att_ctx)
+        _, pv, pr, err, fail_reason = evaluate_pre_inference(per_key_cache, call, att_id, att_ctx)
         if err is not None:
             if is_audit_only:
                 logger.warning("AUDIT_ONLY: Would have blocked (per-key policy) provider=%s model=%s", provider, model)
                 return pv, pr, True, reason or "policy", None
-            _set_disposition(request, "denied_policy")
+            _set_disposition(request, "denied_policy", reason=fail_reason or "per-key policy blocked")
             _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_policy")
             return pv, pr, whb, reason, err
         return pv, pr, whb, reason, None
 
     # Builtin policy engine path (global policies)
-    _, pv, pr, err = evaluate_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
+    _, pv, pr, err, fail_reason = evaluate_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
     if err is not None:
         if is_audit_only:
             logger.warning("AUDIT_ONLY: Would have blocked (pre-policy) provider=%s model=%s", provider, model)
             return pv, pr, True, reason or "policy", None
-        _set_disposition(request, "denied_policy")
+        _set_disposition(request, "denied_policy", reason=fail_reason or "policy blocked")
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_policy")
         return pv, pr, whb, reason, err
     return pv, pr, whb, reason, None
@@ -905,7 +916,11 @@ def _wal_backpressure_check(request: Request, ctx, settings, provider: str, mode
     disk_bytes = ctx.wal_writer.disk_usage_bytes()
     max_bytes = int(settings.wal_max_size_gb * (1024 ** 3))
     if pending >= settings.wal_high_water_mark or (max_bytes > 0 and disk_bytes >= max_bytes):
-        _set_disposition(request, "denied_wal_full")
+        _set_disposition(
+            request,
+            "denied_wal_full",
+            reason=f"WAL back-pressure: pending={pending} disk_bytes={disk_bytes} (high_water={settings.wal_high_water_mark})",
+        )
         _inc_request(provider, model, "error")
         return JSONResponse({"error": "WAL retention exhausted; control plane unreachable or backlog too large"}, status_code=503)
     return None
@@ -943,7 +958,12 @@ async def _budget_check(
         if is_audit_only:
             logger.warning("AUDIT_ONLY: Would have blocked (budget) provider=%s model=%s", provider, model)
             return budget_rem, 0, True, reason or "budget", None
-        _set_disposition(request, "denied_budget")
+        rem_str = str(budget_rem) if budget_rem is not None else "unknown"
+        _set_disposition(
+            request,
+            "denied_budget",
+            reason=f"tenant={settings.gateway_tenant_id} reserve={estimated} tokens failed; remaining={rem_str}",
+        )
         _inc_request(provider, model, "error")
         try:
             budget_exceeded_total.labels(tenant_id=settings.gateway_tenant_id).inc()
@@ -963,7 +983,11 @@ async def _rate_limit_check(request, ctx, settings, call, provider, model) -> Re
     request.state.walacor_ratelimit_remaining = remaining
     request.state.walacor_ratelimit_reset = int(ctx.rate_limiter.reset_time(key, 60))
     if not allowed:
-        _set_disposition(request, "denied_rate_limit")
+        _set_disposition(
+            request,
+            "denied_rate_limit",
+            reason=f"rate_limit hit: user={user} model={call.model_id} limit={settings.rate_limit_rpm}/min",
+        )
         _inc_request(provider, model, "error")
         try:
             rate_limit_hits_total.labels(model=call.model_id).inc()
@@ -1001,7 +1025,7 @@ async def _run_pre_checks(
     step_timings: dict[str, float] = {}
 
     if not ctx.attestation_cache:
-        _set_disposition(request, "error_config")
+        _set_disposition(request, "error_config", reason="attestation cache not configured")
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Attestation cache not configured"}, status_code=503))
 
@@ -1014,7 +1038,7 @@ async def _run_pre_checks(
         return _PreCheckResult(error=err)
 
     if not ctx.policy_cache and settings.policy_engine != "opa":
-        _set_disposition(request, "error_config")
+        _set_disposition(request, "error_config", reason="policy cache not configured")
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Policy cache not configured"}, status_code=503))
 
@@ -1219,7 +1243,12 @@ async def _run_response_policy(
         logger.warning("AUDIT_ONLY: Would have blocked (response_policy) provider=%s model=%s", provider, model)
         return rp_version, rp_result, decisions, whb, reason, None
 
-    _set_disposition(request, "denied_response_policy")
+    blocking_analyzers = ",".join(sorted({d.get("analyzer", "unknown") for d in (decisions or []) if d.get("action") == "block"})) or "unknown"
+    _set_disposition(
+        request,
+        "denied_response_policy",
+        reason=f"response policy blocked by analyzers: {blocking_analyzers} (result={rp_result})",
+    )
     _inc_request(provider, model, "blocked_response_policy")
     # Increment per-analyzer content block counters
     for d in (decisions or []):
@@ -1440,7 +1469,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     is_audit_only = settings.enforcement_mode == "audit_only"
 
     if request.method != "POST":
-        _set_disposition(request, "error_method_not_allowed")
+        _set_disposition(
+            request,
+            "error_method_not_allowed",
+            reason=f"only POST accepted; got {request.method} on {request.url.path}",
+        )
         _inc_request("unknown", "unknown", "error")
         resp = JSONResponse({"error": "Method not allowed"}, status_code=405)
         _record_status(405)
@@ -1449,7 +1482,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     model_hint = await _peek_model_id(request) if get_settings().model_routes else ""
     adapter = _resolve_adapter(request.url.path, model_hint)
     if not adapter:
-        _set_disposition(request, "error_no_adapter")
+        _set_disposition(
+            request,
+            "error_no_adapter",
+            reason=f"no adapter registered for path={request.url.path} model_hint={model_hint or '?'}",
+        )
         _inc_request("unknown", "unknown", "error")
         resp = JSONResponse({"error": "No adapter for this path"}, status_code=404)
         _record_status(404)
@@ -1459,7 +1496,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         call = await adapter.parse_request(request)
     except Exception as e:
         logger.warning("parse_request failed: %s", e)
-        _set_disposition(request, "error_parse")
+        _set_disposition(request, "error_parse", reason=f"adapter parse_request failed: {e}")
         _inc_request("unknown", "unknown", "error")
         resp = JSONResponse({"error": "Invalid request body"}, status_code=400)
         _record_status(400)
@@ -1591,7 +1628,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                             })
                     if _blocked and _block_resp is not None:
                         request.state.file_metadata = _file_metadata
-                        _set_disposition(request, "blocked_image_pii")
+                        _set_disposition(
+                            request,
+                            "blocked_image_pii",
+                            reason="OCR PII detected in attached image(s); see file_metadata for details",
+                        )
                         _inc_request(provider, model, "blocked")
                         return _block_resp
                 except Exception:
@@ -1803,7 +1844,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 "Adaptive concurrency limit reached for provider=%s limit=%d inflight=%d",
                 provider, limiter.limit, limiter.inflight,
             )
-            _set_disposition(request, "error_overloaded")
+            _set_disposition(
+                request,
+                "error_overloaded",
+                reason=f"adaptive concurrency limit reached for provider={provider} (limit={limiter.limit}, inflight={limiter.inflight})",
+            )
             _inc_request(provider, model, "overloaded")
             _record_status(503)
             return JSONResponse(
@@ -1995,7 +2040,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         _concurrency_limiter.release(fwd_rtt)
 
     if http_response.status_code >= 500:
-        _set_disposition(request, "error_provider")
+        _set_disposition(
+            request,
+            "error_provider",
+            reason=f"{provider} returned HTTP {http_response.status_code} for model {model}",
+        )
         _inc_request(provider, model, "error")
         _record_status(http_response.status_code, source="provider")
         await _record_token_usage(
@@ -2023,7 +2072,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     if tool_result.http_response is not None and tool_result.http_response is not http_response:
         http_response = tool_result.http_response
     if tool_result.error is not None:
-        _set_disposition(request, "error_provider")
+        _set_disposition(
+            request,
+            "error_provider",
+            reason=f"tool executor error for provider={provider} model={model} after {tool_result.iterations} iteration(s)",
+        )
         _inc_request(provider, model, "error")
         _record_status(500)
         await _record_token_usage(

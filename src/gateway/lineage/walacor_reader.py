@@ -409,6 +409,7 @@ class WalacorLineageReader:
                 {"model_id": {"$regex": safe_search, "$options": "i"}},
                 {"disposition": {"$regex": safe_search, "$options": "i"}},
                 {"user": {"$regex": safe_search, "$options": "i"}},
+                {"reason": {"$regex": safe_search, "$options": "i"}},
             ]}
 
         # Items query
@@ -422,7 +423,7 @@ class WalacorLineageReader:
             {"$project": {
                 "request_id": 1, "timestamp": 1, "tenant_id": 1,
                 "provider": 1, "model_id": 1, "path": 1,
-                "disposition": 1, "execution_id": 1, "status_code": 1, "user": 1,
+                "disposition": 1, "execution_id": 1, "status_code": 1, "user": 1, "reason": 1,
             }},
         ])
         items = await self._client.query_complex(self._att_etid, items_pipeline)
