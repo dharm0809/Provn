@@ -255,6 +255,14 @@ class Settings(BaseSettings):
     provider_openai_key: str = Field(default="", description="API key for OpenAI forwarding")
     provider_anthropic_url: str = Field(default="https://api.anthropic.com", description="Anthropic API base URL")
     provider_anthropic_key: str = Field(default="", description="API key for Anthropic")
+    provider_anthropic_beta_headers: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of anthropic-beta header values to send on every "
+            "Anthropic upstream request (e.g. 'prompt-caching-2024-07-31,"
+            "extended-thinking-2025-02-19'). Empty means no beta header."
+        ),
+    )
     provider_huggingface_url: str = Field(default="", description="HuggingFace Inference Endpoints URL")
     provider_huggingface_key: str = Field(default="", description="HuggingFace API key")
     provider_ollama_url: str = Field(default="http://localhost:11434", description="Ollama base URL")
