@@ -229,10 +229,17 @@ def _oai_messages_to_anthropic_messages(messages: list[dict]) -> tuple[list[dict
 def translate_oai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
     """Translate OpenAI-style tool definitions → Anthropic tool schema.
 
-    OpenAI format:  {"type": "function", "function": {"name", "description", "parameters"}}
-    Anthropic:      {"name", "description", "input_schema"}
+    Handles three input shapes:
+      - OpenAI function calling:
+          {"type": "function", "function": {"name", "description", "parameters"}}
+      - Anthropic custom tool:
+          {"name", "description", "input_schema"}
+      - Anthropic server tool (web_search_20250305, code_execution_*, etc.):
+          {"name", "type": "web_search_20250305", "max_uses": 3, ...}
 
-    Already-Anthropic-shaped entries pass through unchanged.
+    Server tools pass through unchanged — they have provider-specific `type`
+    strings like "web_search_20250305" that Anthropic recognizes and executes
+    internally. Dropping these would silently disable native web search.
     """
     out: list[dict] = []
     for t in tools or []:
@@ -245,10 +252,13 @@ def translate_oai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
                 "description": fn.get("description") or "",
                 "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
             })
-        elif "name" in t and ("input_schema" in t or "parameters" in t):
-            # Already Anthropic shape (or close to it)
-            entry = {"name": t["name"], "description": t.get("description", "")}
-            entry["input_schema"] = t.get("input_schema") or t.get("parameters") or {}
+        elif "name" in t:
+            # Anthropic-shape custom tool OR a server tool (web_search_20250305 etc.).
+            # Pass through as-is; normalize `parameters` → `input_schema` if the
+            # client used the OpenAI-ish key name for a custom tool.
+            entry = dict(t)
+            if "parameters" in entry and "input_schema" not in entry:
+                entry["input_schema"] = entry.pop("parameters")
             out.append(entry)
     return out
 
@@ -483,6 +493,10 @@ class _AnthropicToOpenAISSE:
         # maps Anthropic content_block index → OpenAI tool_calls array index
         self._tool_index_map: dict[int, int] = {}
         self._next_tool_index = 0
+        # Anthropic content_block indices that belong to server-side tool_use
+        # (web_search_20250305 etc). Their input_json_delta events should NOT
+        # bleed into the OpenAI tool_calls output — Anthropic runs them internally.
+        self._server_tool_indices: set[int] = set()
 
     def feed(self, chunk: bytes) -> bytes:
         self._buf += chunk
@@ -541,7 +555,9 @@ class _AnthropicToOpenAISSE:
 
         if ev_type == "content_block_start":
             block_body = data_json.get("content_block") or {}
-            if block_body.get("type") in ("tool_use", "server_tool_use"):
+            btype = block_body.get("type")
+            if btype == "tool_use":
+                # Client-side custom tool call — surface to client as OpenAI tool_calls.
                 anth_idx = data_json.get("index", 0)
                 oai_idx = self._next_tool_index
                 self._next_tool_index += 1
@@ -558,7 +574,14 @@ class _AnthropicToOpenAISSE:
                         },
                     }]
                 })
-            # text / thinking / server_tool_use other → no client emit at start
+            if btype == "server_tool_use":
+                # Anthropic-native server tool (web_search, code_execution, …) — the
+                # provider runs it internally. Track the index so we know to SWALLOW
+                # its input_json_delta events too, but emit nothing to the client.
+                anth_idx = data_json.get("index", 0)
+                self._server_tool_indices.add(anth_idx)
+                return b""
+            # text / thinking / web_search_tool_result etc. → no client-facing emit at start
             return b""
 
         if ev_type == "content_block_delta":
@@ -571,6 +594,9 @@ class _AnthropicToOpenAISSE:
                 return b""
             if dtype == "input_json_delta":
                 anth_idx = data_json.get("index", 0)
+                if anth_idx in self._server_tool_indices:
+                    # Server-side tool argument streaming — hide from client.
+                    return b""
                 oai_idx = self._tool_index_map.get(anth_idx)
                 if oai_idx is None:
                     return b""
@@ -594,8 +620,12 @@ class _AnthropicToOpenAISSE:
 
         if ev_type == "message_delta":
             stop_reason = (data_json.get("delta") or {}).get("stop_reason")
+            # If the only tool calls were server-side, from the client's point
+            # of view this is a normal "stop" — nothing pending to execute.
             if stop_reason == "tool_use" and self._has_tool_calls:
                 finish = "tool_calls"
+            elif stop_reason == "tool_use":
+                finish = "stop"
             else:
                 finish = _ANTHROPIC_STOP_TO_OAI_FINISH.get(stop_reason or "", "stop")
             return self._make_chunk({}, finish_reason=finish)
@@ -629,8 +659,64 @@ def _concat_messages_anthropic(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _merge_server_tool_pairs(interactions: list[ToolInteraction]) -> list[ToolInteraction]:
+    """Collapse server_tool_use + web_search_tool_result pairs into one ToolInteraction.
+
+    Anthropic emits TWO content blocks for a native server tool call:
+      1. server_tool_use      — holds id, name, input (the query)
+      2. web_search_tool_result — holds tool_use_id, content (the results)
+
+    For audit purposes we want ONE row per call, not two. Match them by
+    tool_use_id == id and merge the result's sources/output onto the
+    corresponding server_tool_use entry.
+    """
+    if not interactions:
+        return interactions
+
+    # Build lookup of "web_search" tool_type entries (results) keyed by tool_id
+    result_by_id = {}
+    result_indices = []
+    for i, t in enumerate(interactions):
+        if t.tool_type == "web_search" and getattr(t, "metadata", None) and t.metadata.get("source") == "anthropic_native":
+            if t.tool_id:
+                result_by_id[t.tool_id] = t
+                result_indices.append(i)
+
+    if not result_by_id:
+        return interactions
+
+    merged: list[ToolInteraction] = []
+    skip = set(result_indices)
+    for i, t in enumerate(interactions):
+        if i in skip:
+            continue
+        if t.tool_type == "server_tool" and t.tool_id in result_by_id:
+            result = result_by_id[t.tool_id]
+            merged.append(ToolInteraction(
+                tool_id=t.tool_id,
+                tool_type="server_tool",
+                tool_name=t.tool_name,
+                input_data=t.input_data,
+                output_data=result.output_data,
+                sources=result.sources,
+                metadata={"source": "anthropic_native"},
+            ))
+        else:
+            merged.append(t)
+    return merged
+
+
 def _parse_content_block(block: dict) -> tuple[str, str, ToolInteraction | None]:
-    """Return (text_fragment, thinking_fragment, interaction_or_None) for one Anthropic content block."""
+    """Return (text_fragment, thinking_fragment, interaction_or_None) for one Anthropic content block.
+
+    Known block types:
+      - text, thinking, redacted_thinking          → reasoning/output text
+      - tool_use                                    → custom tool invocation (client-side execution)
+      - server_tool_use                             → server tool invocation (Anthropic executes)
+      - web_search_tool_result                      → server tool result (captured for audit)
+      - code_execution_tool_result (future)         → same pattern
+    Other block types are silently ignored (fail-open).
+    """
     block_type = block.get("type", "")
 
     if block_type == "text":
@@ -650,25 +736,61 @@ def _parse_content_block(block: dict) -> tuple[str, str, ToolInteraction | None]
             input_data=block.get("input"),
             output_data=None,   # result returned in the next user message
             sources=None,
-            metadata=None,
+            metadata={"source": "anthropic_native"} if block_type == "server_tool_use" else None,
+        )
+
+    if block_type == "web_search_tool_result":
+        # Anthropic's server-side web search returns results inline in the same response.
+        # Capture URLs + titles for audit so the lineage dashboard can show what the model saw.
+        content_field = block.get("content") or []
+        sources_out: list[dict] = []
+        error_info: dict | None = None
+        if isinstance(content_field, list):
+            for r in content_field:
+                if not isinstance(r, dict):
+                    continue
+                if r.get("type") == "web_search_result":
+                    sources_out.append({
+                        "title": r.get("title") or "",
+                        "url": r.get("url") or "",
+                        "page_age": r.get("page_age") or "",
+                    })
+        elif isinstance(content_field, dict):
+            # error shape: {"type": "web_search_tool_result_error", "error_code": "..."}
+            if content_field.get("type") == "web_search_tool_result_error":
+                error_info = {"error_code": content_field.get("error_code")}
+        return "", "", ToolInteraction(
+            tool_id=block.get("tool_use_id", ""),
+            tool_type="web_search",
+            tool_name="web_search",
+            input_data=None,     # input is on the paired server_tool_use block above
+            output_data={"error": error_info} if error_info else {"result_count": len(sources_out)},
+            sources=sources_out or None,
+            metadata={"source": "anthropic_native", "is_error": bool(error_info)},
         )
 
     return "", "", None
 
 
 def _iter_sse_objects(chunks: list[bytes]):
-    """Yield parsed JSON objects from raw SSE chunk bytes."""
-    for chunk in chunks:
-        for line in chunk.decode("utf-8", errors="replace").splitlines():
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:].strip()
-            if payload == "[DONE]":
-                continue
-            try:
-                yield json.loads(payload)
-            except json.JSONDecodeError:
-                continue
+    """Yield parsed JSON objects from raw SSE chunk bytes.
+
+    Concatenates all chunks before splitting — a single `data:` line can be
+    46KB+ (e.g. Anthropic's web_search_tool_result content) and TCP will
+    almost always split it across multiple `aiter_bytes()` chunks. Parsing
+    each chunk independently would silently drop the spanning event.
+    """
+    full = b"".join(chunks)
+    for line in full.decode("utf-8", errors="replace").splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            yield json.loads(payload)
+        except json.JSONDecodeError:
+            continue
 
 
 def _build_tool_interactions_from_map(tool_block_map: dict[int, dict]) -> list[ToolInteraction]:
@@ -679,14 +801,15 @@ def _build_tool_interactions_from_map(tool_block_map: dict[int, dict]) -> list[T
             input_data = json.loads(tb["input_json"]) if tb["input_json"] else {}
         except json.JSONDecodeError:
             input_data = tb["input_json"]
+        is_server = tb.get("kind") == "server_tool_use"
         interactions.append(ToolInteraction(
             tool_id=tb["id"],
-            tool_type="function",
+            tool_type="server_tool" if is_server else "function",
             tool_name=tb["name"],
             input_data=input_data,
-            output_data=None,
-            sources=None,
-            metadata=None,
+            output_data=tb.get("result_output"),
+            sources=tb.get("result_sources"),
+            metadata={"source": "anthropic_native"} if is_server else None,
         ))
     return interactions
 
@@ -704,19 +827,39 @@ def _handle_stream_event(
     if obj_type == "message_start":
         msg = obj.get("message") or {}
         state["provider_request_id"] = msg.get("id")
-        # Usage may start here (input_tokens) and be updated on message_delta
         if msg.get("usage"):
             state["usage"] = msg["usage"]
 
     elif obj_type == "content_block_start":
         block = obj.get("content_block") or {}
-        if block.get("type") == "tool_use":
+        btype = block.get("type")
+        if btype in ("tool_use", "server_tool_use"):
             idx = obj.get("index", 0)
             tool_block_map[idx] = {
                 "id": block.get("id", ""),
                 "name": block.get("name", ""),
                 "input_json": "",
+                "kind": btype,
             }
+        elif btype == "web_search_tool_result":
+            # Non-delta'd result — the full results array is right here.
+            tool_use_id = block.get("tool_use_id", "")
+            content_field = block.get("content") or []
+            sources_out: list[dict] = []
+            if isinstance(content_field, list):
+                for r in content_field:
+                    if isinstance(r, dict) and r.get("type") == "web_search_result":
+                        sources_out.append({
+                            "title": r.get("title") or "",
+                            "url": r.get("url") or "",
+                            "page_age": r.get("page_age") or "",
+                        })
+            # Attach to the matching server_tool_use entry by id (not index).
+            for tb in tool_block_map.values():
+                if tb.get("id") == tool_use_id:
+                    tb["result_sources"] = sources_out
+                    tb["result_output"] = {"result_count": len(sources_out)}
+                    break
 
     elif obj_type == "content_block_delta":
         idx = obj.get("index", 0)
@@ -731,7 +874,6 @@ def _handle_stream_event(
 
     elif obj_type == "message_delta":
         state["stop_reason"] = (obj.get("delta") or {}).get("stop_reason")
-        # Anthropic updates usage on message_delta (output_tokens mainly)
         if obj.get("usage"):
             prev = state.get("usage") or {}
             state["usage"] = {**prev, **obj["usage"]}
@@ -776,6 +918,24 @@ class AnthropicAdapter(ProviderAdapter):
         translated_from_openai = "/chat/completions" in request.url.path
         if translated_from_openai:
             data = translate_oai_chat_to_anthropic(data)
+            body_bytes = json.dumps_bytes(data)
+
+        # Phase 24.5: auto-inject Anthropic's NATIVE web_search server tool when
+        # web_search is enabled and the client didn't bring their own tools.
+        # Anthropic runs the search entirely server-side in the same streaming
+        # forward — no gateway-side tool loop needed, which means real-time
+        # streaming with zero extra latency. Our parse_response/stream handlers
+        # capture the server_tool_use + web_search_tool_result blocks for audit.
+        _settings = get_settings()
+        if (
+            _settings.web_search_enabled
+            and not data.get("tools")
+        ):
+            data["tools"] = [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": _settings.web_search_max_results or 3,
+            }]
             body_bytes = json.dumps_bytes(data)
 
         model_id = data.get("model") or ""
@@ -958,7 +1118,18 @@ class AnthropicAdapter(ProviderAdapter):
             if interaction:
                 tool_interactions.append(interaction)
 
-        has_pending = stop_reason == "tool_use" and bool(tool_interactions)
+        # Merge server-side tool_use + paired web_search_tool_result entries into
+        # one ToolInteraction so audit records a single row per native tool call,
+        # with the query in input_data and the sources in output_data/sources.
+        tool_interactions = _merge_server_tool_pairs(tool_interactions)
+
+        # Native Anthropic server tools are executed server-side during the same
+        # request — they're complete, not pending.
+        has_pending = (
+            stop_reason == "tool_use"
+            and bool(tool_interactions)
+            and any(t.tool_type == "function" for t in tool_interactions)
+        )
 
         usage = data.get("usage")
         if usage and self._prompt_caching:

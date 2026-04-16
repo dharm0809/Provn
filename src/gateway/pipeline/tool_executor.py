@@ -184,16 +184,22 @@ def _select_strategy(call: ModelCall, ctx, settings) -> str:
       "passive"  — tool_aware enabled but no active tools for this request
       "disabled" — tool awareness off
 
-    Rules (Phase 24.4):
-      1. tool_aware_enabled=false                       → "disabled"
-      2. `_gateway_web_search` flag (from classifier or features.web_search)
-         was explicitly set                              → "active"
-      3. External MCP servers configured                 → "active" on every request
-      4. Built-in web search enabled AND the registry
-         has any tool                                    → "active" on every request
-         (lets the model decide when to call it rather than relying on the
-         intent classifier, which is unreliable for varied phrasings)
-      5. otherwise                                       → "passive"
+    Rules (Phase 24.5):
+      1. tool_aware_enabled=false                         → "disabled"
+      2. provider is anthropic                            → "passive"
+         (Anthropic runs web_search + other server tools entirely server-side
+         during the same streaming forward. We auto-inject the native server
+         tool in AnthropicAdapter.parse_request and let the stream flow
+         through with zero extra round trips. Our adapter's parse_response /
+         parse_streamed_response still capture the tool_use + result blocks
+         for audit.)
+      3. `_gateway_web_search` flag was explicitly set    → "active"
+      4. External MCP servers configured                  → "active" on every request
+      5. Built-in web search enabled AND the registry
+         has any tool                                     → "active" on every request
+         (the model decides when to call it; applies to OpenAI / Ollama /
+          HuggingFace / generic adapters that don't have native server tools)
+      6. otherwise                                        → "passive"
 
     Models that don't support tools (detected via the capability_registry) are
     handled upstream in prepare_tools(): "active" is downgraded to "none" before
@@ -201,6 +207,9 @@ def _select_strategy(call: ModelCall, ctx, settings) -> str:
     """
     if not settings.tool_aware_enabled:
         return "disabled"
+
+    if call.provider == "anthropic":
+        return "passive"
 
     if call.metadata.get("_gateway_web_search"):
         return "active"
