@@ -45,6 +45,73 @@ _ONNX_PATH = _MODEL_DIR / "schema_mapper.onnx"
 _LABELS_PATH = _MODEL_DIR / "schema_mapper_labels.json"
 
 
+# Path-name patterns that strongly indicate a canonical field.
+# Used as safety net when ONNX says UNKNOWN but the path is obvious,
+# and reused by the Phase 25 SchemaMapper harvester to label overflow
+# keys for training signal capture. Format:
+#   (path must contain ALL of these tokens, leaf key must match exactly, → label)
+# Module-level so the harvester can import without touching class internals.
+_PATH_FALLBACK_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("content",), "content", "content"),
+    (("text",), "text", "content"),
+    (("generated",), "generated_text", "content"),
+    (("output",), "outputText", "content"),
+    (("output",), "output", "content"),
+    (("reasoning",), "reasoning_content", "thinking_content"),
+    (("reasoning",), "reasoning", "thinking_content"),
+    (("thinking",), "thinking", "thinking_content"),
+    (("tool_plan",), "tool_plan", "thinking_content"),
+    (("finish",), "finish_reason", "finish_reason"),
+    (("stop",), "stop_reason", "finish_reason"),
+    (("done",), "done_reason", "finish_reason"),
+    (("completion",), "completionReason", "finish_reason"),
+    (("status",), "status", "finish_reason"),
+    (("prompt",), "prompt_tokens", "prompt_tokens"),
+    (("input",), "input_tokens", "prompt_tokens"),
+    (("prompt",), "promptTokenCount", "prompt_tokens"),
+    (("prompt",), "prompt_eval_count", "prompt_tokens"),
+    (("input",), "inputTextTokenCount", "prompt_tokens"),
+    (("completion",), "completion_tokens", "completion_tokens"),
+    (("output",), "output_tokens", "completion_tokens"),
+    (("candidates",), "candidatesTokenCount", "completion_tokens"),
+    (("eval",), "eval_count", "completion_tokens"),
+    (("token",), "tokenCount", "completion_tokens"),
+    (("generated",), "generated_tokens", "completion_tokens"),
+    (("total",), "total_tokens", "total_tokens"),
+    (("total",), "totalTokenCount", "total_tokens"),
+    (("cache",), "cached_tokens", "cached_tokens"),
+    (("cache", "read"), "cache_read_input_tokens", "cached_tokens"),
+    (("cache", "hit"), "prompt_cache_hit_tokens", "cached_tokens"),
+    (("cache", "creation"), "cache_creation_input_tokens", "cache_creation_tokens"),
+)
+
+
+def classify_overflow_path(path: str) -> str | None:
+    """Return the canonical label a path would receive via fallback rules, or None.
+
+    Splits the leaf (final dotted segment, stripping trailing indices like
+    `[0]`) and runs the same `leaf + path-token` match used by
+    `SchemaMapper._apply_path_fallbacks`. The Phase 25 harvester uses this
+    against the overflow-keys list captured at audit time to produce
+    training signal for the distillation pipeline.
+    """
+    if not path:
+        return None
+    # Derive the leaf key: split on '.' and strip any `[index]` suffix.
+    leaf = path.split(".")[-1]
+    bracket_idx = leaf.find("[")
+    if bracket_idx != -1:
+        leaf = leaf[:bracket_idx]
+    leaf_lower = leaf.lower()
+    path_lower = path.lower()
+    for path_tokens, leaf_match, target_label in _PATH_FALLBACK_RULES:
+        if leaf_lower != leaf_match.lower() and leaf != leaf_match:
+            continue
+        if all(tok in path_lower for tok in path_tokens):
+            return target_label
+    return None
+
+
 class SchemaMapper:
     """Maps any LLM API response JSON to the canonical schema.
 
@@ -153,46 +220,14 @@ class SchemaMapper:
 
         return result
 
-    # Path-name patterns that strongly indicate a canonical field.
-    # Used as safety net when ONNX says UNKNOWN but the path is obvious.
-    _PATH_FALLBACK_RULES: list[tuple[list[str], str, str]] = [
-        # (path must contain ALL of these tokens, leaf key must match, → label)
-        (["content"], "content", "content"),
-        (["text"], "text", "content"),
-        (["generated"], "generated_text", "content"),
-        (["output"], "outputText", "content"),
-        (["output"], "output", "content"),
-        (["reasoning"], "reasoning_content", "thinking_content"),
-        (["reasoning"], "reasoning", "thinking_content"),
-        (["thinking"], "thinking", "thinking_content"),
-        (["tool_plan"], "tool_plan", "thinking_content"),
-        (["finish"], "finish_reason", "finish_reason"),
-        (["stop"], "stop_reason", "finish_reason"),
-        (["done"], "done_reason", "finish_reason"),
-        (["completion"], "completionReason", "finish_reason"),
-        (["status"], "status", "finish_reason"),
-        (["prompt"], "prompt_tokens", "prompt_tokens"),
-        (["input"], "input_tokens", "prompt_tokens"),
-        (["prompt"], "promptTokenCount", "prompt_tokens"),
-        (["prompt"], "prompt_eval_count", "prompt_tokens"),
-        (["input"], "inputTextTokenCount", "prompt_tokens"),
-        (["completion"], "completion_tokens", "completion_tokens"),
-        (["output"], "output_tokens", "completion_tokens"),
-        (["candidates"], "candidatesTokenCount", "completion_tokens"),
-        (["eval"], "eval_count", "completion_tokens"),
-        (["token"], "tokenCount", "completion_tokens"),
-        (["generated"], "generated_tokens", "completion_tokens"),
-        (["total"], "total_tokens", "total_tokens"),
-        (["total"], "totalTokenCount", "total_tokens"),
-        (["cache"], "cached_tokens", "cached_tokens"),
-        (["cache", "read"], "cache_read_input_tokens", "cached_tokens"),
-        (["cache", "hit"], "prompt_cache_hit_tokens", "cached_tokens"),
-        (["cache", "creation"], "cache_creation_input_tokens", "cache_creation_tokens"),
-    ]
-
     def _apply_path_fallbacks(self, fields: list[FlatField],
                                classifications: list[tuple[str, float]]) -> list[tuple[str, float]]:
-        """Safety net: reclassify UNKNOWN fields when path name is obvious."""
+        """Safety net: reclassify UNKNOWN fields when path name is obvious.
+
+        Shares the rule table with `classify_overflow_path` (module-level
+        helper reused by the Phase 25 SchemaMapper harvester) so both code
+        paths stay in lockstep.
+        """
         result = list(classifications)
         for i, (f, (label, conf)) in enumerate(zip(fields, classifications)):
             if label != "UNKNOWN":
@@ -202,7 +237,7 @@ class SchemaMapper:
                 continue
             key_lower = f.key.lower()
             path_lower = f.path.lower()
-            for path_tokens, leaf_match, target_label in self._PATH_FALLBACK_RULES:
+            for path_tokens, leaf_match, target_label in _PATH_FALLBACK_RULES:
                 if key_lower == leaf_match.lower() or f.key == leaf_match:
                     if all(tok in path_lower for tok in path_tokens):
                         result[i] = (target_label, 0.75)  # Lower confidence than ONNX

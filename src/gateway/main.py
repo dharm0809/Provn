@@ -970,15 +970,13 @@ def _init_model_registry(settings, ctx) -> None:
 
 
 def _init_harvesters(settings, ctx) -> None:
-    """Phase 25 Task 13: verdict harvester runner.
+    """Phase 25 Task 13+: verdict harvester runner with per-model harvesters.
 
-    Creates an empty-harvester `HarvesterRunner` and starts its background
-    consumer task. Per-model harvesters (Tasks 14-16) register themselves
-    on this runner during their own init hooks. Keeping framework init
-    separate from harvester registration means the dispatcher is always
-    available even during partial enablement — e.g. if only the safety
-    harvester is wired, intent signals are accepted and immediately
-    discarded (no matching harvesters), which is fine.
+    Creates a `HarvesterRunner` with any available per-model harvesters
+    registered, then starts its background consumer task. Each harvester
+    is optional — missing dependencies (e.g. `ctx.intelligence_db`) just
+    skip that harvester's registration so the runner still dispatches to
+    the ones that ARE available.
 
     Fail-open: any failure leaves `ctx.harvester_runner=None` and the
     orchestrator hook short-circuits.
@@ -987,10 +985,30 @@ def _init_harvesters(settings, ctx) -> None:
         return
     try:
         from gateway.intelligence.harvesters import HarvesterRunner
-        runner = HarvesterRunner(harvesters=[], max_queue=1000)
+
+        harvesters: list = []
+
+        # Task 14: SchemaMapper harvester — needs the intelligence DB for
+        # the divergence back-write UPDATE. Skip when the DB failed to
+        # init (the runner still accepts signals; they're just discarded).
+        if ctx.intelligence_db is not None:
+            try:
+                from gateway.intelligence.harvesters.schema_mapper import (
+                    SchemaMapperHarvester,
+                )
+                harvesters.append(SchemaMapperHarvester(ctx.intelligence_db))
+            except Exception as _sm_err:
+                logger.warning(
+                    "SchemaMapperHarvester init failed (non-fatal): %s", _sm_err,
+                )
+
+        runner = HarvesterRunner(harvesters=harvesters, max_queue=1000)
         runner.start()
         ctx.harvester_runner = runner
-        logger.info("Harvester runner started (queue size=1000)")
+        logger.info(
+            "Harvester runner started (queue size=1000, harvesters=%d)",
+            len(harvesters),
+        )
     except Exception as e:
         logger.warning("Harvester runner init failed (non-fatal): %s", e)
         ctx.harvester_runner = None
