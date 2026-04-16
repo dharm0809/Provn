@@ -320,6 +320,11 @@ class Settings(BaseSettings):
         description="Walacor ETId for gateway tool events table (v2 schema with sources+prompt_id)",
         validation_alias=AliasChoices("WALACOR_TOOL_EVENTS_ETID", "walacor_tool_events_etid"),
     )
+    walacor_lifecycle_events_etid: int = Field(
+        default=9000024,
+        description="Walacor ETId for ONNX lifecycle event records (training fingerprint, candidate, shadow, promote, reject)",
+        validation_alias=AliasChoices("WALACOR_LIFECYCLE_EVENTS_ETID", "walacor_lifecycle_events_etid"),
+    )
 
     # Phase 14: Tool-aware gateway
     tool_aware_enabled: bool = Field(default=True, description="Enable tool-call awareness and auditing")
