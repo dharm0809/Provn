@@ -85,3 +85,37 @@ def test_build_model_rejected():
     assert ev.event_type == EventType.MODEL_REJECTED
     assert ev.payload["reason"] == "accuracy delta below threshold"
     assert ev.payload["stage"] == "shadow"
+
+
+def test_to_record_timestamp_is_iso8601():
+    # All other Walacor/WAL records in this codebase use ISO-8601 UTC strings.
+    # Lifecycle events must match so dashboard range-queries and cross-ETId
+    # joins work consistently.
+    ev = build_candidate_created(
+        model_name="intent", candidate_version="v1", dataset_hash="h",
+        training_sample_count=1,
+    )
+    assert isinstance(ev.timestamp, str)
+    # Format: "2026-04-16T10:23:45.123456+00:00" — parseable round-trip.
+    from datetime import datetime
+    parsed = datetime.fromisoformat(ev.timestamp)
+    assert parsed.tzinfo is not None  # must carry explicit UTC offset
+
+
+def test_to_record_top_level_fields_override_payload():
+    # If a caller accidentally includes "event_type" or "timestamp" keys in
+    # payload, `to_record()` must emit the canonical top-level values — the
+    # audit stream cannot be corrupted by payload collisions.
+    ev = LifecycleEvent(
+        event_type=EventType.MODEL_PROMOTED,
+        payload={
+            "event_type": "ATTACKER_FORGED",
+            "timestamp": "1970-01-01T00:00:00+00:00",
+            "real_data": "kept",
+        },
+        timestamp="2026-04-16T12:34:56+00:00",
+    )
+    rec = ev.to_record()
+    assert rec["event_type"] == "model_promoted"  # canonical value wins
+    assert rec["timestamp"] == "2026-04-16T12:34:56+00:00"  # canonical timestamp wins
+    assert rec["real_data"] == "kept"  # unrelated payload fields pass through
