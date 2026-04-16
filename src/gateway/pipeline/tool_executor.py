@@ -59,6 +59,11 @@ class ToolExecResult:
     # for the orchestrator to wire up after-stream record writing.
     streaming_response: Response | None = None
     stream_buffer: list[bytes] | None = None
+    # Phase 24.4: when set, the streaming_response was synthesized from an
+    # already-parsed non-streaming forward (no second upstream round trip).
+    # The audit background task should use `model_response` directly instead
+    # of trying to parse `stream_buffer`.
+    synthetic_stream: bool = False
 
 
 # ── Tool-unsupported detection ──────────────────────────────────────────────
@@ -504,9 +509,10 @@ async def execute_tools(
             )
 
     # Phase 24.4: Active strategy was requested but the model didn't call any
-    # tools. If the client originally asked for streaming, we forced non-streaming
-    # upstream for the tool-call peek; restore streaming with a fresh forward so
-    # the client still gets progressive output.
+    # tools. Instead of re-forwarding with stream=true (which doubles latency
+    # because the model regenerates the whole answer), synthesize OpenAI SSE
+    # chunks from the already-parsed non-streaming response. Zero extra upstream
+    # round trips — just fast byte-level fabrication of a stream.
     if (
         strategy == "active"
         and original_streaming
@@ -514,20 +520,23 @@ async def execute_tools(
         and http_response.status_code < 400
     ):
         try:
-            streaming_call = _restore_streaming(strip_tools_from_call(call))
-            buf: list[bytes] = []
-            from gateway.pipeline.forwarder import stream_with_tee as _stream
-            streaming_resp, _ = await _stream(adapter, streaming_call, request, buffer=buf)
+            from gateway.pipeline.forwarder import build_synthesized_streaming_response
+            streaming_resp = build_synthesized_streaming_response(
+                model_response,
+                call.model_id,
+                session_id=call.metadata.get("session_id", ""),
+            )
             return ToolExecResult(
-                call=streaming_call, model_response=model_response,
+                call=call, model_response=model_response,
                 interactions=[], iterations=0,
                 http_response=http_response,
                 streaming_response=streaming_resp,
-                stream_buffer=buf,
+                stream_buffer=[],  # no parsing needed — see synthetic_stream flag
+                synthetic_stream=True,
             )
         except Exception:
             logger.warning(
-                "Failed to re-stream after no-tool-call active pass — returning non-streaming response",
+                "Failed to synthesize streaming response — returning non-streaming",
                 exc_info=True,
             )
 

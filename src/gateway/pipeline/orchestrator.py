@@ -615,11 +615,16 @@ async def _after_stream_record(
     pipeline_start: float | None = None,
     governance_meta: dict | None = None,
     request: Request | None = None,
+    prebuilt_model_response: ModelResponse | None = None,
 ) -> None:
     """Background task: after stream ends, evaluate response, build chain, write record (no hashing — Walcor hashes).
 
     budget_estimated: tokens reserved in check_and_reserve; passed to record_usage so the
     budget tracker can apply only the actual-vs-estimated delta (Finding 4).
+
+    prebuilt_model_response: Phase 24.4 — if set, the streaming response was
+    synthesized from an already-parsed non-streaming forward. Use it directly
+    instead of re-parsing the buffer (which may be empty in that case).
     """
     ctx = get_pipeline_context()
     settings = get_settings()
@@ -627,7 +632,10 @@ async def _after_stream_record(
         return
     _exec_id = "unknown"
     try:
-        model_response = adapter.parse_streamed_response(buffer)
+        if prebuilt_model_response is not None:
+            model_response = prebuilt_model_response
+        else:
+            model_response = adapter.parse_streamed_response(buffer)
 
         if isinstance(adapter, OllamaAdapter) and call.model_id:
             model_hash = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
@@ -2107,11 +2115,13 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # (with after-stream background task for audit record writing).
     if tool_result.streaming_response is not None and tool_result.stream_buffer is not None:
         buf = tool_result.stream_buffer
+        _prebuilt = tool_result.model_response if tool_result.synthetic_stream else None
         task = BackgroundTask(
             _after_stream_record, buf, call, adapter,
             pre.att_id, pre.pv, pre.pr,
             {**pre.audit_metadata, **build_tool_audit_metadata(tool_result.interactions, pre.tool_strategy, tool_result.iterations)},
             pre.budget_estimated, t0, None, request,
+            prebuilt_model_response=_prebuilt,
         )
         tool_result.streaming_response.background = task
         if _concurrency_acquired and _concurrency_limiter is not None:
