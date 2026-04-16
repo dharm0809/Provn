@@ -276,6 +276,52 @@ async def test_rollback_rejects_wrong_model_prefix(tmp_path):
         await r.rollback("intent", "safety-v5.onnx")
 
 
+def test_initial_generation_is_zero(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    for m in ALLOWED_MODEL_NAMES:
+        assert r.get_generation(m) == 0
+
+
+def test_get_generation_rejects_unknown_model(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    with pytest.raises(ValueError, match="unknown model name"):
+        r.get_generation("../../etc/passwd")
+
+
+@pytest.mark.anyio
+async def test_promote_bumps_generation(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "intent-v1.onnx").write_bytes(b"v1")
+    start = r.get_generation("intent")
+    await r.promote("intent", "v1")
+    assert r.get_generation("intent") == start + 1
+
+
+@pytest.mark.anyio
+async def test_rollback_bumps_generation(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "archive" / "intent-archived-20260101T000000.000000Z.onnx").write_bytes(b"old")
+    start = r.get_generation("intent")
+    await r.rollback("intent", "intent-archived-20260101T000000.000000Z.onnx")
+    assert r.get_generation("intent") == start + 1
+
+
+@pytest.mark.anyio
+async def test_generation_counter_is_per_model(tmp_path):
+    # Bumping intent's generation must not touch safety's.
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "intent-v1.onnx").write_bytes(b"v1")
+    before = {m: r.get_generation(m) for m in ALLOWED_MODEL_NAMES}
+    await r.promote("intent", "v1")
+    after = {m: r.get_generation(m) for m in ALLOWED_MODEL_NAMES}
+    assert after["intent"] == before["intent"] + 1
+    assert after["safety"] == before["safety"]
+    assert after["schema_mapper"] == before["schema_mapper"]
+
+
 @pytest.mark.anyio
 async def test_promote_is_serialized_per_model(tmp_path):
     # Two concurrent promotes of the same model must serialize — no race on

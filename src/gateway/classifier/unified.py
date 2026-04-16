@@ -29,6 +29,7 @@ from gateway.adapters.base import ModelResponse
 from gateway.adapters.caching import detect_cache_hit
 
 if TYPE_CHECKING:
+    from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,8 @@ class SchemaIntelligence:
         onnx_model_path: str | None = None,
         has_mcp_tools: bool = False,
         verdict_buffer: "VerdictBuffer | None" = None,
+        registry: "ModelRegistry | None" = None,
+        model_name: str | None = None,
     ) -> None:
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
@@ -211,6 +214,12 @@ class SchemaIntelligence:
 
         # Provider profile cache — learned from observed responses
         self._provider_profiles: dict[str, dict[str, Any]] = {}
+
+        # Phase 25: optional `ModelRegistry` wiring — see intent.py for the
+        # contract. When set, `classify_intent` polls the registry generation
+        # counter and rebuilds the ONNX session after a promote/rollback.
+        from gateway.intelligence.reload import ReloadState
+        self._reload_state = ReloadState(registry=registry, model_name=model_name)
 
         # Load ONNX intent model
         if onnx_model_path and Path(onnx_model_path).exists():
@@ -331,6 +340,10 @@ class SchemaIntelligence:
         model_id: str,
     ) -> IntentResult:
         """Classify request intent. Tier 1 deterministic, Tier 2 ONNX ML."""
+        # Phase 25: rebuild the ONNX session if the registry has promoted a
+        # new intent model since our last inference.
+        self._maybe_reload()
+
         tier1 = self._tier1_deterministic(prompt, metadata, model_id)
         if tier1 is not None:
             result = tier1
@@ -711,6 +724,25 @@ class SchemaIntelligence:
                 self._label_map = {i: l for i, l in enumerate(labels)}
         else:
             self._label_map = {i: l for i, l in enumerate(ALL_INTENTS)}
+
+    def reload(self) -> None:
+        """Rebuild the `InferenceSession` from the registry's production path."""
+        from gateway.intelligence.reload import maybe_reload
+
+        def _build(path: str):
+            from onnxruntime import InferenceSession
+            return InferenceSession(path, providers=["CPUExecutionProvider"])
+
+        def _adopt(session) -> None:
+            self._onnx_session = session
+
+        maybe_reload(self._reload_state, _build, _adopt, label="intent")
+
+    def _maybe_reload(self) -> None:
+        """Hot-path hook — poll generation, rebuild session if it moved."""
+        if self._reload_state.registry is None:
+            return
+        self.reload()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

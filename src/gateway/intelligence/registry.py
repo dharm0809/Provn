@@ -75,6 +75,13 @@ class ModelRegistry:
     def __init__(self, base_path: str) -> None:
         self.base = Path(base_path)
         self._locks: dict[str, asyncio.Lock] = {}
+        # Monotonic per-model reload signal. Bumped inside `lock_for(model)`
+        # on every successful promote/rollback. ONNX clients compare against
+        # their last-observed value and rebuild their InferenceSession when
+        # the counter moves. Initialized to 0 for every canonical model so
+        # clients can seed `_last_generation=-1` and be guaranteed to reload
+        # on first inference after wiring.
+        self._generations: dict[str, int] = {m: 0 for m in ALLOWED_MODEL_NAMES}
 
     def ensure_structure(self) -> None:
         for sub in ("production", "candidates", "archive", "archive/failed"):
@@ -121,6 +128,16 @@ class ModelRegistry:
             out.append(Candidate(model=m["model"], version=m["version"], path=p))
         # Sort for deterministic order across environments.
         return sorted(out, key=lambda c: (c.model, c.version))
+
+    def get_generation(self, model: str) -> int:
+        """Return the current reload-signal counter for `model`.
+
+        Bumped on every successful `promote`/`rollback`. ONNX clients poll
+        this in the hot path and rebuild their `InferenceSession` when the
+        value has moved since their last inference. Cheap — a dict lookup.
+        """
+        _validate_model_name(model)
+        return self._generations[model]
 
     def lock_for(self, model: str) -> asyncio.Lock:
         _validate_model_name(model)
@@ -175,6 +192,9 @@ class ModelRegistry:
             if prod_path.exists():
                 os.rename(prod_path, self._archive_filename(model))
             os.rename(cand_path, prod_path)
+            # Only bump after both renames succeed — partial state must not
+            # trigger client reloads onto a half-swapped production file.
+            self._generations[model] += 1
 
     async def rollback(self, model: str, archived_filename: str) -> None:
         """Restore a previously archived version to production.
@@ -194,3 +214,4 @@ class ModelRegistry:
             if prod_path.exists():
                 os.rename(prod_path, self._archive_filename(model))
             os.rename(archive_path, prod_path)
+            self._generations[model] += 1
