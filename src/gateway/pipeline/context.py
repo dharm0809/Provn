@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from gateway.content.base import ContentAnalyzer
     from gateway.export.base import AuditExporter
     from gateway.intelligence.db import IntelligenceDB
+    from gateway.intelligence.retention import RetentionSweeper
     from gateway.intelligence.verdict_buffer import VerdictBuffer
     from gateway.mcp.registry import ToolRegistry
     from gateway.pipeline.budget_tracker import BudgetTracker
@@ -91,6 +92,8 @@ class PipelineContext:
         self.intelligence_db: IntelligenceDB | None = None
         self.intelligence_flush_task: Any | None = None
         self.intelligence_flush_worker: Any | None = None
+        self.intelligence_retention_task: Any | None = None
+        self.intelligence_retention_sweeper: Any | None = None
 
 
 _ctx = PipelineContext()

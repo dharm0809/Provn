@@ -892,6 +892,7 @@ def _init_intelligence(settings, ctx) -> None:
 
     try:
         from gateway.intelligence.db import IntelligenceDB
+        from gateway.intelligence.retention import RetentionSweeper
         from gateway.intelligence.verdict_buffer import VerdictBuffer
         from gateway.intelligence.verdict_flush import VerdictFlushWorker
 
@@ -906,13 +907,27 @@ def _init_intelligence(settings, ctx) -> None:
         ctx.verdict_buffer = buffer
         ctx.intelligence_flush_worker = worker
         ctx.intelligence_flush_task = asyncio.create_task(worker.run())
-        logger.info("Intelligence verdict capture initialized (db=%s)", db_path)
+
+        sweeper = RetentionSweeper(
+            db,
+            retention_days=settings.verdict_retention_days,
+            sweep_interval_s=3600.0,
+        )
+        ctx.intelligence_retention_sweeper = sweeper
+        ctx.intelligence_retention_task = asyncio.create_task(sweeper.run())
+        logger.info(
+            "Intelligence verdict capture initialized (db=%s, retention_days=%d)",
+            db_path,
+            settings.verdict_retention_days,
+        )
     except Exception as e:
         logger.warning("Intelligence layer init failed (non-fatal): %s", e)
         ctx.intelligence_db = None
         ctx.verdict_buffer = None
         ctx.intelligence_flush_worker = None
         ctx.intelligence_flush_task = None
+        ctx.intelligence_retention_sweeper = None
+        ctx.intelligence_retention_task = None
 
 
 def _init_load_balancer(settings, ctx) -> None:
@@ -1442,6 +1457,33 @@ async def on_shutdown() -> None:
             errors.append(f"intelligence_flush_task: {e}")
     ctx.intelligence_flush_task = None
     ctx.intelligence_flush_worker = None
+
+    # Phase 25: Intelligence retention sweeper — same drain pattern as the
+    # flush worker. stop() flips the running flag; the await drains the
+    # in-flight sleep / sweep.
+    if ctx.intelligence_retention_sweeper:
+        try:
+            ctx.intelligence_retention_sweeper.stop()
+        except Exception as e:
+            errors.append(f"intelligence_retention_sweeper.stop: {e}")
+    if ctx.intelligence_retention_task and not ctx.intelligence_retention_task.done():
+        try:
+            await asyncio.wait_for(ctx.intelligence_retention_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            ctx.intelligence_retention_task.cancel()
+            try:
+                await ctx.intelligence_retention_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                errors.append(f"intelligence_retention_task: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            errors.append(f"intelligence_retention_task: {e}")
+    ctx.intelligence_retention_task = None
+    ctx.intelligence_retention_sweeper = None
+
     ctx.intelligence_db = None
     ctx.verdict_buffer = None
 
