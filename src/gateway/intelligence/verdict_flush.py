@@ -5,6 +5,14 @@ and writes them in a single explicit transaction (BEGIN IMMEDIATE / COMMIT)
 per the IntelligenceDB autocommit contract. Write failures are logged at
 ERROR and the loop continues — the inference hot path must not be taken
 down by a broken flush.
+
+Known limitation (tracked for future hardening): `drain()` removes items from
+the buffer BEFORE `_write_batch()` runs. If `_write_batch()` raises (SQLite
+lock, disk full, bad row), the drained batch is lost. Acceptable in Task 6's
+scope — the verdict log is observational telemetry, not durable audit — but a
+retry / dead-letter queue should be added before the intelligence layer is
+promoted to production-critical status. Not urgent; verdicts are high-volume
+and a single batch loss is statistically irrelevant to distillation outcomes.
 """
 from __future__ import annotations
 
@@ -43,6 +51,9 @@ class VerdictFlushWorker:
                     await asyncio.to_thread(self._write_batch, batch)
             except Exception:
                 # Hot path is sacred: log + continue, never re-raise.
+                # asyncio.CancelledError inherits from BaseException (Py 3.8+),
+                # so `except Exception` does NOT swallow cancellation —
+                # `stop()` followed by `await task` still shuts down cleanly.
                 logger.exception("verdict flush iteration failed")
 
     def stop(self) -> None:
