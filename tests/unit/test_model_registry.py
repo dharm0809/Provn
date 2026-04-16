@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
-from gateway.intelligence.registry import Candidate, ModelRegistry
+from gateway.intelligence.registry import ALLOWED_MODEL_NAMES, Candidate, ModelRegistry
 
 
 def test_registry_ensures_directories(tmp_path):
@@ -95,7 +96,7 @@ def test_list_candidates_skips_malformed_filenames(tmp_path):
 
 def test_candidate_is_frozen(tmp_path):
     c = Candidate(model="intent", version="v1", path=Path("/tmp/x"))
-    with pytest.raises(Exception):  # FrozenInstanceError subclasses Exception
+    with pytest.raises(dataclasses.FrozenInstanceError):
         c.model = "changed"  # type: ignore[misc]
 
 
@@ -111,3 +112,52 @@ def test_lock_for_returns_different_locks_per_model(tmp_path):
     l_intent = r.lock_for("intent")
     l_safety = r.lock_for("safety")
     assert l_intent is not l_safety
+
+
+def test_production_path_rejects_unknown_model(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    with pytest.raises(ValueError, match="unknown model name"):
+        r.production_path("../../etc/passwd")
+    with pytest.raises(ValueError, match="unknown model name"):
+        r.production_path("not_a_real_model")
+
+
+def test_lock_for_rejects_unknown_model(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    with pytest.raises(ValueError, match="unknown model name"):
+        r.lock_for("../../etc/passwd")
+
+
+def test_list_candidates_filters_phantom_models(tmp_path):
+    # Regex alone would parse `prefix-intent-v2.onnx` as model=prefix,
+    # version=intent-v2. The ALLOWED_MODEL_NAMES filter must kill that.
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "intent-v2.onnx").write_bytes(b"fake")
+    (tmp_path / "candidates" / "prefix-intent-v2.onnx").write_bytes(b"fake")
+    cands = r.list_candidates()
+    assert len(cands) == 1
+    assert cands[0].model == "intent"
+    assert cands[0].version == "v2"
+
+
+def test_list_candidates_is_sorted(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "safety-v5.onnx").write_bytes(b"fake")
+    (tmp_path / "candidates" / "intent-v2.onnx").write_bytes(b"fake")
+    (tmp_path / "candidates" / "intent-v1.onnx").write_bytes(b"fake")
+    cands = r.list_candidates()
+    # Sorted by (model, version) — deterministic across filesystems.
+    assert [(c.model, c.version) for c in cands] == [
+        ("intent", "v1"),
+        ("intent", "v2"),
+        ("safety", "v5"),
+    ]
+
+
+def test_allowed_model_names_matches_model_verdict():
+    # Guard against drift: these names are duplicated in ModelVerdict
+    # recording sites (intent.py, unified.py, schema/mapper.py, safety_classifier.py).
+    # If someone changes one set without the other, this test fails loudly.
+    assert ALLOWED_MODEL_NAMES == frozenset({"intent", "schema_mapper", "safety"})

@@ -20,6 +20,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+# Canonical set of model names this registry serves. Matches the `model_name`
+# strings recorded by `ModelVerdict` (see `intelligence/types.py`) and the
+# three ONNX inference sites wired in Task 7. Closed set — any model-name
+# input that is NOT in here is rejected to prevent path traversal and to
+# keep the candidate-filename regex from parsing phantom models (e.g.
+# `prefix-intent-v2.onnx` would otherwise be accepted as `model=prefix`).
+ALLOWED_MODEL_NAMES: frozenset[str] = frozenset({"intent", "schema_mapper", "safety"})
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -34,6 +42,14 @@ class Candidate:
 _CAND_RE = re.compile(r"^(?P<model>[a-z_]+)-(?P<version>[a-zA-Z0-9_.\-]+)\.onnx$")
 
 
+def _validate_model_name(model: str) -> None:
+    if model not in ALLOWED_MODEL_NAMES:
+        raise ValueError(
+            f"unknown model name {model!r}; "
+            f"expected one of {sorted(ALLOWED_MODEL_NAMES)}"
+        )
+
+
 class ModelRegistry:
     def __init__(self, base_path: str) -> None:
         self.base = Path(base_path)
@@ -44,6 +60,7 @@ class ModelRegistry:
             (self.base / sub).mkdir(parents=True, exist_ok=True)
 
     def production_path(self, model: str) -> Path:
+        _validate_model_name(model)
         return self.base / "production" / f"{model}.onnx"
 
     def list_production_models(self) -> list[str]:
@@ -53,6 +70,7 @@ class ModelRegistry:
         # Only real .onnx files at the top level. Skip hidden files, non-onnx,
         # and stems containing a dash (defensive: a stray `intent-v2.onnx`
         # landing in production/ must not be treated as a production model).
+        # Also filter to ALLOWED_MODEL_NAMES so only canonical names surface.
         return sorted(
             p.stem
             for p in prod.iterdir()
@@ -60,6 +78,7 @@ class ModelRegistry:
             and p.suffix == ".onnx"
             and not p.name.startswith(".")
             and "-" not in p.stem
+            and p.stem in ALLOWED_MODEL_NAMES
         )
 
     def list_candidates(self) -> list[Candidate]:
@@ -73,10 +92,20 @@ class ModelRegistry:
             m = _CAND_RE.match(p.name)
             if not m:
                 continue
+            # Filter to canonical models — kills phantom-model parses like
+            # `prefix-intent-v2.onnx` (model=prefix, version=intent-v2), which
+            # the regex alone would accept.
+            if m["model"] not in ALLOWED_MODEL_NAMES:
+                continue
             out.append(Candidate(model=m["model"], version=m["version"], path=p))
-        return out
+        # Sort for deterministic order across environments.
+        return sorted(out, key=lambda c: (c.model, c.version))
 
     def lock_for(self, model: str) -> asyncio.Lock:
+        _validate_model_name(model)
+        # Safe under single event loop: the check-then-insert has no `await`
+        # between operations and dict access is atomic at the CPython
+        # bytecode level. Thread-unsafe by design (matches VerdictBuffer).
         if model not in self._locks:
             self._locks[model] = asyncio.Lock()
         return self._locks[model]
