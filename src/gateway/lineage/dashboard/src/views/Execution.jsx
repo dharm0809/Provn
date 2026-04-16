@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getExecution, getTrace, getSession } from '../api';
-import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes, copyToClipboard, fileTypeInfo } from '../utils';
+import { displayModel, formatSessionId, formatTime, truncId, verdictBadgeClass, policyBadgeClass, formatBytes, copyToClipboard, fileTypeInfo, asArray } from '../utils';
 import TraceWaterfall from '../components/TraceWaterfall';
 
 function CopyBtn({ text }) {
@@ -78,10 +78,10 @@ export default function Execution({ navigate, executionId, sessionId }) {
 
   const r = record;
   const sid = sessionId || r.session_id;
-  const tools = toolEvents.length > 0 ? toolEvents : (r.metadata?.tool_interactions || []);
+  const tools = toolEvents.length > 0 ? toolEvents : asArray(r.metadata?.tool_interactions);
   const toolStrategy = r.metadata?.tool_strategy;
   const toolIterations = r.metadata?.tool_loop_iterations || 0;
-  const decisions = r.metadata?.analyzer_decisions || [];
+  const decisions = asArray(r.metadata?.analyzer_decisions);
   const usage = r.metadata?.token_usage;
   const questionIndex = questionRecords.findIndex((rec) => rec.execution_id === r.execution_id);
   const hasQuestionNav = questionIndex >= 0;
@@ -303,8 +303,12 @@ export default function Execution({ navigate, executionId, sessionId }) {
           {tools.map((te, i) => {
             const isErr = te.is_error === true;
             const inputDisplay = typeof te.input_data === 'string' ? te.input_data : te.input_data ? JSON.stringify(te.input_data, null, 2) : null;
-            const sources = te.sources || [];
-            const toolAnalysis = te.content_analysis || [];
+            let sources = te.sources;
+            if (typeof sources === 'string') { try { sources = JSON.parse(sources); } catch { sources = []; } }
+            if (!Array.isArray(sources)) sources = [];
+            let toolAnalysis = te.content_analysis;
+            if (typeof toolAnalysis === 'string') { try { toolAnalysis = JSON.parse(toolAnalysis); } catch { toolAnalysis = []; } }
+            if (!Array.isArray(toolAnalysis)) toolAnalysis = [];
             return (
               <div key={i} className={`tool-event-card${isErr ? ' tool-error' : ''}`}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
