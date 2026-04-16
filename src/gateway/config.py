@@ -576,6 +576,25 @@ class Settings(BaseSettings):
     custom_identity_validators: str = Field(default="", description="Custom IdentityValidator classes")
     custom_resource_monitors: str = Field(default="", description="Custom ResourceMonitor classes")
 
+    # ── Phase 25: Intelligence / ONNX Self-Learning ──────────────────────────
+    intelligence_enabled: bool = Field(default=True, description="Enable ONNX intelligence layer (intent, schema, safety verdict capture and distillation)")
+    intelligence_db_path: str = Field(default="", description="SQLite path for intelligence verdict store. Empty defaults to {wal_path}/intelligence.db")
+    models_base_path: str = Field(default="", description="Base directory for ONNX model artifacts. Empty defaults to src/gateway/models/")
+    verdict_retention_days: int = Field(default=30, description="Retention for captured ONNX verdicts in days")
+    distillation_schedule_cron: str = Field(default="0 2 * * *", description="Cron expression for nightly distillation job")
+    distillation_min_divergences: int = Field(default=500, description="Minimum student↔teacher divergences required to trigger distillation")
+    shadow_sample_target: int = Field(default=1000, description="Target sample size for shadow evaluation of a candidate model")
+    shadow_min_accuracy_delta: float = Field(default=0.02, description="Minimum accuracy improvement (vs. production) required to promote a candidate")
+    shadow_max_disagreement: float = Field(default=0.40, description="Maximum allowed disagreement rate (candidate vs. production) during shadow eval")
+    shadow_max_error_rate: float = Field(default=0.05, description="Maximum allowed inference error rate for a candidate during shadow eval")
+    auto_promote_models: str = Field(default="", description="Comma-separated list of model names eligible for auto-promotion (empty = human-in-loop only)")
+    teacher_llm_url: str = Field(default="", description="URL for teacher LLM used in distillation (empty = disabled)")
+    teacher_llm_sample_rate: float = Field(default=0.01, description="Fraction of requests sampled for teacher LLM labeling (0.0–1.0)")
+
+    @property
+    def auto_promote_models_list(self) -> list[str]:
+        return [m.strip() for m in self.auto_promote_models.split(",") if m.strip()]
+
     @property
     def api_keys_list(self) -> list[str]:
         return [k.strip() for k in self.gateway_api_keys.split(",") if k.strip()]
