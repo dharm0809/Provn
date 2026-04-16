@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
@@ -59,12 +60,21 @@ class IntentClassifier:
         onnx_model_path: str | None = None,
         has_mcp_tools: bool = False,
         verdict_buffer: "VerdictBuffer | None" = None,
+        registry: "ModelRegistry | None" = None,
+        model_name: str | None = None,
     ):
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
         self._onnx_tokenizer = None
         self._label_map: dict[int, str] = {}
         self._verdict_buffer = verdict_buffer
+
+        # Phase 25: optional `ModelRegistry` wiring. When set, the client
+        # rebuilds its `InferenceSession` whenever the registry's per-model
+        # generation counter moves (i.e. after a promote/rollback). Held in
+        # a ReloadState so the client + helper share a single source of truth.
+        from gateway.intelligence.reload import ReloadState
+        self._reload_state = ReloadState(registry=registry, model_name=model_name)
 
         # Try loading ONNX model
         if onnx_model_path and Path(onnx_model_path).exists():
@@ -88,6 +98,11 @@ class IntentClassifier:
         Tier 1 checks are deterministic (100% accurate).
         Tier 2 ML runs only when Tier 1 doesn't match.
         """
+        # Phase 25: check for a freshly promoted model before inferring.
+        # Placed ABOVE tier1 so deterministic-rule hits still pick up new
+        # candidate versions for the audit-logged probability hit later.
+        self._maybe_reload()
+
         # ── Tier 1: Deterministic rules ───────────────────────────────
         tier1 = self._tier1_deterministic(prompt, metadata, model_id)
         if tier1 is not None:
@@ -252,6 +267,29 @@ class IntentClassifier:
         }
 
     # ── Model loading ─────────────────────────────────────────────────
+
+    def reload(self) -> None:
+        """Rebuild the `InferenceSession` from the registry's production path.
+
+        Fail-safe: missing file or construction error keeps the previous
+        session in place. See `gateway.intelligence.reload.maybe_reload`.
+        """
+        from gateway.intelligence.reload import maybe_reload
+
+        def _build(path: str):
+            from onnxruntime import InferenceSession
+            return InferenceSession(path, providers=["CPUExecutionProvider"])
+
+        def _adopt(session) -> None:
+            self._onnx_session = session
+
+        maybe_reload(self._reload_state, _build, _adopt, label="intent")
+
+    def _maybe_reload(self) -> None:
+        """Hot-path hook — poll generation, rebuild session if it moved."""
+        if self._reload_state.registry is None:
+            return
+        self.reload()
 
     def _load_onnx(self, path: str) -> None:
         """Load ONNX model + optional tokenizer + label map."""

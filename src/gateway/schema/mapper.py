@@ -35,6 +35,7 @@ from gateway.schema.canonical import (
 from gateway.schema.features import FlatField, extract_features, flatten_json
 
 if TYPE_CHECKING:
+    from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,8 @@ class SchemaMapper:
         self,
         onnx_path: str | None = None,
         verdict_buffer: "VerdictBuffer | None" = None,
+        registry: "ModelRegistry | None" = None,
+        model_name: str | None = None,
     ) -> None:
         self._session = None
         self._input_name = ""
@@ -63,10 +66,19 @@ class SchemaMapper:
         self._label_to_idx: dict[str, int] = {}
         self._verdict_buffer = verdict_buffer
 
+        # Phase 25: optional `ModelRegistry` wiring — see `intelligence/reload.py`.
+        from gateway.intelligence.reload import ReloadState
+        self._reload_state = ReloadState(registry=registry, model_name=model_name)
+
         model_path = onnx_path or str(_ONNX_PATH)
         labels_path = str(_LABELS_PATH)
 
-        if Path(model_path).exists():
+        # When a registry is wired it owns the session lifecycle — skip the
+        # packaged-default load so we don't construct a throwaway session
+        # that gets replaced on first inference anyway. The first call to
+        # `map_response` triggers `_maybe_reload` which builds from the
+        # current production file.
+        if Path(model_path).exists() and self._reload_state.registry is None:
             try:
                 from onnxruntime import InferenceSession
                 self._session = InferenceSession(model_path, providers=["CPUExecutionProvider"])
@@ -94,6 +106,9 @@ class SchemaMapper:
             CanonicalResponse with all recognized fields mapped and
             unrecognized fields preserved in overflow.
         """
+        # Phase 25: refresh session from registry if a new version was promoted.
+        self._maybe_reload()
+
         if not isinstance(raw, dict):
             result = CanonicalResponse(_mapping_incomplete=True)
         else:
@@ -426,6 +441,33 @@ class SchemaMapper:
         cr._unmapped_fields = unmapped
 
         return cr
+
+    def reload(self) -> None:
+        """Rebuild the `InferenceSession` from the registry's production path.
+
+        Also refreshes `_input_name` so ORT call sites keep working after a
+        retrained model changes the input tensor name. Fail-safe.
+        """
+        from gateway.intelligence.reload import maybe_reload
+
+        def _build(path: str):
+            from onnxruntime import InferenceSession
+            return InferenceSession(path, providers=["CPUExecutionProvider"])
+
+        def _adopt(session) -> None:
+            self._session = session
+            try:
+                self._input_name = session.get_inputs()[0].name
+            except Exception:
+                logger.debug("SchemaMapper.reload: could not refresh input_name", exc_info=True)
+
+        maybe_reload(self._reload_state, _build, _adopt, label="schema_mapper")
+
+    def _maybe_reload(self) -> None:
+        """Hot-path hook — poll generation, rebuild session if it moved."""
+        if self._reload_state.registry is None:
+            return
+        self.reload()
 
     @staticmethod
     def _normalize_finish_reason(raw: str) -> str:

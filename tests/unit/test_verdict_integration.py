@@ -164,6 +164,8 @@ def _stub_safety_classifier(verdict_buffer: VerdictBuffer | None):
     import numpy as np
     from gateway.content.safety_classifier import SafetyClassifier
 
+    from gateway.intelligence.reload import ReloadState
+
     clf = SafetyClassifier.__new__(SafetyClassifier)
     clf._session = None
     clf._input_name = "features"
@@ -175,6 +177,9 @@ def _stub_safety_classifier(verdict_buffer: VerdictBuffer | None):
     clf._ngram_range = (3, 5)
     clf._loaded = True
     clf._verdict_buffer = verdict_buffer
+    # Phase 25 Task 11: reload hot-path polls `_reload_state` — tests that
+    # construct via `__new__` must seed it too (no registry = no-op).
+    clf._reload_state = ReloadState()
 
     # Mock ONNX session: returns label index 0 ("safe") with probability dict.
     mock_session = MagicMock()
@@ -216,6 +221,8 @@ def test_safety_records_verdict_when_unavailable():
     from gateway.content.base import Verdict
     from gateway.content.safety_classifier import SafetyClassifier
 
+    from gateway.intelligence.reload import ReloadState
+
     buf = VerdictBuffer(max_size=10)
     clf = SafetyClassifier.__new__(SafetyClassifier)
     clf._session = None
@@ -227,6 +234,7 @@ def test_safety_records_verdict_when_unavailable():
     clf._ngram_range = (3, 5)
     clf._loaded = False  # unavailable
     clf._verdict_buffer = buf
+    clf._reload_state = ReloadState()
 
     decision = clf.analyze("anything")
     assert decision.verdict == Verdict.PASS

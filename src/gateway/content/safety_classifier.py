@@ -37,6 +37,7 @@ import numpy as np
 from gateway.content.base import ContentAnalyzer, Decision, Verdict
 
 if TYPE_CHECKING:
+    from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,12 @@ class SafetyClassifier(ContentAnalyzer):
 
     analyzer_id = "truzenai.safety.v1"
 
-    def __init__(self, verdict_buffer: "VerdictBuffer | None" = None) -> None:
+    def __init__(
+        self,
+        verdict_buffer: "VerdictBuffer | None" = None,
+        registry: "ModelRegistry | None" = None,
+        model_name: str | None = None,
+    ) -> None:
         self._session = None
         self._input_name = ""
         self._labels: list[str] = []
@@ -131,6 +137,13 @@ class SafetyClassifier(ContentAnalyzer):
         self._ngram_range = (3, 5)
         self._loaded = False
         self._verdict_buffer = verdict_buffer
+
+        # Phase 25: optional `ModelRegistry` wiring — see `intelligence/reload.py`.
+        # Only the `.onnx` session is swap-reloaded; TF-IDF vocab, IDF, and SVD
+        # components are stable training artifacts that do not change with
+        # retraining in the current distillation setup.
+        from gateway.intelligence.reload import ReloadState
+        self._reload_state = ReloadState(registry=registry, model_name=model_name)
 
         self._load()
 
@@ -161,8 +174,19 @@ class SafetyClassifier(ContentAnalyzer):
                     config = json.load(f)
                     self._ngram_range = tuple(config.get("ngram_range", [3, 5]))
 
-            # ONNX model
-            if _ONNX_PATH.exists():
+            # ONNX model — when a registry is wired it owns the session
+            # lifecycle; skip the packaged-default session construction
+            # (the first `analyze` call triggers `_maybe_reload` to build
+            # from the current production file). Labels/vocab/IDF/SVD
+            # artifacts above are still loaded — those are stable training
+            # outputs that don't participate in the model swap.
+            if self._reload_state.registry is not None:
+                logger.info(
+                    "SafetyClassifier: deferring ONNX load to registry "
+                    "(%d categories, %d vocab terms)",
+                    len(self._labels), len(self._vocab),
+                )
+            elif _ONNX_PATH.exists():
                 from onnxruntime import InferenceSession
                 self._session = InferenceSession(str(_ONNX_PATH), providers=["CPUExecutionProvider"])
                 self._input_name = self._session.get_inputs()[0].name
@@ -228,6 +252,9 @@ class SafetyClassifier(ContentAnalyzer):
 
     def analyze(self, text: str) -> Decision:
         """Classify text for safety. Returns Decision with verdict and category."""
+        # Phase 25: refresh session from registry if a new version was promoted.
+        self._maybe_reload()
+
         # `label` is the raw ONNX class label (e.g. "safe", "violence") — used
         # both as the verdict prediction and for the downstream recording hook.
         label = "safe"
@@ -318,3 +345,31 @@ class SafetyClassifier(ContentAnalyzer):
         """Accept content policy configuration (hot-reload from control plane)."""
         # Future: allow per-category BLOCK/WARN/PASS override from control plane
         pass
+
+    def reload(self) -> None:
+        """Rebuild the `InferenceSession` from the registry's production path.
+
+        Refreshes `_input_name` and flips `_loaded` so the fail-open branch
+        in `analyze` doesn't short-circuit after a successful swap. Fail-safe.
+        """
+        from gateway.intelligence.reload import maybe_reload
+
+        def _build(path: str):
+            from onnxruntime import InferenceSession
+            return InferenceSession(path, providers=["CPUExecutionProvider"])
+
+        def _adopt(session) -> None:
+            self._session = session
+            try:
+                self._input_name = session.get_inputs()[0].name
+            except Exception:
+                logger.debug("SafetyClassifier.reload: could not refresh input_name", exc_info=True)
+            self._loaded = True
+
+        maybe_reload(self._reload_state, _build, _adopt, label="safety")
+
+    def _maybe_reload(self) -> None:
+        """Hot-path hook — poll generation, rebuild session if it moved."""
+        if self._reload_state.registry is None:
+            return
+        self.reload()
