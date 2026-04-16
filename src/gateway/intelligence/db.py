@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS onnx_verdicts (
     prediction TEXT NOT NULL,
     confidence REAL NOT NULL,
     request_id TEXT,
-    timestamp REAL NOT NULL,
+    timestamp TEXT NOT NULL,
     divergence_signal TEXT,
     divergence_source TEXT
 );
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS shadow_comparisons (
     candidate_prediction TEXT,
     candidate_confidence REAL,
     candidate_error TEXT,
-    timestamp REAL NOT NULL
+    timestamp TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_model_version ON shadow_comparisons(model_name, candidate_version);
 
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS training_snapshots (
     model_name TEXT NOT NULL,
     dataset_hash TEXT NOT NULL UNIQUE,
     row_ids_json TEXT NOT NULL,
-    created_at REAL NOT NULL
+    created_at TEXT NOT NULL
 );
 """
 

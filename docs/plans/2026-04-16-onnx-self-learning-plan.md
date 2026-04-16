@@ -195,14 +195,14 @@ def test_unique_constraint_on_training_dataset_hash(tmp_path):
         conn.execute(
             "INSERT INTO training_snapshots (model_name, dataset_hash, row_ids_json, created_at) "
             "VALUES (?, ?, ?, ?)",
-            ("intent", "abc123", "[1,2,3]", 0.0),
+            ("intent", "abc123", "[1,2,3]", "2026-04-16T00:00:00+00:00"),
         )
         conn.commit()
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO training_snapshots (model_name, dataset_hash, row_ids_json, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                ("intent", "abc123", "[4,5]", 1.0),
+                ("intent", "abc123", "[4,5]", "2026-04-16T00:00:01+00:00"),
             )
             conn.commit()
     finally:
@@ -240,7 +240,7 @@ CREATE TABLE IF NOT EXISTS onnx_verdicts (
     prediction TEXT NOT NULL,
     confidence REAL NOT NULL,
     request_id TEXT,
-    timestamp REAL NOT NULL,
+    timestamp TEXT NOT NULL,
     divergence_signal TEXT,
     divergence_source TEXT
 );
@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS shadow_comparisons (
     candidate_prediction TEXT,
     candidate_confidence REAL,
     candidate_error TEXT,
-    timestamp REAL NOT NULL
+    timestamp TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_model_version ON shadow_comparisons(model_name, candidate_version);
 
@@ -266,7 +266,7 @@ CREATE TABLE IF NOT EXISTS training_snapshots (
     model_name TEXT NOT NULL,
     dataset_hash TEXT NOT NULL UNIQUE,
     row_ids_json TEXT NOT NULL,
-    created_at REAL NOT NULL
+    created_at TEXT NOT NULL
 );
 """
 
@@ -669,12 +669,23 @@ git commit -m "feat(intelligence): lifecycle event types + Walacor ETId 9000024"
 
 **Note on `__init__.py`:** The file was added in commit `eb188d9` (Apr 6, Schema Intelligence v2) and currently contains only a one-line docstring. Modify it to reflect the broader Phase 25 scope and re-export `ModelVerdict`. Do NOT replace the file — preserve the package structure and update the docstring.
 
+**Design decisions locked in (reuse conventions from Tasks 2 + 3):**
+- **`timestamp` is an ISO-8601 UTC string**, matching every other Walacor/WAL record in the codebase (`core/models/execution.py`, `wal/writer.py`, and Task 3's `LifecycleEvent`). Task 2's `onnx_verdicts.timestamp` column is `TEXT NOT NULL` — this type matches.
+- **`from_inference` is a keyword-only classmethod** (`*,`) — prevents ambiguous positional arg ordering.
+- **`input_hash` is SHA-256 of `input_text.encode()`** — hex-encoded, 64 chars. Two identical prompts hash the same; enables dedup downstream.
+- **`input_features_json` defaults to `"{}"`** (empty dict JSON-serialized) when `features` is not supplied — never null, so the SQLite NOT NULL column is always satisfied.
+- **`__init__.py` is MODIFIED, not created.** The package already exists (added Apr 6, Schema Intelligence v2). Preserve the existing docstring's intent but broaden it to cover Phase 25's verdict/distillation scope.
+
 **Step 1: Test**
 
 ```python
 # tests/unit/test_intelligence_types.py
 from __future__ import annotations
+
+from datetime import datetime
+
 from gateway.intelligence.types import ModelVerdict
+
 
 def test_verdict_from_inference():
     v = ModelVerdict.from_inference(
@@ -683,8 +694,59 @@ def test_verdict_from_inference():
     )
     assert v.model_name == "intent"
     assert v.prediction == "web_search"
+    assert v.confidence == 0.87
+    assert v.request_id == "req-1"
     assert len(v.input_hash) == 64  # sha256
+    assert v.input_features_json == "{}"  # default when no features supplied
     assert v.divergence_signal is None
+    assert v.divergence_source is None
+
+
+def test_verdict_timestamp_is_iso8601_utc():
+    v = ModelVerdict.from_inference(
+        model_name="intent", input_text="x", prediction="normal", confidence=0.5,
+    )
+    assert isinstance(v.timestamp, str)
+    parsed = datetime.fromisoformat(v.timestamp)
+    assert parsed.tzinfo is not None
+
+
+def test_input_hash_deterministic():
+    v1 = ModelVerdict.from_inference(
+        model_name="safety", input_text="hello world",
+        prediction="safe", confidence=0.99,
+    )
+    v2 = ModelVerdict.from_inference(
+        model_name="safety", input_text="hello world",
+        prediction="safe", confidence=0.99,
+    )
+    assert v1.input_hash == v2.input_hash
+
+
+def test_input_hash_differs_on_different_text():
+    v1 = ModelVerdict.from_inference(
+        model_name="safety", input_text="hello world",
+        prediction="safe", confidence=0.99,
+    )
+    v2 = ModelVerdict.from_inference(
+        model_name="safety", input_text="hello worlds",  # one char different
+        prediction="safe", confidence=0.99,
+    )
+    assert v1.input_hash != v2.input_hash
+
+
+def test_features_json_is_sorted():
+    # Sort for determinism — two logically-equal feature dicts should serialize
+    # to the same JSON string regardless of insertion order.
+    v1 = ModelVerdict.from_inference(
+        model_name="schema", input_text="x", prediction="content",
+        confidence=0.8, features={"b": 2, "a": 1},
+    )
+    v2 = ModelVerdict.from_inference(
+        model_name="schema", input_text="x", prediction="content",
+        confidence=0.8, features={"a": 1, "b": 2},
+    )
+    assert v1.input_features_json == v2.input_features_json
 ```
 
 **Step 2: Implement**
@@ -692,9 +754,17 @@ def test_verdict_from_inference():
 ```python
 # src/gateway/intelligence/types.py
 from __future__ import annotations
-import hashlib, json, time
+
+import hashlib
+import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 @dataclass
 class ModelVerdict:
@@ -704,30 +774,53 @@ class ModelVerdict:
     prediction: str
     confidence: float
     request_id: str | None
-    timestamp: float = field(default_factory=time.time)
+    timestamp: str = field(default_factory=_utcnow_iso)
     divergence_signal: str | None = None
     divergence_source: str | None = None
 
     @classmethod
     def from_inference(
-        cls, *, model_name: str, input_text: str, prediction: str,
-        confidence: float, request_id: str | None = None,
+        cls,
+        *,
+        model_name: str,
+        input_text: str,
+        prediction: str,
+        confidence: float,
+        request_id: str | None = None,
         features: dict[str, Any] | None = None,
     ) -> "ModelVerdict":
         input_hash = hashlib.sha256(input_text.encode()).hexdigest()
+        # sort_keys so logically-equal feature dicts produce identical JSON —
+        # lets downstream dedup/fingerprinting treat key order as insignificant.
         features_json = json.dumps(features or {}, sort_keys=True)
         return cls(
-            model_name=model_name, input_hash=input_hash,
-            input_features_json=features_json, prediction=prediction,
-            confidence=confidence, request_id=request_id,
+            model_name=model_name,
+            input_hash=input_hash,
+            input_features_json=features_json,
+            prediction=prediction,
+            confidence=confidence,
+            request_id=request_id,
         )
 ```
 
-**Step 3: Package init**
+**Step 3: Modify `src/gateway/intelligence/__init__.py`**
+
+The current file contains:
+```python
+"""Background LLM intelligence — async enrichment via local Ollama models."""
+```
+
+Update it to reflect Phase 25's broader scope AND re-export `ModelVerdict`, **without discarding the existing intent**:
 
 ```python
-# src/gateway/intelligence/__init__.py
+"""Intelligence layer for the gateway.
+
+Original scope (Apr 2026): background LLM enrichment via local Ollama models.
+Phase 25 adds a self-learning feedback loop on top: ONNX verdict capture,
+shadow-mode candidate validation, and audit-chain anchored model promotion.
+"""
 from __future__ import annotations
+
 from gateway.intelligence.types import ModelVerdict
 
 __all__ = ["ModelVerdict"]
@@ -736,7 +829,8 @@ __all__ = ["ModelVerdict"]
 **Step 4: Test + commit**
 
 ```
-pytest tests/unit/test_intelligence_types.py -v
+.venv/bin/python -m pytest tests/unit/test_intelligence_types.py -v
+# expect: 5 passed
 git add src/gateway/intelligence/__init__.py src/gateway/intelligence/types.py tests/unit/test_intelligence_types.py
 git commit -m "feat(intelligence): ModelVerdict dataclass with deterministic input hashing"
 ```
