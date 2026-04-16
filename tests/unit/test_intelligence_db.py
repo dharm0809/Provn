@@ -43,14 +43,14 @@ def test_unique_constraint_on_training_dataset_hash(tmp_path):
         conn.execute(
             "INSERT INTO training_snapshots (model_name, dataset_hash, row_ids_json, created_at) "
             "VALUES (?, ?, ?, ?)",
-            ("intent", "abc123", "[1,2,3]", 0.0),
+            ("intent", "abc123", "[1,2,3]", "2026-04-16T00:00:00+00:00"),
         )
         conn.commit()
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO training_snapshots (model_name, dataset_hash, row_ids_json, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                ("intent", "abc123", "[4,5]", 1.0),
+                ("intent", "abc123", "[4,5]", "2026-04-16T00:00:01+00:00"),
             )
             conn.commit()
     finally:
