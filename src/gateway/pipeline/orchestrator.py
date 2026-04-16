@@ -1806,11 +1806,21 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     if _si is None:
         _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
                         and settings.mcp_servers_json)
-        _onnx_path = str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+        # Task 12: when the registry is wired, the ONNX session is loaded on
+        # first `classify_intent` call from `production/intent.onnx`. Without
+        # a registry, fall back to the packaged model path (pre-Phase-25
+        # behavior).
+        _onnx_path = (
+            None
+            if ctx.model_registry is not None
+            else str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+        )
         _si = SchemaIntelligence(
             onnx_model_path=_onnx_path,
             has_mcp_tools=_has_mcp,
             verdict_buffer=ctx.verdict_buffer,
+            registry=ctx.model_registry,
+            model_name="intent" if ctx.model_registry is not None else None,
         )
         ctx.schema_intelligence = _si
 
@@ -2072,7 +2082,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     if _schema_mapper is None:
         try:
             from gateway.schema.mapper import SchemaMapper
-            _schema_mapper = SchemaMapper()
+            # Task 12: same registry-wiring pattern as main.py init site.
+            _schema_mapper = SchemaMapper(
+                registry=ctx.model_registry,
+                model_name="schema_mapper" if ctx.model_registry is not None else None,
+            )
             ctx.schema_mapper = _schema_mapper
         except Exception as _sm_init_err:
             logger.debug("SchemaMapper init failed (non-fatal): %s", _sm_init_err)
