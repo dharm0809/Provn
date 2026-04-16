@@ -1055,11 +1055,25 @@ Commit: `feat(intelligence): batched async flush worker for verdict log`
 
 ### Task 7: Hot-path integration — record verdicts from each ONNX inference
 
+**Note:** The live Intent classifier is `SchemaIntelligence.classify_intent` in
+`classifier/unified.py`, NOT the standalone `IntentClassifier` in `intent.py`
+(which is dormant and kept only for test coverage of the verdict-recording
+pattern). Wire the verdict-recording stanza into `SchemaIntelligence` as the
+primary hot-path site; `orchestrator.py` passes `verdict_buffer=ctx.verdict_buffer`
+at the `SchemaIntelligence(...)` call site.
+
+**Correlation:** All recording sites pull `request_id` from
+`gateway.util.request_context.request_id_var` (a ContextVar set by the
+completeness middleware) so harvesters in Tasks 13-16 can join verdicts to WAL
+execution records for ground-truth cross-stream correlation.
+
 **Files:**
 - Modify: `src/gateway/classifier/intent.py` (add `verdict_buffer.record(...)` after inference)
+- Modify: `src/gateway/classifier/unified.py` (SchemaIntelligence — the live hot path)
 - Modify: `src/gateway/schema/mapper.py` (same)
 - Modify: `src/gateway/content/safety_classifier.py` (same)
 - Modify: `src/gateway/pipeline/context.py` (add `verdict_buffer` field)
+- Modify: `src/gateway/pipeline/orchestrator.py` (pass `verdict_buffer=ctx.verdict_buffer` to SchemaIntelligence)
 - Modify: `src/gateway/main.py` (init VerdictBuffer + VerdictFlushWorker in lifespan)
 - Test: `tests/unit/test_verdict_integration.py`
 

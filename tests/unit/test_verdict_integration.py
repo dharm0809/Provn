@@ -256,3 +256,120 @@ def test_safety_broken_buffer_does_not_break_inference():
     decision = clf.analyze("hello")
     assert decision.verdict == Verdict.PASS
     assert broken.record.called
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# SchemaIntelligence.classify_intent — the live production intent path
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_schema_intelligence_records_intent_verdict_tier1():
+    """Tier-1 deterministic paths must also record a verdict via SchemaIntelligence."""
+    from gateway.classifier.unified import SchemaIntelligence, SYSTEM_TASK
+
+    buf = VerdictBuffer(max_size=10)
+    si = SchemaIntelligence(onnx_model_path=None, has_mcp_tools=False, verdict_buffer=buf)
+
+    # ### Task: prefix triggers tier-1 SYSTEM_TASK branch.
+    prompt = "### Task: summarize this"
+    result = si.classify_intent(prompt=prompt, metadata={}, model_id="llama3")
+
+    assert result.intent == SYSTEM_TASK
+    assert buf.size == 1
+    v = buf.drain()[0]
+    assert v.model_name == "intent"
+    assert v.prediction == SYSTEM_TASK
+    assert v.input_hash == _sha256(prompt)
+    assert v.request_id is None  # ContextVar unset → None
+    assert 0.0 <= v.confidence <= 1.0
+
+
+def test_schema_intelligence_records_intent_verdict_default_branch():
+    """No ONNX + no tier-1 match → NORMAL default, verdict still recorded."""
+    from gateway.classifier.unified import SchemaIntelligence, NORMAL
+
+    buf = VerdictBuffer(max_size=10)
+    si = SchemaIntelligence(onnx_model_path=None, has_mcp_tools=False, verdict_buffer=buf)
+
+    result = si.classify_intent(prompt="a bland question", metadata={}, model_id="llama3")
+
+    assert result.intent == NORMAL
+    assert buf.size == 1
+    v = buf.drain()[0]
+    assert v.model_name == "intent"
+    assert v.prediction == NORMAL
+
+
+def test_schema_intelligence_no_buffer_does_not_record():
+    """verdict_buffer=None must not raise and must still classify."""
+    from gateway.classifier.unified import SchemaIntelligence, NORMAL
+
+    si = SchemaIntelligence(onnx_model_path=None, has_mcp_tools=False, verdict_buffer=None)
+    result = si.classify_intent(prompt="hello", metadata={}, model_id="m")
+    assert result.intent == NORMAL
+
+
+def test_schema_intelligence_broken_buffer_does_not_break_inference():
+    from gateway.classifier.unified import SchemaIntelligence, NORMAL
+
+    broken = MagicMock()
+    broken.record.side_effect = RuntimeError("boom")
+    si = SchemaIntelligence(onnx_model_path=None, has_mcp_tools=False, verdict_buffer=broken)
+    result = si.classify_intent(prompt="hello", metadata={}, model_id="m")
+    assert result.intent == NORMAL
+    assert broken.record.called
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# request_id correlation via ContextVar — harvesters join verdicts to WAL
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_intent_verdict_carries_request_id_from_contextvar():
+    """When request_id_var is set (as the completeness middleware does),
+    the recorded verdict must carry it so Task 13-16 harvesters can join."""
+    from gateway.util.request_context import request_id_var
+
+    buf = VerdictBuffer(max_size=10)
+    clf = IntentClassifier(onnx_model_path=None, verdict_buffer=buf)
+
+    token = request_id_var.set("test-req-123")
+    try:
+        clf.classify(prompt="hello", metadata={}, model_id="m")
+    finally:
+        request_id_var.reset(token)
+
+    v = buf.drain()[0]
+    assert v.request_id == "test-req-123"
+
+
+def test_intent_verdict_request_id_is_none_when_contextvar_unset():
+    """Default ContextVar value is empty string; the recording stanza must
+    normalize that to None so downstream consumers don't get an empty id."""
+    buf = VerdictBuffer(max_size=10)
+    clf = IntentClassifier(onnx_model_path=None, verdict_buffer=buf)
+
+    # Do NOT set request_id_var — default is "".
+    clf.classify(prompt="hi", metadata={}, model_id="m")
+
+    v = buf.drain()[0]
+    assert v.request_id is None
+
+
+def test_schema_intelligence_verdict_carries_request_id_from_contextvar():
+    """SchemaIntelligence — the live production path — must also pick up
+    the request id from the ContextVar for cross-stream correlation."""
+    from gateway.classifier.unified import SchemaIntelligence
+    from gateway.util.request_context import request_id_var
+
+    buf = VerdictBuffer(max_size=10)
+    si = SchemaIntelligence(onnx_model_path=None, has_mcp_tools=False, verdict_buffer=buf)
+
+    token = request_id_var.set("test-req-xyz")
+    try:
+        si.classify_intent(prompt="hello", metadata={}, model_id="m")
+    finally:
+        request_id_var.reset(token)
+
+    v = buf.drain()[0]
+    assert v.request_id == "test-req-xyz"

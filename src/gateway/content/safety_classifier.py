@@ -297,14 +297,16 @@ class SafetyClassifier(ContentAnalyzer):
         # Never allowed to break inference — wrap the whole stanza defensively.
         if self._verdict_buffer is not None:
             try:
+                from gateway.util.request_context import request_id_var
                 from gateway.intelligence.types import ModelVerdict
+                rid = request_id_var.get() or None
                 self._verdict_buffer.record(
                     ModelVerdict.from_inference(
                         model_name="safety",
                         input_text=text or "",
                         prediction=label,
                         confidence=float(confidence),
-                        request_id=None,
+                        request_id=rid,
                     )
                 )
             except Exception:

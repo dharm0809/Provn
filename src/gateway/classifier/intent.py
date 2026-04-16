@@ -1,5 +1,9 @@
 """Intent classifier for the gateway pipeline.
 
+NOTE: IntentClassifier is currently dormant — production intent inference
+goes through SchemaIntelligence.classify_intent in classifier/unified.py.
+Kept for test coverage of the verdict-recording pattern.
+
 Two-tier architecture:
   Tier 1 — Deterministic rules (100% accurate, <0.1ms, covers ~70% of requests)
   Tier 2 — ONNX model (93%+ accurate, ~5ms, covers remaining 30%)
@@ -102,14 +106,16 @@ class IntentClassifier:
         # Never allowed to break inference — wrap the whole stanza defensively.
         if self._verdict_buffer is not None:
             try:
+                from gateway.util.request_context import request_id_var
                 from gateway.intelligence.types import ModelVerdict
+                rid = request_id_var.get() or None
                 self._verdict_buffer.record(
                     ModelVerdict.from_inference(
                         model_name="intent",
                         input_text=prompt,
                         prediction=result.intent,
                         confidence=float(result.confidence),
-                        request_id=None,
+                        request_id=rid,
                     )
                 )
             except Exception:
