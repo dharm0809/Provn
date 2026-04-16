@@ -5,6 +5,16 @@ import pytest
 from gateway.config import Settings, get_settings
 
 
+def test_bounds_rejected():
+    get_settings.cache_clear()
+    with pytest.raises(ValueError):
+        Settings(shadow_max_disagreement=1.5)
+    with pytest.raises(ValueError):
+        Settings(teacher_llm_sample_rate=-0.1)
+    with pytest.raises(ValueError):
+        Settings(verdict_retention_days=0)
+
+
 def test_intelligence_defaults():
     get_settings.cache_clear()
     s = Settings()
