@@ -494,7 +494,7 @@ def _init_safety_classifier(settings, ctx) -> None:
     """ONNX Safety Classifier — lightweight Llama Guard replacement. Always-on."""
     try:
         from gateway.content.safety_classifier import SafetyClassifier
-        classifier = SafetyClassifier()
+        classifier = SafetyClassifier(verdict_buffer=ctx.verdict_buffer)
         if classifier._loaded:
             ctx.content_analyzers.append(classifier)
             logger.info("Content analyzer loaded: truzenai.safety.v1 (ONNX, %d categories)", len(classifier._labels))
@@ -874,6 +874,47 @@ def _init_semantic_cache(settings, ctx) -> None:
     )
 
 
+def _init_intelligence(settings, ctx) -> None:
+    """Phase 25: ONNX self-learning intelligence layer.
+
+    Creates the verdict SQLite store, an in-memory bounded buffer, and a
+    background flush worker. The buffer is stored on `ctx.verdict_buffer`
+    so ONNX clients (Intent / SchemaMapper / Safety) can record verdicts
+    fire-and-forget from the inference hot path.
+
+    Fail-open: any failure logs a warning and leaves `ctx.verdict_buffer`
+    set to None, which cleanly disables verdict capture across all ONNX
+    clients (they guard with `if self._verdict_buffer is not None`).
+    """
+    if not settings.intelligence_enabled:
+        logger.debug("intelligence layer disabled (WALACOR_INTELLIGENCE_ENABLED=false)")
+        return
+
+    try:
+        from gateway.intelligence.db import IntelligenceDB
+        from gateway.intelligence.verdict_buffer import VerdictBuffer
+        from gateway.intelligence.verdict_flush import VerdictFlushWorker
+
+        db_path = settings.intelligence_db_path or f"{settings.wal_path}/intelligence.db"
+        db = IntelligenceDB(db_path)
+        db.init_schema()
+
+        buffer = VerdictBuffer(max_size=10_000)
+        worker = VerdictFlushWorker(buffer, db, flush_interval_s=1.0, batch_size=500)
+
+        ctx.intelligence_db = db
+        ctx.verdict_buffer = buffer
+        ctx.intelligence_flush_worker = worker
+        ctx.intelligence_flush_task = asyncio.create_task(worker.run())
+        logger.info("Intelligence verdict capture initialized (db=%s)", db_path)
+    except Exception as e:
+        logger.warning("Intelligence layer init failed (non-fatal): %s", e)
+        ctx.intelligence_db = None
+        ctx.verdict_buffer = None
+        ctx.intelligence_flush_worker = None
+        ctx.intelligence_flush_task = None
+
+
 def _init_load_balancer(settings, ctx) -> None:
     """Phase 25: Initialize load balancer and circuit breakers from model_groups_json."""
     from gateway.routing.balancer import Endpoint, LoadBalancer, ModelGroup
@@ -1031,6 +1072,9 @@ async def on_startup() -> None:
         _init_storage(settings, ctx)
         _init_lineage(settings, ctx)
         ctx.redis_client = await _init_redis(settings)
+        # Phase 25: Intelligence verdict capture must init BEFORE any ONNX client
+        # (SafetyClassifier, SchemaMapper) so the buffer is available for wiring.
+        _init_intelligence(settings, ctx)
         _init_content_analyzers(settings, ctx)
         _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard
         if settings.llama_guard_enabled:
@@ -1164,7 +1208,7 @@ async def on_startup() -> None:
         # ── Schema Intelligence v2: SchemaMapper + Anomaly + Overflow + LLM Intelligence ──
         try:
             from gateway.schema.mapper import SchemaMapper
-            ctx.schema_mapper = SchemaMapper()
+            ctx.schema_mapper = SchemaMapper(verdict_buffer=ctx.verdict_buffer)
             logger.info("SchemaMapper initialized (ONNX=%s)", ctx.schema_mapper._session is not None)
         except Exception as e:
             logger.warning("SchemaMapper init failed (non-fatal): %s", e)
@@ -1372,6 +1416,34 @@ async def on_shutdown() -> None:
             pass
         except Exception as e:
             errors.append(f"merkle_checkpoint_task: {e}")
+
+    # Phase 25: Intelligence flush worker — stop() flips the running flag,
+    # await drains any in-flight tick. Short timeout so shutdown never hangs
+    # on a stuck SQLite write.
+    if ctx.intelligence_flush_worker:
+        try:
+            ctx.intelligence_flush_worker.stop()
+        except Exception as e:
+            errors.append(f"intelligence_flush_worker.stop: {e}")
+    if ctx.intelligence_flush_task and not ctx.intelligence_flush_task.done():
+        try:
+            await asyncio.wait_for(ctx.intelligence_flush_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            ctx.intelligence_flush_task.cancel()
+            try:
+                await ctx.intelligence_flush_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                errors.append(f"intelligence_flush_task: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            errors.append(f"intelligence_flush_task: {e}")
+    ctx.intelligence_flush_task = None
+    ctx.intelligence_flush_worker = None
+    ctx.intelligence_db = None
+    ctx.verdict_buffer = None
 
     if ctx.control_store:
         try:

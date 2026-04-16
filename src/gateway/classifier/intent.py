@@ -15,7 +15,10 @@ import os
 import json as _json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +50,17 @@ class IntentResult:
 class IntentClassifier:
     """Two-tier intent classifier for the gateway pipeline."""
 
-    def __init__(self, onnx_model_path: str | None = None, has_mcp_tools: bool = False):
+    def __init__(
+        self,
+        onnx_model_path: str | None = None,
+        has_mcp_tools: bool = False,
+        verdict_buffer: "VerdictBuffer | None" = None,
+    ):
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
         self._onnx_tokenizer = None
         self._label_map: dict[int, str] = {}
+        self._verdict_buffer = verdict_buffer
 
         # Try loading ONNX model
         if onnx_model_path and Path(onnx_model_path).exists():
@@ -76,19 +85,37 @@ class IntentClassifier:
         Tier 2 ML runs only when Tier 1 doesn't match.
         """
         # ── Tier 1: Deterministic rules ───────────────────────────────
-        result = self._tier1_deterministic(prompt, metadata, model_id)
-        if result:
-            return result
+        tier1 = self._tier1_deterministic(prompt, metadata, model_id)
+        if tier1 is not None:
+            result = tier1
+        elif self._onnx_session:
+            # ── Tier 2: ML classification ─────────────────────────────
+            result = self._tier2_onnx(prompt)
+        else:
+            # No ML model → safe default
+            result = IntentResult(
+                intent=NORMAL, confidence=0.5,
+                tier="deterministic", reason="no_ml_model_default",
+            )
 
-        # ── Tier 2: ML classification ─────────────────────────────────
-        if self._onnx_session:
-            return self._tier2_onnx(prompt)
+        # Phase 25: record verdict for self-learning (observational only).
+        # Never allowed to break inference — wrap the whole stanza defensively.
+        if self._verdict_buffer is not None:
+            try:
+                from gateway.intelligence.types import ModelVerdict
+                self._verdict_buffer.record(
+                    ModelVerdict.from_inference(
+                        model_name="intent",
+                        input_text=prompt,
+                        prediction=result.intent,
+                        confidence=float(result.confidence),
+                        request_id=None,
+                    )
+                )
+            except Exception:
+                logger.debug("verdict recording failed", exc_info=True)
 
-        # No ML model → safe default
-        return IntentResult(
-            intent=NORMAL, confidence=0.5,
-            tier="deterministic", reason="no_ml_model_default",
-        )
+        return result
 
     def _tier1_deterministic(
         self, prompt: str, metadata: dict, model_id: str,

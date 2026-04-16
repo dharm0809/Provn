@@ -30,11 +30,14 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from gateway.content.base import ContentAnalyzer, Decision, Verdict
+
+if TYPE_CHECKING:
+    from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,7 @@ class SafetyClassifier(ContentAnalyzer):
 
     analyzer_id = "truzenai.safety.v1"
 
-    def __init__(self) -> None:
+    def __init__(self, verdict_buffer: "VerdictBuffer | None" = None) -> None:
         self._session = None
         self._input_name = ""
         self._labels: list[str] = []
@@ -127,6 +130,7 @@ class SafetyClassifier(ContentAnalyzer):
         self._svd_components: np.ndarray | None = None
         self._ngram_range = (3, 5)
         self._loaded = False
+        self._verdict_buffer = verdict_buffer
 
         self._load()
 
@@ -224,63 +228,89 @@ class SafetyClassifier(ContentAnalyzer):
 
     def analyze(self, text: str) -> Decision:
         """Classify text for safety. Returns Decision with verdict and category."""
+        # `label` is the raw ONNX class label (e.g. "safe", "violence") — used
+        # both as the verdict prediction and for the downstream recording hook.
+        label = "safe"
+        confidence = 0.0
+
         if not self._loaded or not text:
-            return Decision(
+            decision = Decision(
                 analyzer_id=self.analyzer_id,
                 verdict=Verdict.PASS,
                 confidence=0.0,
                 category="safety",
                 reason="classifier_unavailable" if not self._loaded else "empty_input",
             )
+        else:
+            try:
+                features = self._featurize(text)
+                features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
 
-        try:
-            features = self._featurize(text)
-            features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+                outputs = self._session.run(None, {self._input_name: features})
+                pred_idx = int(outputs[0][0])
+                label = self._labels[pred_idx] if pred_idx < len(self._labels) else "safe"
 
-            outputs = self._session.run(None, {self._input_name: features})
-            pred_idx = int(outputs[0][0])
-            label = self._labels[pred_idx] if pred_idx < len(self._labels) else "safe"
+                # Get confidence from probabilities if available
+                confidence = 1.0
+                if len(outputs) > 1:
+                    probs = outputs[1][0]
+                    if isinstance(probs, dict):
+                        confidence = float(max(probs.values())) if probs else 0.5
+                    elif hasattr(probs, '__getitem__'):
+                        confidence = float(probs[pred_idx])
 
-            # Get confidence from probabilities if available
-            confidence = 1.0
-            if len(outputs) > 1:
-                probs = outputs[1][0]
-                if isinstance(probs, dict):
-                    confidence = float(max(probs.values())) if probs else 0.5
-                elif hasattr(probs, '__getitem__'):
-                    confidence = float(probs[pred_idx])
+                # Determine verdict
+                if label == "safe":
+                    verdict = Verdict.PASS
+                    reason = "content_safe"
+                elif label in _BLOCK_CATEGORIES:
+                    verdict = Verdict.BLOCK
+                    reason = f"unsafe_{label}"
+                elif label in _WARN_CATEGORIES:
+                    verdict = Verdict.WARN
+                    reason = f"flagged_{label}"
+                else:
+                    verdict = Verdict.PASS
+                    reason = f"unknown_category_{label}"
 
-            # Determine verdict
-            if label == "safe":
-                verdict = Verdict.PASS
-                reason = "content_safe"
-            elif label in _BLOCK_CATEGORIES:
-                verdict = Verdict.BLOCK
-                reason = f"unsafe_{label}"
-            elif label in _WARN_CATEGORIES:
-                verdict = Verdict.WARN
-                reason = f"flagged_{label}"
-            else:
-                verdict = Verdict.PASS
-                reason = f"unknown_category_{label}"
+                decision = Decision(
+                    analyzer_id=self.analyzer_id,
+                    verdict=verdict,
+                    confidence=round(confidence, 3),
+                    category=label if label != "safe" else "safety",
+                    reason=reason,
+                )
+            except Exception as e:
+                logger.warning("SafetyClassifier inference failed (fail-open): %s", e)
+                # Reset for recording: inference failed, treat as low-confidence safe.
+                label = "safe"
+                confidence = 0.0
+                decision = Decision(
+                    analyzer_id=self.analyzer_id,
+                    verdict=Verdict.PASS,
+                    confidence=0.0,
+                    category="safety",
+                    reason=f"inference_error: {e}",
+                )
 
-            return Decision(
-                analyzer_id=self.analyzer_id,
-                verdict=verdict,
-                confidence=round(confidence, 3),
-                category=label if label != "safe" else "safety",
-                reason=reason,
-            )
+        # Phase 25: record verdict for self-learning (observational only).
+        # Never allowed to break inference — wrap the whole stanza defensively.
+        if self._verdict_buffer is not None:
+            try:
+                from gateway.intelligence.types import ModelVerdict
+                self._verdict_buffer.record(
+                    ModelVerdict.from_inference(
+                        model_name="safety",
+                        input_text=text or "",
+                        prediction=label,
+                        confidence=float(confidence),
+                        request_id=None,
+                    )
+                )
+            except Exception:
+                logger.debug("verdict recording failed", exc_info=True)
 
-        except Exception as e:
-            logger.warning("SafetyClassifier inference failed (fail-open): %s", e)
-            return Decision(
-                analyzer_id=self.analyzer_id,
-                verdict=Verdict.PASS,
-                confidence=0.0,
-                category="safety",
-                reason=f"inference_error: {e}",
-            )
+        return decision
 
     def configure(self, policies: list[dict]) -> None:
         """Accept content policy configuration (hot-reload from control plane)."""
