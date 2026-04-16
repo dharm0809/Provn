@@ -895,18 +895,39 @@ def test_drain_is_batched():
 
 ```python
 # src/gateway/intelligence/verdict_buffer.py
+"""In-memory bounded buffer for ONNX verdicts on the hot path.
+
+Fire-and-forget enqueue (never blocks, never raises). On overflow, drops the
+oldest entry and increments `dropped_total`. The flusher (Task 6) batch-writes
+to SQLite at a cadence the buffer can absorb.
+
+Thread safety: single asyncio event loop only. `record()` and `drain()` are
+lockless — correct under CPython's GIL + single-loop semantics. Calling from
+threads or multiple event loops is UNSAFE.
+"""
 from __future__ import annotations
+
 from collections import deque
+
 from gateway.intelligence.types import ModelVerdict
+
 
 class VerdictBuffer:
     def __init__(self, max_size: int = 10_000) -> None:
-        self._buf: deque[ModelVerdict] = deque(maxlen=max_size)
+        # Raw deque WITHOUT maxlen so drops are counted explicitly.
+        # A maxlen-bounded deque silently evicts on append — the `_dropped`
+        # counter would lose accuracy and the Prometheus metric would undercount.
+        self._buf: deque[ModelVerdict] = deque()
         self._dropped = 0
-        self._max = max_size
+        # Clamp so record() never popleft()s from an empty buffer (would raise
+        # IndexError and violate the "never raises on hot path" contract).
+        self._max = max(1, int(max_size))
 
     def record(self, verdict: ModelVerdict) -> None:
         if len(self._buf) >= self._max:
+            # Drop oldest, keep newest — recent verdicts carry the most useful
+            # distillation signal about current traffic patterns.
+            self._buf.popleft()
             self._dropped += 1
         self._buf.append(verdict)
 

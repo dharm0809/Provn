@@ -50,3 +50,23 @@ def test_size_reflects_buffer_state():
     assert b.size == 5
     b.drain(max_batch=2)
     assert b.size == 3
+
+
+def test_degenerate_max_size_does_not_raise():
+    # max_size <= 0 must not cause record() to raise on the hot path. The
+    # implementation clamps to 1 so popleft() always has an element to evict.
+    for bad in (0, -1, -100):
+        b = VerdictBuffer(max_size=bad)
+        for i in range(10):
+            b.record(_mk(i))  # must not raise
+        drained = b.drain()
+        assert len(drained) == 1
+        assert b.dropped_total == 9
+
+
+def test_float_max_size_coerced_to_int():
+    b = VerdictBuffer(max_size=3.7)  # type: ignore[arg-type]
+    for i in range(5):
+        b.record(_mk(i))
+    assert b.size == 3
+    assert b.dropped_total == 2
