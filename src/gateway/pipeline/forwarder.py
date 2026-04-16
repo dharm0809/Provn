@@ -66,6 +66,109 @@ def _normalize_responses_to_chat_completions(
     return _json_mod.dumps(chat_completions).encode("utf-8")
 
 
+def synthesize_openai_sse_from_response(
+    model_response: ModelResponse,
+    model_id: str,
+) -> list[bytes]:
+    """Build a list of OpenAI chat.completion.chunk SSE byte chunks from a
+    fully-formed ModelResponse that was produced by a NON-STREAMING forward.
+
+    Used to avoid a second round-trip when the gateway's active tool loop
+    peeked with a non-streaming forward, discovered no tool calls, and still
+    needs to return a streaming response to the client.
+
+    Chunking: the content is split into ~90-character pieces so clients like
+    OpenWebUI render with a progressive typing feel instead of one big blob.
+    All chunks are produced synchronously — zero extra upstream latency.
+    """
+    import uuid as _uuid
+
+    msg_id = model_response.provider_request_id or f"chatcmpl-{_uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+    content = model_response.content or ""
+
+    def make(delta: dict, finish_reason=None, usage=None) -> bytes:
+        payload = {
+            "id": msg_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_id,
+            "choices": [
+                {"index": 0, "delta": delta, "finish_reason": finish_reason}
+            ],
+        }
+        if usage is not None:
+            payload["usage"] = usage
+        return b"data: " + _json_mod.dumps(payload).encode() + b"\n\n"
+
+    chunks: list[bytes] = [make({"role": "assistant", "content": ""})]
+
+    # Split content into ~90-char chunks on word boundaries where possible.
+    if content:
+        i = 0
+        n = len(content)
+        while i < n:
+            end = min(i + 90, n)
+            # Snap to word boundary if we're not at the end.
+            if end < n:
+                space = content.rfind(" ", i, end)
+                if space > i:
+                    end = space + 1
+            piece = content[i:end]
+            if piece:
+                chunks.append(make({"content": piece}))
+            i = end
+
+    # Translate usage to OpenAI shape if available.
+    usage_out = None
+    usage = model_response.usage or {}
+    in_tok = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    out_tok = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    if in_tok or out_tok:
+        prompt_total = in_tok + cache_read
+        usage_out = {
+            "prompt_tokens": prompt_total,
+            "completion_tokens": out_tok,
+            "total_tokens": prompt_total + out_tok,
+        }
+        if cache_read:
+            usage_out["prompt_tokens_details"] = {"cached_tokens": cache_read}
+
+    chunks.append(make({}, finish_reason="stop", usage=usage_out))
+    chunks.append(b"data: [DONE]\n\n")
+    return chunks
+
+
+def build_synthesized_streaming_response(
+    model_response: ModelResponse,
+    model_id: str,
+    session_id: str = "",
+    background_task: BackgroundTask | None = None,
+) -> StreamingResponse:
+    """Wrap pre-built OpenAI SSE chunks in a StreamingResponse for the client.
+
+    Takes the same shape as a real stream but avoids a second upstream forward.
+    """
+    chunks = synthesize_openai_sse_from_response(model_response, model_id)
+
+    async def gen():
+        for c in chunks:
+            yield c
+
+    return StreamingResponse(
+        gen(),
+        status_code=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Session-Id": session_id,
+        },
+        background=background_task,
+    )
+
+
 def _inject_stream_options(content: bytes | None) -> bytes | None:
     """Inject stream_options.include_usage=true into streaming request bodies.
 
