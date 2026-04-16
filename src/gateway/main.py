@@ -494,10 +494,26 @@ def _init_safety_classifier(settings, ctx) -> None:
     """ONNX Safety Classifier — lightweight Llama Guard replacement. Always-on."""
     try:
         from gateway.content.safety_classifier import SafetyClassifier
-        classifier = SafetyClassifier(verdict_buffer=ctx.verdict_buffer)
-        if classifier._loaded:
+        # Registry wiring (Task 12): when registered, the ONNX session is
+        # loaded on first `analyze()` from `production/safety.onnx` and
+        # rebuilds after promote/rollback. When no registry is available,
+        # the classifier falls back to its packaged `_ONNX_PATH`.
+        classifier = SafetyClassifier(
+            verdict_buffer=ctx.verdict_buffer,
+            registry=ctx.model_registry,
+            model_name="safety" if ctx.model_registry is not None else None,
+        )
+        # When a registry is wired the session load is deferred to first
+        # inference, so `_loaded` stays False at init. Trust the registry
+        # setup — a missing production file has already been logged by the
+        # migration helper and reload will fail-safe.
+        if classifier._loaded or ctx.model_registry is not None:
             ctx.content_analyzers.append(classifier)
-            logger.info("Content analyzer loaded: truzenai.safety.v1 (ONNX, %d categories)", len(classifier._labels))
+            logger.info(
+                "Content analyzer loaded: truzenai.safety.v1 (ONNX, %d categories, registry=%s)",
+                len(classifier._labels),
+                ctx.model_registry is not None,
+            )
         else:
             logger.warning("SafetyClassifier ONNX not found — skipping")
     except Exception as e:
@@ -874,6 +890,85 @@ def _init_semantic_cache(settings, ctx) -> None:
     )
 
 
+# Phase 25 Task 12: in-repo packaged `.onnx` files. The source tree ships a
+# baseline model per canonical name — on first run we copy them into the
+# registry's `production/` so the directory-backed registry is self-bootstrapping
+# and all clients converge on a single source of truth for live models.
+_PACKAGED_MODEL_SOURCES: dict[str, Path] = {
+    "intent": Path(__file__).parent / "classifier" / "model.onnx",
+    "schema_mapper": Path(__file__).parent / "schema" / "schema_mapper.onnx",
+    "safety": Path(__file__).parent / "content" / "safety_classifier.onnx",
+}
+
+
+def _migrate_packaged_models_to_registry(registry) -> None:
+    """Copy in-repo baseline `.onnx` files into `{base}/production/`.
+
+    Idempotent — any destination that already exists is left untouched, so
+    a redeployment never clobbers a promoted model. Missing packaged source
+    files are also silently skipped (a model not shipped with the wheel is
+    a legitimate runtime state — e.g. custom builds).
+
+    Called exactly once at startup after `ModelRegistry.ensure_structure()`.
+    """
+    import shutil
+
+    copied = 0
+    for model_name, src in _PACKAGED_MODEL_SOURCES.items():
+        dst = registry.production_path(model_name)
+        if dst.exists():
+            continue
+        if not src.exists():
+            logger.debug(
+                "Model registry migration: packaged source %s missing for %r",
+                src, model_name,
+            )
+            continue
+        try:
+            shutil.copy2(src, dst)
+            copied += 1
+            logger.info(
+                "Model registry migration: seeded production/%s from %s",
+                dst.name, src,
+            )
+        except Exception:
+            # Never let migration break startup. The client will fail-open
+            # to heuristics / no session if no production file exists.
+            logger.warning(
+                "Model registry migration: copy failed for %r", model_name,
+                exc_info=True,
+            )
+    if copied == 0:
+        logger.debug("Model registry migration: nothing to seed (all destinations present)")
+
+
+def _init_model_registry(settings, ctx) -> None:
+    """Phase 25 Task 12: initialize the directory-backed ONNX model registry.
+
+    Attached to `ctx.model_registry` for client wiring. The base path
+    defaults to `{wal_path}/models` so model artifacts live alongside other
+    runtime state (WAL, intelligence.db) and stay out of the source tree.
+
+    Fail-open: any failure logs a warning and leaves `ctx.model_registry`
+    as `None`, at which point the ONNX clients keep using their pre-Task-12
+    packaged paths (the reload-on-promote signal is simply inert).
+    """
+    if not settings.intelligence_enabled:
+        return
+    try:
+        from gateway.intelligence.registry import ModelRegistry
+
+        base = settings.onnx_models_base_path or f"{settings.wal_path}/models"
+        registry = ModelRegistry(base_path=base)
+        registry.ensure_structure()
+        _migrate_packaged_models_to_registry(registry)
+        ctx.model_registry = registry
+        logger.info("Model registry initialized at %s", base)
+    except Exception as e:
+        logger.warning("Model registry init failed (non-fatal): %s", e)
+        ctx.model_registry = None
+
+
 def _init_intelligence(settings, ctx) -> None:
     """Phase 25: ONNX self-learning intelligence layer.
 
@@ -1089,6 +1184,10 @@ async def on_startup() -> None:
         ctx.redis_client = await _init_redis(settings)
         # Phase 25: Intelligence verdict capture must init BEFORE any ONNX client
         # (SafetyClassifier, SchemaMapper) so the buffer is available for wiring.
+        # Model registry (Task 12) initializes first so clients can resolve their
+        # ONNX file via `ctx.model_registry.production_path(...)` and pick up
+        # promoted candidates via the Task 11 reload hook.
+        _init_model_registry(settings, ctx)
         _init_intelligence(settings, ctx)
         _init_content_analyzers(settings, ctx)
         _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard
@@ -1223,8 +1322,20 @@ async def on_startup() -> None:
         # ── Schema Intelligence v2: SchemaMapper + Anomaly + Overflow + LLM Intelligence ──
         try:
             from gateway.schema.mapper import SchemaMapper
-            ctx.schema_mapper = SchemaMapper(verdict_buffer=ctx.verdict_buffer)
-            logger.info("SchemaMapper initialized (ONNX=%s)", ctx.schema_mapper._session is not None)
+            # Task 12: resolve model via registry. When `ctx.model_registry`
+            # is set, the packaged-default load is skipped and the session
+            # is built from `production/schema_mapper.onnx` on first
+            # `map_response()` call (Task 11 reload hook).
+            ctx.schema_mapper = SchemaMapper(
+                verdict_buffer=ctx.verdict_buffer,
+                registry=ctx.model_registry,
+                model_name="schema_mapper" if ctx.model_registry is not None else None,
+            )
+            logger.info(
+                "SchemaMapper initialized (ONNX=%s, registry=%s)",
+                ctx.schema_mapper._session is not None,
+                ctx.model_registry is not None,
+            )
         except Exception as e:
             logger.warning("SchemaMapper init failed (non-fatal): %s", e)
 
