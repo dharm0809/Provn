@@ -12,10 +12,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
+
+# Finite set of rejection stages. Typed so callers catch typos at type-check time
+# rather than corrupting the audit stream with misspelled stage labels.
+RejectionStage = Literal["load", "sanity", "shadow", "manual"]
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class EventType(str, Enum):
@@ -30,18 +38,24 @@ class EventType(str, Enum):
 class LifecycleEvent:
     event_type: EventType
     payload: dict[str, Any]
-    timestamp: float = field(default_factory=time.time)
+    timestamp: str = field(default_factory=_utcnow_iso)
 
     def to_record(self) -> dict[str, Any]:
-        # ETId is passed in the HTTP header by the Walacor client, NOT embedded here.
+        # Payload is spread FIRST so top-level `event_type` and `timestamp`
+        # always win — if a caller accidentally includes those keys in payload,
+        # the canonical values are preserved rather than silently overridden.
+        # ETId travels in the HTTP header, NOT in this payload.
         return {
+            **self.payload,
             "event_type": self.event_type.value,
             "timestamp": self.timestamp,
-            **self.payload,
         }
 
 
 def _dataset_hash(row_ids: list[int], content_hash: str) -> str:
+    # Duplicates in `row_ids` are preserved (via `sorted`, not `set()`).
+    # Fingerprints reflect the exact training multiset — two identical rows
+    # produce a different hash than one row, because they're different datasets.
     canonical = json.dumps(
         {"row_ids": sorted(row_ids), "content_hash": content_hash}, sort_keys=True
     )
@@ -109,7 +123,7 @@ def build_promotion_event(
 
 
 def build_model_rejected(
-    *, model_name: str, candidate_version: str, reason: str, stage: str,
+    *, model_name: str, candidate_version: str, reason: str, stage: RejectionStage,
 ) -> LifecycleEvent:
     return LifecycleEvent(
         event_type=EventType.MODEL_REJECTED,
@@ -117,6 +131,6 @@ def build_model_rejected(
             "model_name": model_name,
             "candidate_version": candidate_version,
             "reason": reason,
-            "stage": stage,  # "load" | "sanity" | "shadow" | "manual"
+            "stage": stage,
         },
     )

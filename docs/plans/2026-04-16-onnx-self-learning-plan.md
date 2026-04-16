@@ -418,6 +418,39 @@ def test_build_model_rejected():
     assert ev.event_type == EventType.MODEL_REJECTED
     assert ev.payload["reason"] == "accuracy delta below threshold"
     assert ev.payload["stage"] == "shadow"
+
+
+def test_to_record_timestamp_is_iso8601():
+    # All other Walacor/WAL records in this codebase use ISO-8601 UTC strings.
+    # Lifecycle events must match so dashboard range-queries and cross-ETId
+    # joins work consistently.
+    ev = build_candidate_created(
+        model_name="intent", candidate_version="v1", dataset_hash="h",
+        training_sample_count=1,
+    )
+    assert isinstance(ev.timestamp, str)
+    from datetime import datetime
+    parsed = datetime.fromisoformat(ev.timestamp)
+    assert parsed.tzinfo is not None  # must carry explicit UTC offset
+
+
+def test_to_record_top_level_fields_override_payload():
+    # If a caller accidentally includes "event_type" or "timestamp" keys in
+    # payload, `to_record()` must emit the canonical top-level values — the
+    # audit stream cannot be corrupted by payload collisions.
+    ev = LifecycleEvent(
+        event_type=EventType.MODEL_PROMOTED,
+        payload={
+            "event_type": "ATTACKER_FORGED",
+            "timestamp": "1970-01-01T00:00:00+00:00",
+            "real_data": "kept",
+        },
+        timestamp="2026-04-16T12:34:56+00:00",
+    )
+    rec = ev.to_record()
+    assert rec["event_type"] == "model_promoted"  # canonical value wins
+    assert rec["timestamp"] == "2026-04-16T12:34:56+00:00"  # canonical timestamp wins
+    assert rec["real_data"] == "kept"  # unrelated payload fields pass through
 ```
 
 **Step 2: Run to verify fail**
@@ -428,6 +461,12 @@ def test_build_model_rejected():
 ```
 
 **Step 3: Implement `src/gateway/intelligence/events.py`**
+
+Key design choices locked in during Task 3 review:
+- **`timestamp` is an ISO-8601 UTC string**, not unix-float seconds. Every other Walacor/WAL record in this codebase uses ISO-8601 (see `core/models/execution.py:17`). Staying consistent now avoids a schema migration in Task 21.
+- **`to_record()` spreads `payload` FIRST, then top-level `event_type` / `timestamp`**. Canonical top-level values always win, so a caller that accidentally includes those keys in `payload` cannot corrupt the audit stream.
+- **`stage` on `build_model_rejected` is `Literal["load", "sanity", "shadow", "manual"]`** (aliased as `RejectionStage`). Catches typos at type-check time.
+- **`_dataset_hash` preserves duplicate `row_ids`** — a multiset, not a set. Two copies of row 17 is a different dataset than one copy; the hash reflects that.
 
 ```python
 """Lifecycle events for the Phase 25 ONNX self-learning loop.
@@ -444,10 +483,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
+
+# Finite set of rejection stages. Typed so callers catch typos at type-check time
+# rather than corrupting the audit stream with misspelled stage labels.
+RejectionStage = Literal["load", "sanity", "shadow", "manual"]
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class EventType(str, Enum):
@@ -462,18 +509,24 @@ class EventType(str, Enum):
 class LifecycleEvent:
     event_type: EventType
     payload: dict[str, Any]
-    timestamp: float = field(default_factory=time.time)
+    timestamp: str = field(default_factory=_utcnow_iso)
 
     def to_record(self) -> dict[str, Any]:
-        # ETId is passed in the HTTP header by the Walacor client, NOT embedded here.
+        # Payload is spread FIRST so top-level `event_type` and `timestamp`
+        # always win — if a caller accidentally includes those keys in payload,
+        # the canonical values are preserved rather than silently overridden.
+        # ETId travels in the HTTP header, NOT in this payload.
         return {
+            **self.payload,
             "event_type": self.event_type.value,
             "timestamp": self.timestamp,
-            **self.payload,
         }
 
 
 def _dataset_hash(row_ids: list[int], content_hash: str) -> str:
+    # Duplicates in `row_ids` are preserved (via `sorted`, not `set()`).
+    # Fingerprints reflect the exact training multiset — two identical rows
+    # produce a different hash than one row, because they're different datasets.
     canonical = json.dumps(
         {"row_ids": sorted(row_ids), "content_hash": content_hash}, sort_keys=True
     )
@@ -541,7 +594,7 @@ def build_promotion_event(
 
 
 def build_model_rejected(
-    *, model_name: str, candidate_version: str, reason: str, stage: str,
+    *, model_name: str, candidate_version: str, reason: str, stage: RejectionStage,
 ) -> LifecycleEvent:
     return LifecycleEvent(
         event_type=EventType.MODEL_REJECTED,
@@ -549,7 +602,7 @@ def build_model_rejected(
             "model_name": model_name,
             "candidate_version": candidate_version,
             "reason": reason,
-            "stage": stage,  # "load" | "sanity" | "shadow" | "manual"
+            "stage": stage,
         },
     )
 ```
@@ -588,7 +641,7 @@ WALACOR_LIFECYCLE_EVENTS_ETID=9000024              # Phase 25 ONNX lifecycle eve
 
 ```
 .venv/bin/python -m pytest tests/unit/test_lifecycle_events.py -v
-# expect: 8 passed
+# expect: 10 passed
 ```
 
 Also smoke-check that you didn't break existing Walacor tests:
