@@ -1,23 +1,263 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { AreaChart, Area, BarChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { getHealth, getSessions, getAttempts, getMetrics, getTokenLatency, getThroughputHistory, parsePrometheusMetrics, sumMetric } from '../api';
-import { timeAgo, formatNumber, formatUptime, displayModel, formatSessionId, dispositionClass, dispositionLabel, getTokenCount, policyBadgeClass } from '../utils';
+import { useState, useEffect } from 'react';
+import Chart from 'react-apexcharts';
+import { getSessions, getAttempts, getThroughputHistory, getTokenLatency } from '../api';
+import { timeAgo, formatNumber, formatUptime, displayModel, formatSessionId, dispositionClass, dispositionLabel } from '../utils';
 
-// Fixed 60-second live window: 21 slots × 3s polling = 63s visible
-const LIVE_SLOTS = 21;
-const LIVE_TICKS = [0, 5, 10, 15, 20];
-function liveTickLabel(v) {
-  const s = (20 - v) * 3;
-  return s === 0 ? 'now' : `-${s}s`;
-}
-// Position data from right: newest at index 20, oldest slides left
-function assignLivePos(arr) {
-  return arr.map((d, i) => ({ ...d, t: LIVE_SLOTS - 1 - (arr.length - 1 - i) }));
+const POLL_MS = 3000;
+const RANGE_SECONDS = { '1h': 3600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+const AXIS_LABEL_FONT = '12px';
+const MONO = '"IBM Plex Mono", Menlo, monospace';
+
+/** Tracks `data-theme="light"` on <html> (same as App sidebar toggle). */
+function useLineageTheme() {
+  const [isLight, setIsLight] = useState(
+    () => typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light',
+  );
+  useEffect(() => {
+    const el = document.documentElement;
+    const sync = () => setIsLight(el.getAttribute('data-theme') === 'light');
+    sync();
+    const mo = new MutationObserver(sync);
+    mo.observe(el, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => mo.disconnect();
+  }, []);
+  return isLight;
 }
 
+function chartPalette(isLight) {
+  if (isLight) {
+    return {
+      themeMode: 'light',
+      tooltipTheme: 'light',
+      axisColor: '#57524a',
+      gridBorder: 'rgba(26, 23, 20, 0.14)',
+      crosshair: 'rgba(26, 23, 20, 0.2)',
+      gold: '#9a6700',
+      green: '#15803d',
+      red: '#dc2626',
+      blue: '#2563eb',
+    };
+  }
+  return {
+    themeMode: 'dark',
+    tooltipTheme: 'dark',
+    axisColor: '#8b8ba8',
+    gridBorder: 'rgba(255, 255, 255, 0.1)',
+    crosshair: 'rgba(255, 255, 255, 0.16)',
+    gold: '#c9a84c',
+    green: '#34d399',
+    red: '#ef4444',
+    blue: '#6366f1',
+  };
+}
+
+function axisLabelStyle(palette) {
+  return { colors: palette.axisColor, fontSize: AXIS_LABEL_FONT, fontFamily: MONO };
+}
+
+/** Merge chart options without losing `toolbar: false` when callers pass `chart.zoom`. */
+function baseChartOptions(palette, overrides = {}) {
+  const { chart: chartOverrides = {}, ...rest } = overrides;
+  return {
+    chart: {
+      background: 'transparent',
+      toolbar: {
+        show: false,
+        tools: {
+          download: false,
+          selection: false,
+          zoom: false,
+          zoomin: false,
+          zoomout: false,
+          pan: false,
+          reset: false,
+        },
+      },
+      zoom: { enabled: false },
+      fontFamily: MONO,
+      animations: {
+        enabled: true,
+        easing: 'easeinout',
+        speed: 600,
+        dynamicAnimation: { enabled: true, speed: 400 },
+      },
+      ...chartOverrides,
+    },
+    theme: { mode: palette.themeMode },
+    grid: {
+      borderColor: palette.gridBorder,
+      strokeDashArray: 4,
+      xaxis: { lines: { show: false } },
+      yaxis: { lines: { show: true } },
+      padding: { left: 6, right: 8 },
+    },
+    tooltip: {
+      theme: palette.tooltipTheme,
+      style: { fontSize: '12px', fontFamily: MONO },
+      x: { show: true },
+    },
+    stroke: { curve: 'smooth', width: 2 },
+    dataLabels: { enabled: false },
+    legend: { show: false },
+    ...rest,
+  };
+}
+
+function xAxisCommon(palette, partial) {
+  return {
+    axisBorder: { show: false },
+    axisTicks: { show: false },
+    crosshairs: { show: true, stroke: { color: palette.crosshair, width: 1, dashArray: 4 } },
+    tooltip: { enabled: false },
+    ...partial,
+    labels: { style: axisLabelStyle(palette), ...partial.labels },
+  };
+}
+
+// ─── Throughput Historical Chart ──────────────────────────────────────────────
+function ThroughputHistoricalChart({ data, palette }) {
+  const series = [
+    { name: 'req/s', data: data.map(d => d.rps || 0) },
+    { name: 'allowed', data: data.map(d => d.allowed || 0) },
+    { name: 'blocked', data: data.map(d => d.blocked || 0) },
+  ];
+  const categories = data.map(d => d.t || '');
+
+  const options = baseChartOptions(palette, {
+    chart: {
+      type: 'area',
+      height: 300,
+      zoom: { enabled: true, type: 'x', allowMouseWheelZoom: true, autoScaleYaxis: true },
+      selection: {
+        enabled: true,
+        type: 'x',
+        fill: { color: palette.axisColor, opacity: 0.12 },
+        stroke: { width: 1, color: palette.gold, opacity: 0.55, dashArray: 4 },
+      },
+    },
+    colors: [palette.gold, palette.green, palette.red],
+    fill: {
+      type: 'gradient',
+      gradient: { shadeIntensity: 1, opacityFrom: 0.12, opacityTo: 0.0, stops: [0, 90, 100] },
+    },
+    stroke: { curve: 'smooth', width: [2, 1.5, 1.5] },
+    xaxis: xAxisCommon(palette, {
+      categories,
+      tickAmount: 8,
+      labels: { rotate: -45, rotateAlways: false, hideOverlappingLabels: true, maxHeight: 52 },
+    }),
+    yaxis: {
+      labels: {
+        style: axisLabelStyle(palette),
+        formatter: (v) => v < 1 ? v.toFixed(2) : Math.round(v),
+      },
+    },
+    tooltip: {
+      shared: true,
+      intersect: false,
+      y: { formatter: (v) => v != null ? v.toFixed(2) : '0' },
+    },
+  });
+
+  return <Chart options={options} series={series} type="area" height={300} />;
+}
+
+// ─── Token Usage Chart ────────────────────────────────────────────────────────
+function TokenUsageChart({ data, palette }) {
+  const series = [
+    { name: 'prompt', data: data.map(d => d.prompt || 0) },
+    { name: 'completion', data: data.map(d => d.completion || 0) },
+  ];
+  const categories = data.map(d => d.t || '');
+
+  const options = baseChartOptions(palette, {
+    chart: {
+      type: 'area',
+      height: 240,
+      zoom: { enabled: true, type: 'x', allowMouseWheelZoom: true, autoScaleYaxis: true },
+      selection: {
+        enabled: true,
+        type: 'x',
+        fill: { color: palette.axisColor, opacity: 0.12 },
+        stroke: { width: 1, color: palette.gold, opacity: 0.55, dashArray: 4 },
+      },
+    },
+    colors: [palette.blue, palette.gold],
+    fill: {
+      type: 'gradient',
+      gradient: { shadeIntensity: 1, opacityFrom: 0.2, opacityTo: 0.0, stops: [0, 95, 100] },
+    },
+    stroke: { curve: 'smooth', width: [2, 2] },
+    xaxis: xAxisCommon(palette, {
+      categories,
+      tickAmount: 8,
+      labels: { rotate: -45, rotateAlways: false, hideOverlappingLabels: true, maxHeight: 52 },
+    }),
+    yaxis: {
+      labels: {
+        style: axisLabelStyle(palette),
+        formatter: (v) => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v),
+      },
+    },
+    tooltip: {
+      shared: true,
+      intersect: false,
+      y: { formatter: (v) => v != null ? Math.round(v) + ' tok' : '0' },
+    },
+    markers: { size: 0, hover: { size: 4, sizeOffset: 2 } },
+  });
+
+  return <Chart options={options} series={series} type="area" height={240} />;
+}
+
+// ─── Latency Chart ────────────────────────────────────────────────────────────
+function LatencyChart({ data, palette }) {
+  const series = [{ name: 'avg latency', data: data.map(d => Math.round(d.avg || 0)) }];
+  const categories = data.map(d => d.t || '');
+
+  const options = baseChartOptions(palette, {
+    chart: {
+      type: 'area',
+      height: 240,
+      zoom: { enabled: true, type: 'x', allowMouseWheelZoom: true, autoScaleYaxis: true },
+      selection: {
+        enabled: true,
+        type: 'x',
+        fill: { color: palette.axisColor, opacity: 0.12 },
+        stroke: { width: 1, color: palette.gold, opacity: 0.55, dashArray: 4 },
+      },
+    },
+    colors: [palette.gold],
+    fill: {
+      type: 'gradient',
+      gradient: { shadeIntensity: 1, opacityFrom: 0.15, opacityTo: 0.0, stops: [0, 95, 100] },
+    },
+    stroke: { curve: 'smooth', width: [2.5] },
+    xaxis: xAxisCommon(palette, {
+      categories,
+      tickAmount: 8,
+      labels: { rotate: -45, rotateAlways: false, hideOverlappingLabels: true, maxHeight: 52 },
+    }),
+    yaxis: {
+      labels: {
+        style: axisLabelStyle(palette),
+        formatter: (v) => Math.round(v) + 'ms',
+      },
+    },
+    tooltip: {
+      shared: true,
+      intersect: false,
+      y: { formatter: (v) => v != null ? Math.round(v) + ' ms' : '--' },
+    },
+    markers: { size: 0, hover: { size: 4, sizeOffset: 2 } },
+  });
+
+  return <Chart options={options} series={series} type="area" height={240} />;
+}
+
+// ─── Range Selector ───────────────────────────────────────────────────────────
 function RangeSelector({ active, onChange }) {
   const opts = [
-    { key: 'current', label: 'Live' },
     { key: '1h', label: '1H' },
     { key: '24h', label: '24H' },
     { key: '7d', label: '7D' },
@@ -34,19 +274,74 @@ function RangeSelector({ active, onChange }) {
   );
 }
 
-function GovernanceBadge({ label, value, ok }) {
+// ─── Compact Status Strip ─────────────────────────────────────────────────────
+function StatusStrip({ health, sessionsCount, attTotal, pctAllowed }) {
+  const ok = health?.status === 'healthy';
+  const divider = <div style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />;
   return (
-    <div style={{ padding: '14px 16px', background: 'var(--bg-inset)', border: '1px solid var(--border)', borderRadius: 0 }}>
-      <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>{label}</div>
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 500, color: ok ? 'var(--green)' : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}>
-        {ok && <span style={{ fontSize: 11 }}>✓</span>}
-        {value}
+    <div className="card card-accent-green" style={{ padding: '12px 20px', marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+        {/* Health dot + label */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+            <span style={{ position: 'absolute', width: 14, height: 14, borderRadius: '50%', backgroundColor: ok ? 'var(--green)' : 'var(--amber)', opacity: 0.35, animation: 'ping 2s cubic-bezier(0,0,0.2,1) infinite' }} />
+            <span style={{ position: 'relative', width: 9, height: 9, borderRadius: '50%', backgroundColor: ok ? 'var(--green)' : 'var(--amber)' }} />
+          </span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: ok ? 'var(--green)' : 'var(--amber)', letterSpacing: '0.5px' }}>
+            {ok ? 'ALL CLEAR' : (health?.status || 'OFFLINE').toUpperCase()}
+          </span>
+        </div>
+
+        {divider}
+
+        {/* Request stats */}
+        {[
+          [sessionsCount, 'sessions'],
+          [formatNumber(attTotal), 'requests'],
+          [pctAllowed + '%', 'allowed'],
+        ].map(([val, label], i) => (
+          <div key={i} style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>
+            <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{val}</span>
+            <span style={{ margin: '0 5px', opacity: 0.3 }}>·</span>
+            <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.4px' }}>{label}</span>
+          </div>
+        ))}
+
+        {divider}
+
+        {/* Governance flags */}
+        {[
+          [health?.enforcement_mode === 'enforced', health?.enforcement_mode || '-', 'mode'],
+          [!!health?.content_analyzers, `${health?.content_analyzers ?? 0}`, 'analyzers'],
+          [!!health?.session_chain, health?.session_chain ? 'enabled' : 'disabled', 'chain'],
+          [ok, health?.uptime_seconds != null ? formatUptime(health.uptime_seconds) : '-', 'uptime'],
+        ].map(([isOk, val, label], i) => (
+          <div key={i} style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', color: isOk ? 'var(--green)' : 'var(--text-primary)' }}>{val}</span>
+            <span style={{ margin: '0 4px', opacity: 0.3 }}>·</span>
+            <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.4px' }}>{label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
+// ─── Chart empty/loading placeholder ─────────────────────────────────────────
+function ChartPlaceholder({ height, message, sub }) {
+  return (
+    <div style={{ height, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-secondary)' }}>{message}</span>
+      {sub && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{sub}</span>}
+    </div>
+  );
+}
+
+// ─── Main Overview ───────────────────────────────────────────────────────────
 export default function Overview({ navigate, health }) {
+  const isLight = useLineageTheme();
+  const palette = chartPalette(isLight);
+
   const [sessions, setSessions] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [attStats, setAttStats] = useState({});
@@ -54,312 +349,200 @@ export default function Overview({ navigate, health }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Live chart data
-  const [tpRange, setTpRange] = useState('current');
-  const [tlRange, setTlRange] = useState('current');
+  const [chartRange, setChartRange] = useState('1h');
   const [tpData, setTpData] = useState([]);
+  const [tpLoading, setTpLoading] = useState(false);
   const [tkData, setTkData] = useState([]);
   const [ltData, setLtData] = useState([]);
   const [counters, setCounters] = useState({ rps: 0, tps: 0, pct: 100, total: 0 });
-  const prevMetrics = useRef(null);
-  const prevTime = useRef(null);
-  const prevTokens = useRef(null);
-  const prevLatency = useRef(null);
-  const latestTokenSnap = useRef({ prompt: 0, completion: 0 });
-  const latestLatencySnap = useRef({ avg: 0 });
+  const [tokenSnap, setTokenSnap] = useState({ prompt: 0, completion: 0 });
+  const [latencySnap, setLatencySnap] = useState({ avg: 0 });
 
-  // Initial data load
+  // Recent sessions + activity: initial load then same cadence as charts (no loading flash on refresh)
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+    const refresh = async (isFirst) => {
       try {
-        const [sessData, attData] = await Promise.all([
-          getSessions(6, 0),
-          getAttempts(8, 0),
-        ]);
+        const [sessData, attData] = await Promise.all([getSessions(6, 0), getAttempts(8, 0)]);
+        if (cancelled) return;
         setSessions(sessData.sessions || []);
-        setAttempts(attData.items || []);
+        setAttempts(attData.attempts || attData.items || []);
         setAttStats(attData.stats || {});
         setAttTotal(attData.total || 0);
+        setError(null);
       } catch (e) {
-        setError(e.message);
+        if (!cancelled && isFirst) setError(e.message);
       } finally {
-        setLoading(false);
+        if (!cancelled && isFirst) setLoading(false);
       }
-    })();
+    };
+    refresh(true);
+    const id = setInterval(() => refresh(false), POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
-  // Live throughput polling
+  // Throughput + token usage + latency: one range for all charts (WAL bucket APIs). 1H refreshes on POLL_MS.
   useEffect(() => {
-    if (tpRange !== 'current') {
-      // Historical
-      (async () => {
-        try {
-          const data = await getThroughputHistory(tpRange);
-          const buckets = data.buckets || [];
-          setTpData(buckets.map(b => ({
-            t: b.t?.substring(11, 16) || '',
-            rps: b.request_count || 0,
-            allowed: b.allowed || 0,
-            blocked: (b.request_count || 0) - (b.allowed || 0),
-          })));
-        } catch {}
-      })();
-      return;
-    }
+    const needsDate = chartRange === '7d' || chartRange === '30d';
+    const label = (t) => (t ? (needsDate ? t.substring(5, 16).replace('T', ' ') : t.substring(11, 16)) : '');
+    const mapThroughput = (d) => (d.buckets || []).map(b => ({
+      t: label(b.t),
+      rps: b.request_count ?? b.total ?? 0,
+      allowed: b.allowed || 0,
+      blocked: b.blocked != null ? b.blocked : Math.max(0, (b.request_count ?? b.total ?? 0) - (b.allowed || 0)),
+    }));
+    const mapTkLt = (d) => (d.buckets || []).map(b => ({
+      t: label(b.t),
+      prompt: b.prompt_tokens ?? 0,
+      completion: b.completion_tokens ?? 0,
+      avg: b.avg_latency_ms ?? 0,
+      count: b.request_count ?? 0,
+    }));
 
-    prevMetrics.current = null;
-    prevTime.current = null;
-    setTpData([]);
-
-    const poll = async () => {
-      try {
-        const text = await getMetrics();
-        const m = parsePrometheusMetrics(text);
-        const now = Date.now();
-        const totalReqs = sumMetric(m, 'walacor_gateway_requests_total', '');
-        const allowedReqs = sumMetric(m, 'walacor_gateway_requests_total', 'outcome="allowed"');
-        const blockedReqs = totalReqs - allowedReqs;
-        const totalTokens = sumMetric(m, 'walacor_gateway_token_usage_total', '');
-
-        if (prevMetrics.current && prevTime.current) {
-          const dt = (now - prevTime.current) / 1000;
-          if (dt > 0) {
-            const rps = Math.max(0, (totalReqs - prevMetrics.current.totalReqs) / dt);
-            const allowed = Math.max(0, (allowedReqs - prevMetrics.current.allowedReqs) / dt);
-            const blocked = Math.max(0, (blockedReqs - prevMetrics.current.blockedReqs) / dt);
-            const tps = Math.max(0, (totalTokens - prevMetrics.current.totalTokens) / dt);
-            const pct = totalReqs > 0 ? (allowedReqs / totalReqs * 100) : 100;
-
-            setTpData(prev => {
-              const next = [...prev, { rps, allowed, blocked }].slice(-LIVE_SLOTS);
-              return assignLivePos(next);
-            });
-            setCounters({ rps, tps, pct, total: totalReqs });
-          }
+    const applySummary = (tpRows, tkRows) => {
+      const total = tpRows.reduce((s, d) => s + (d.rps || 0), 0);
+      const allowed = tpRows.reduce((s, d) => s + (d.allowed || 0), 0);
+      const secs = RANGE_SECONDS[chartRange] || 3600;
+      const rps = secs > 0 ? total / secs : 0;
+      const promptSum = tkRows.reduce((s, d) => s + (d.prompt || 0), 0);
+      const compSum = tkRows.reduce((s, d) => s + (d.completion || 0), 0);
+      const tkTotal = promptSum + compSum;
+      const tps = secs > 0 ? tkTotal / secs : 0;
+      const pct = total > 0 ? (allowed / total * 100) : 100;
+      setCounters({ rps, tps, pct, total });
+      setTokenSnap({ prompt: promptSum, completion: compSum });
+      let wSum = 0;
+      let wCount = 0;
+      for (const d of tkRows) {
+        const c = d.count || 0;
+        if (c > 0) {
+          wSum += (d.avg || 0) * c;
+          wCount += c;
         }
-        prevMetrics.current = { totalReqs, allowedReqs, blockedReqs, totalTokens };
-        prevTime.current = now;
-      } catch {}
+      }
+      setLatencySnap({ avg: wCount > 0 ? wSum / wCount : 0 });
     };
 
-    poll();
-    const t = setInterval(poll, 3000);
-    return () => clearInterval(t);
-  }, [tpRange]);
-
-  // Token + Latency polling
-  useEffect(() => {
-    if (tlRange !== 'current') {
-      (async () => {
-        try {
-          const data = await getTokenLatency(tlRange);
-          const buckets = data.buckets || [];
-          setTkData(buckets.map(b => ({
-            t: b.t?.substring(11, 16) || '',
-            prompt: b.prompt_tokens || 0,
-            completion: b.completion_tokens || 0,
-          })));
-          setLtData(buckets.map(b => ({
-            t: b.t?.substring(11, 16) || '',
-            avg: b.avg_latency_ms || 0,
-            max: b.max_latency_ms || 0,
-          })));
-        } catch {}
-      })();
-      return;
-    }
-
-    prevTokens.current = null;
-    prevLatency.current = null;
-    setTkData([]);
-    setLtData([]);
-
-    const poll = async () => {
+    let cancelled = false;
+    const loadCharts = async (isFirst) => {
+      if (isFirst) {
+        setTpLoading(true);
+        setTpData([]);
+        setTkData([]);
+        setLtData([]);
+      }
       try {
-        const text = await getMetrics();
-        const m = parsePrometheusMetrics(text);
-        const now = Date.now();
-        const promptTok = sumMetric(m, 'walacor_gateway_token_usage_total', 'token_type="prompt"');
-        const compTok = sumMetric(m, 'walacor_gateway_token_usage_total', 'token_type="completion"');
-        const latencySum = sumMetric(m, 'walacor_gateway_pipeline_duration_seconds_sum', '');
-        const latencyCount = sumMetric(m, 'walacor_gateway_pipeline_duration_seconds_count', '');
-
-        latestTokenSnap.current = { prompt: promptTok, completion: compTok };
-
-        if (prevTokens.current) {
-          const deltaPrompt = Math.max(0, promptTok - prevTokens.current.prompt);
-          const deltaComp = Math.max(0, compTok - prevTokens.current.completion);
-          setTkData(prev => {
-            const next = [...prev, { prompt: deltaPrompt, completion: deltaComp }].slice(-LIVE_SLOTS);
-            return assignLivePos(next);
-          });
-        }
-        prevTokens.current = { prompt: promptTok, completion: compTok };
-
-        if (prevLatency.current) {
-          const dSum = latencySum - prevLatency.current.sum;
-          const dCount = latencyCount - prevLatency.current.count;
-          if (dCount > 0) {
-            const intervalAvgMs = (dSum / dCount) * 1000;
-            latestLatencySnap.current = { avg: intervalAvgMs };
-            setLtData(prev => {
-              const next = [...prev, { avg: intervalAvgMs, max: intervalAvgMs * 1.3 }].slice(-LIVE_SLOTS);
-              return assignLivePos(next);
-            });
-          }
-        }
-        prevLatency.current = { sum: latencySum, count: latencyCount };
-      } catch {}
+        const [td, tld] = await Promise.all([
+          getThroughputHistory(chartRange),
+          getTokenLatency(chartRange),
+        ]);
+        if (cancelled) return;
+        const tpRows = mapThroughput(td);
+        const tkRows = mapTkLt(tld);
+        setTpData(tpRows);
+        setTkData(tkRows);
+        setLtData(tkRows.map(({ t, avg }) => ({ t, avg })));
+        applySummary(tpRows, tkRows);
+      } catch { /* keep prior series on refresh failure */ }
+      if (!cancelled && isFirst) setTpLoading(false);
     };
 
-    poll();
-    const t = setInterval(poll, 3000);
-    return () => clearInterval(t);
-  }, [tlRange]);
+    loadCharts(true);
+    if (chartRange === '1h') {
+      const id = setInterval(() => { if (!cancelled) loadCharts(false); }, POLL_MS);
+      return () => {
+        cancelled = true;
+        clearInterval(id);
+      };
+    }
+    return () => { cancelled = true; };
+  }, [chartRange]);
 
-  if (loading) {
-    return (
-      <div>
-        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-          {[1,2,3,4].map(i => <div key={i} className="skeleton-block" style={{ flex: 1, height: 92 }} />)}
-        </div>
-        <div className="skeleton-block" style={{ height: 240, marginBottom: 16 }} />
+  if (loading) return (
+    <div>
+      <div className="skeleton-block" style={{ height: 48, marginBottom: 16 }} />
+      <div className="skeleton-block" style={{ height: 360, marginBottom: 16 }} />
+      <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+        <div className="skeleton-block" style={{ flex: 1, height: 300 }} />
+        <div className="skeleton-block" style={{ flex: 1, height: 300 }} />
       </div>
-    );
-  }
+    </div>
+  );
   if (error) return <div className="error-card">Error: {error}</div>;
 
   const allowed = attStats.allowed || 0;
-  const denied = Object.keys(attStats).filter(k => k.startsWith('denied')).reduce((s, k) => s + attStats[k], 0);
   const pctAllowed = attTotal > 0 ? (allowed / attTotal * 100).toFixed(1) : '100';
+
+  const showThroughputChart = tpData.length > 0;
+  const showTkLtCharts = tkData.length > 0;
 
   return (
     <div className="fade-child">
-      {/* ── Hero Status ── */}
-      <div className="overview-hero" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16, marginBottom: 20, minWidth: 0 }}>
-        {/* Primary status */}
-        <div className="card card-accent-green" style={{ padding: '28px 24px' }}>
-          <div className="card-title" style={{ marginBottom: 16 }}>System Status</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-            <span style={{
-              position: 'relative', display: 'inline-flex', alignItems: 'center',
-            }}>
-              <span style={{
-                position: 'absolute', width: 14, height: 14, borderRadius: '50%',
-                backgroundColor: health?.status === 'healthy' ? '#34d399' : '#f59e0b',
-                opacity: 0.4, animation: 'ping 2s cubic-bezier(0,0,0.2,1) infinite',
-              }} />
-              <span style={{
-                position: 'relative', width: 10, height: 10, borderRadius: '50%',
-                backgroundColor: health?.status === 'healthy' ? '#34d399' : '#f59e0b',
-              }} />
-            </span>
-            <span style={{
-              fontFamily: 'var(--mono)', fontSize: 26, fontWeight: 600,
-              color: health?.status === 'healthy' ? 'var(--green)' : 'var(--amber)',
-              letterSpacing: '-0.5px',
-            }}>
-              {health?.status === 'healthy' ? 'ALL CLEAR' : (health?.status || 'OFFLINE').toUpperCase()}
-            </span>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            {[
-              [health?.enforcement_mode || '-', 'mode'],
-              [health?.uptime_seconds != null ? formatUptime(health.uptime_seconds) : '-', 'uptime'],
-              [health?.content_analyzers ?? '0', 'analyzers'],
-              [health?.session_chain ? 'enabled' : 'disabled', 'chain'],
-            ].map(([val, label], i) => (
-              <div key={i} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                <span style={{ fontFamily: 'var(--mono)', color: 'var(--text-secondary)' }}>{val}</span>
-                <span style={{ margin: '0 4px', opacity: 0.3 }}>·</span>{label}
+
+      {/* ── Compact Status Strip ── */}
+      <StatusStrip
+        health={health}
+        sessionsCount={sessions.length}
+        attTotal={attTotal}
+        pctAllowed={pctAllowed}
+      />
+
+      {/* ── Shared time range (all telemetry charts) ── */}
+      <div className="card" style={{ marginBottom: 16, padding: '12px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {chartRange === '1h' && (
+            <div
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: palette.gold,
+                boxShadow: isLight ? `0 0 6px ${palette.gold}55` : `0 0 8px rgba(201,168,76,0.45)`,
+                animation: 'pulse 1.5s ease-in-out infinite',
+              }}
+              title="Charts refresh every few seconds for 1H"
+            />
+          )}
+          <span className="card-title" style={{ marginBottom: 0 }}>Time range</span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>throughput · tokens · latency</span>
+        </div>
+        <RangeSelector active={chartRange} onChange={setChartRange} />
+      </div>
+
+      {/* ── Throughput Chart ── */}
+      <div className="card card-accent" style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <span className="card-title" style={{ marginBottom: 0 }}>Throughput</span>
+          <div style={{ display: 'flex', gap: 12 }}>
+            {[['req/s', palette.gold], ['allowed', palette.green], ['blocked', palette.red]].map(([l, c]) => (
+              <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+                <span style={{ width: 20, height: 2, background: c, display: 'inline-block', borderRadius: 1 }} />
+                {l}
               </div>
             ))}
           </div>
         </div>
 
-        {/* Stat cards */}
-        <div className="overview-stats" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, minWidth: 0 }}>
-          {[
-            { value: sessions.length, label: 'ACTIVE SESSIONS', sub: '', color: 'var(--text-muted)' },
-            { value: formatNumber(attTotal), label: 'TOTAL REQUESTS', sub: `${pctAllowed}% allowed`, color: 'var(--green)' },
-            { value: health?.enforcement_mode || '-', label: 'ENFORCEMENT', sub: health?.storage?.backend ? `${health.storage.backend} storage` : '', color: 'var(--text-muted)', isText: true },
-          ].map((s, i) => (
-            <div key={i} className="stat-card">
-              <div className={`stat-value${s.isText ? ' stat-value-text' : ''}`}>{s.value}</div>
-              <div className="stat-label">{s.label}</div>
-              {s.sub && <div className="stat-sub" style={{ color: s.color }}>{s.sub}</div>}
-            </div>
-          ))}
-        </div>
-      </div>
+        {tpLoading ? (
+          <ChartPlaceholder height={300} message="loading…" />
+        ) : showThroughputChart ? (
+          <>
+            <ThroughputHistoricalChart data={tpData} palette={palette} />
+            <p className="chart-zoom-hint">
+              <span className="chart-zoom-hint-label">Zoom and explore</span>
+              All charts use the same time range. Hover and <strong>scroll</strong> (or <strong>pinch</strong>) to zoom the
+              time axis; <strong>drag</strong> to select a span. To reset zoom, pick another range above, then switch back.
+            </p>
+          </>
+        ) : (
+          <ChartPlaceholder height={300} message="no data for this range" sub="no attempts in the selected window" />
+        )}
 
-      {/* ── Governance Status ── */}
-      <div className="card card-accent-green" style={{ marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 14 }}>Governance Status</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-          <GovernanceBadge label="Enforcement" value={health?.enforcement_mode === 'enforced' ? 'Enforced' : (health?.enforcement_mode || '-')} ok={health?.enforcement_mode === 'enforced'} />
-          <GovernanceBadge label="Policy Cache" value={health?.status === 'healthy' || health?.status === 'degraded' ? 'Active' : 'Stale'} ok={health?.status === 'healthy'} />
-          <GovernanceBadge label="Content Analysis" value={health?.content_analyzers ? `${health.content_analyzers} analyzer${health.content_analyzers !== 1 ? 's' : ''}` : 'None'} ok={!!health?.content_analyzers} />
-          <GovernanceBadge label="Session Chain" value={health?.session_chain ? 'Enabled' : 'Disabled'} ok={!!health?.session_chain} />
-        </div>
-      </div>
-
-      {/* ── Throughput Chart ── */}
-      <div className="card card-accent" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {tpRange === 'current' && <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--gold)', boxShadow: '0 0 8px rgba(201,168,76,0.5)', animation: 'pulse 1.5s ease-in-out infinite' }} />}
-            <span className="card-title" style={{ marginBottom: 0 }}>Throughput</span>
-          </div>
-          <RangeSelector active={tpRange} onChange={setTpRange} />
-        </div>
-        <div style={{ height: 220 }}>
-          {tpData.length > 1 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={tpData} margin={{ top: 10, right: 8, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id="gradAllowed" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#34d399" stopOpacity={0.25} />
-                    <stop offset="100%" stopColor="#34d399" stopOpacity={0.02} />
-                  </linearGradient>
-                  <linearGradient id="gradBlocked" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#ef4444" stopOpacity={0.3} />
-                    <stop offset="100%" stopColor="#ef4444" stopOpacity={0.02} />
-                  </linearGradient>
-                  <linearGradient id="gradGold" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#c9a84c" stopOpacity={0.15} />
-                    <stop offset="100%" stopColor="#c9a84c" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
-                {tpRange === 'current' ? (
-                  <XAxis dataKey="t" type="number" domain={[0, 20]} ticks={LIVE_TICKS} tickFormatter={liveTickLabel} tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} />
-                ) : (
-                  <XAxis dataKey="t" tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} interval="preserveStartEnd" />
-                )}
-                <YAxis tick={{ fontSize: 10, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} domain={[0, 'auto']} allowDataOverflow={false} />
-                <Tooltip contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, fontFamily: 'var(--mono)' }} />
-                <Area type="natural" dataKey="blocked" stackId="1" fill="url(#gradBlocked)" stroke="rgba(239,68,68,0.6)" strokeWidth={1} />
-                <Area type="natural" dataKey="allowed" stackId="1" fill="url(#gradAllowed)" stroke="rgba(52,211,153,0.6)" strokeWidth={1} />
-                <Area type="natural" dataKey="rps" fill="url(#gradGold)" stroke="#c9a84c" strokeWidth={2.5} />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 48 }}>
-              {[
-                { value: formatNumber(counters.total) || '0', label: 'requests' },
-                { value: counters.pct ? counters.pct.toFixed(0) + '%' : '100%', label: 'allowed' },
-                { value: counters.rps ? counters.rps.toFixed(1) : '0.0', label: 'req/s' },
-              ].map((c, i) => (
-                <div key={i} style={{ textAlign: 'center' }}>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 42, fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: '-2px', lineHeight: 1 }}>{c.value}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginTop: 8 }}>{c.label}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+        {/* Counter strip */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 12, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
           {[
             { value: counters.rps < 0.1 && counters.rps > 0 ? counters.rps.toFixed(2) : counters.rps.toFixed(1), label: 'req/s', color: 'var(--gold)' },
             { value: counters.tps < 1 ? counters.tps.toFixed(1) : Math.round(counters.tps), label: 'tokens/s', color: 'var(--text-primary)' },
@@ -374,108 +557,51 @@ export default function Overview({ navigate, health }) {
         </div>
       </div>
 
-      {/* ── Token + Latency side by side ── */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ marginBottom: 12 }}>
-          <RangeSelector active={tlRange} onChange={setTlRange} />
-        </div>
-        <div className="charts-side" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          {/* Token Usage */}
-          <div className="card" style={{ marginBottom: 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <span className="card-title" style={{ marginBottom: 0 }}>Token Usage</span>
-              <div style={{ display: 'flex', gap: 12, fontSize: 10, color: 'var(--text-muted)' }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ width: 8, height: 8, background: 'var(--blue)', borderRadius: 1, display: 'inline-block', opacity: 0.7 }} /> Prompt
-                </span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ width: 8, height: 8, background: 'var(--gold)', borderRadius: 1, display: 'inline-block', opacity: 0.8 }} /> Completion
-                </span>
-              </div>
-            </div>
-            <div style={{ height: 150 }}>
-              {tkData.length > 1 ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={tkData} margin={{ top: 10, right: 8, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
-                    {tlRange === 'current' ? (
-                      <XAxis dataKey="t" type="number" domain={[0, 20]} ticks={LIVE_TICKS} tickFormatter={liveTickLabel} tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} />
-                    ) : (
-                      <XAxis dataKey="t" tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} interval="preserveStartEnd" />
-                    )}
-                    <YAxis tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} domain={[0, 'auto']} allowDataOverflow={false} />
-                    <Tooltip contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)' }} />
-                    <Bar dataKey="prompt" stackId="tokens" fill="var(--blue)" opacity={0.7} />
-                    <Bar dataKey="completion" stackId="tokens" fill="var(--gold)" opacity={0.8} radius={[2, 2, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 32 }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontFamily: 'var(--mono)', fontSize: 28, fontWeight: 700, color: 'var(--blue)', lineHeight: 1 }}>{formatNumber(latestTokenSnap.current.prompt)}</div>
-                    <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginTop: 4 }}>prompt</div>
-                  </div>
-                  <div style={{ width: 1, height: 32, background: 'var(--border)' }} />
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontFamily: 'var(--mono)', fontSize: 28, fontWeight: 700, color: 'var(--gold)', lineHeight: 1 }}>{formatNumber(latestTokenSnap.current.completion)}</div>
-                    <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginTop: 4 }}>completion</div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+      {/* ── Token Usage + Latency Charts ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
 
-          {/* Latency */}
-          <div className="card" style={{ marginBottom: 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <span className="card-title" style={{ marginBottom: 0 }}>Latency</span>
-              <div style={{ display: 'flex', gap: 12, fontSize: 10, color: 'var(--text-muted)' }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ width: 10, height: 2, background: 'var(--gold)', borderRadius: 1, display: 'inline-block' }} /> Avg
-                </span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ width: 10, height: 8, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.15)', borderRadius: 1, display: 'inline-block' }} /> P95 band
-                </span>
-              </div>
-            </div>
-            <div style={{ height: 150 }}>
-              {ltData.length > 1 ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={ltData} margin={{ top: 10, right: 8, bottom: 0, left: 0 }}>
-                    <defs>
-                      <linearGradient id="gradLatency" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#c9a84c" stopOpacity={0.15} />
-                        <stop offset="100%" stopColor="#c9a84c" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
-                    {tlRange === 'current' ? (
-                      <XAxis dataKey="t" type="number" domain={[0, 20]} ticks={LIVE_TICKS} tickFormatter={liveTickLabel} tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} />
-                    ) : (
-                      <XAxis dataKey="t" tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} interval="preserveStartEnd" />
-                    )}
-                    <YAxis tick={{ fontSize: 9, fill: 'var(--chart-label)', fontFamily: 'var(--mono)' }} unit="ms" domain={[0, 'auto']} allowDataOverflow={false} />
-                    <Tooltip contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)' }} formatter={v => [`${Math.round(v)}ms`]} />
-                    <Area type="monotone" dataKey="max" fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.2)" strokeWidth={1} strokeDasharray="4 4" />
-                    <Area type="monotone" dataKey="avg" fill="url(#gradLatency)" stroke="#c9a84c" strokeWidth={2} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontFamily: 'var(--mono)', fontSize: 28, fontWeight: 700, color: 'var(--gold)', lineHeight: 1 }}>{latestLatencySnap.current.avg > 0 ? Math.round(latestLatencySnap.current.avg) + 'ms' : '--'}</div>
-                    <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginTop: 4 }}>avg latency</div>
-                  </div>
-                </div>
-              )}
+        {/* Token Usage */}
+        <div className="card" style={{ marginBottom: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+            <span className="card-title" style={{ marginBottom: 0 }}>Token Usage</span>
+            <div style={{ display: 'flex', gap: 16, fontSize: 11, fontFamily: 'var(--mono)' }}>
+              <span style={{ color: 'var(--text-muted)' }}>
+                <span style={{ color: 'var(--blue)' }}>P</span> {formatNumber(tokenSnap.prompt)}
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                <span style={{ color: 'var(--gold)' }}>C</span> {formatNumber(tokenSnap.completion)}
+              </span>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+                {formatNumber(tokenSnap.prompt + tokenSnap.completion)}
+              </span>
             </div>
           </div>
+          {showTkLtCharts ? (
+            <TokenUsageChart data={tkData} palette={palette} />
+          ) : (
+            <ChartPlaceholder height={240} message={tpLoading ? 'loading…' : 'no token data for this range'} sub="execution records with token fields appear here" />
+          )}
+        </div>
+
+        {/* Latency */}
+        <div className="card" style={{ marginBottom: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+            <span className="card-title" style={{ marginBottom: 0 }}>Latency</span>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: latencySnap.avg > 0 ? 'var(--gold)' : 'var(--text-muted)' }}>
+              {latencySnap.avg > 0 ? Math.round(latencySnap.avg) + ' ms' : '--'}
+              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 4 }}>avg</span>
+            </div>
+          </div>
+          {showTkLtCharts ? (
+            <LatencyChart data={ltData} palette={palette} />
+          ) : (
+            <ChartPlaceholder height={240} message={tpLoading ? 'loading…' : 'no latency data for this range'} sub="execution records with latency_ms appear here" />
+          )}
         </div>
       </div>
 
-      {/* ── Sessions + Activity side by side ── */}
-      <div className="bottom-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 16 }}>
-        {/* Recent Sessions */}
+      {/* ── Sessions + Activity ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 16 }}>
         <div className="card" style={{ marginBottom: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
             <span className="card-title" style={{ marginBottom: 0 }}>Recent Sessions</span>
@@ -494,8 +620,6 @@ export default function Overview({ navigate, health }) {
             </div>
           ))}
         </div>
-
-        {/* Recent Activity */}
         <div className="card" style={{ marginBottom: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
             <span className="card-title" style={{ marginBottom: 0 }}>Recent Activity</span>

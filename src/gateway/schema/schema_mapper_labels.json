@@ -1,0 +1,21 @@
+[
+  "UNKNOWN",
+  "cache_creation_tokens",
+  "cached_tokens",
+  "citation_url",
+  "completion_tokens",
+  "content",
+  "finish_reason",
+  "model",
+  "model_hash",
+  "prompt_tokens",
+  "response_id",
+  "safety_category",
+  "thinking_content",
+  "timing_value",
+  "tool_call_arguments",
+  "tool_call_id",
+  "tool_call_name",
+  "tool_call_type",
+  "total_tokens"
+]

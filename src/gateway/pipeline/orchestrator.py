@@ -16,6 +16,7 @@ import fnmatch
 import logging
 import re
 import time
+from pathlib import Path
 import uuid
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -78,14 +79,6 @@ def _get_or_create_limiter(provider: str) -> ConcurrencyLimiter:
         )
     return lim
 
-# ── Model Capability Registry ─────────────────────────────────────────────────
-# Caches per-model capabilities discovered at runtime so the gateway never
-# wastes a retry on a model that has already been probed.  Thread-safe for
-# asyncio (single writer, dict mutation is atomic in CPython).
-
-_model_capabilities: LRUCache = LRUCache(maxsize=500)
-# e.g.  {"gemma3:1b": {"supports_tools": False}, "qwen3:1.7b": {"supports_tools": True}}
-
 # PIISanitizer singleton — avoid recompiling regex patterns on every request.
 _pii_sanitizer_instance = None
 _pii_sanitizer_types: set[str] | None = None
@@ -100,18 +93,6 @@ def _get_pii_sanitizer(settings):
         _pii_sanitizer_instance = PIISanitizer(sanitize_types=types)
         _pii_sanitizer_types = types
     return _pii_sanitizer_instance
-
-
-def _model_supports_tools(model_id: str) -> bool | None:
-    """Return True/False if known, None if not yet probed."""
-    return _model_capabilities.get(model_id, {}).get("supports_tools")
-
-
-def _record_model_capability(model_id: str, supports_tools: bool) -> None:
-    """Cache a discovered capability for a model."""
-    caps = _model_capabilities.setdefault(model_id, {})
-    caps["supports_tools"] = supports_tools
-    logger.info("Model capability cached: %s supports_tools=%s", model_id, supports_tools)
 
 
 # ── A/B test cache (B.9) ─────────────────────────────────────────────────────
@@ -230,10 +211,17 @@ class _ProviderHTTPError(Exception):
 
 # ── Basic helpers ─────────────────────────────────────────────────────────────
 
-def _set_disposition(request: Request, value: str) -> None:
-    """Set disposition on both ContextVar and request.state (crosses BaseHTTPMiddleware boundary)."""
+def _set_disposition(request: Request, value: str, reason: str | None = None) -> None:
+    """Set disposition on both ContextVar and request.state (crosses BaseHTTPMiddleware boundary).
+
+    When provided, `reason` is a short human-readable explanation of why this disposition
+    was set (e.g. the failing policy rule, the provider error message, the parse error).
+    It is clamped to 500 chars and surfaced in the lineage dashboard Attempts popover.
+    """
     disposition_var.set(value)
     request.state.walacor_disposition = value
+    if reason:
+        request.state.walacor_reason = str(reason)[:500]
 
 
 def _inc_request(provider: str, model: str, outcome: str) -> None:
@@ -378,6 +366,7 @@ def _make_adapter_for_route(route: dict) -> ProviderAdapter | None:
             base_url=url or settings.provider_anthropic_url,
             api_key=key or settings.provider_anthropic_key,
             prompt_caching=settings.prompt_caching_enabled,
+            beta_headers=settings.provider_anthropic_beta_headers,
         )
     if provider == "huggingface":
         return HuggingFaceAdapter(
@@ -407,7 +396,12 @@ def _resolve_adapter(path: str, model_id: str = "") -> ProviderAdapter | None:
             )
         return OpenAIAdapter(base_url=settings.provider_openai_url, api_key=settings.provider_openai_key)
     if path.startswith("/v1/messages"):
-        return AnthropicAdapter(base_url=settings.provider_anthropic_url, api_key=settings.provider_anthropic_key, prompt_caching=settings.prompt_caching_enabled)
+        return AnthropicAdapter(
+            base_url=settings.provider_anthropic_url,
+            api_key=settings.provider_anthropic_key,
+            prompt_caching=settings.prompt_caching_enabled,
+            beta_headers=settings.provider_anthropic_beta_headers,
+        )
     if settings.provider_huggingface_url and (path.startswith("/generate") or path.startswith("/v1/models")):
         return HuggingFaceAdapter(base_url=settings.provider_huggingface_url, api_key=settings.provider_huggingface_key)
     if settings.generic_upstream_url and path.startswith("/v1/custom"):
@@ -507,369 +501,20 @@ class _ToolStrategyResult:
     http_response: Response | None = None  # final HTTP response from tool loop (replaces original)
 
 
-# ── Phase 14: tool strategy helpers ──────────────────────────────────────────
-
-def _select_tool_strategy(adapter: ProviderAdapter, settings) -> str:
-    """Return 'passive', 'active', or 'disabled' based on config and provider."""
-    if not settings.tool_aware_enabled:
-        return "disabled"
-    if settings.tool_strategy != "auto":
-        return settings.tool_strategy
-    return "passive" if adapter.get_provider_name() in ("openai", "anthropic") else "active"
-
-
-def _strip_tools_from_call(call: ModelCall) -> ModelCall:
-    """Remove tool definitions from request body — used when model rejects tools."""
-    try:
-        body = json.loads(call.raw_body)
-        body.pop("tools", None)
-        body.pop("tool_choice", None)
-        new_body = json.dumps_bytes(body)
-        return dataclasses.replace(call, raw_body=new_body)
-    except Exception:
-        logger.warning("_strip_tools_from_call: failed to strip tools from model=%s — sending original body", call.model_id, exc_info=True)
-        return call
-
-
-_TOOL_UNSUPPORTED_PHRASES = (
-    "does not support tools",
-    "tool use is not supported",
-    "tools are not supported",
-    "tool_use is not supported",
-    "does not support function",
-    "function calling is not supported",
-    "does not support tool_use",
+# ── Tool executor (extracted to gateway.pipeline.tool_executor) ──────────────
+from gateway.pipeline.tool_executor import (
+    prepare_tools, execute_tools, ToolPrepResult, ToolExecResult,
+    build_tool_audit_metadata, write_tool_events, emit_tool_metrics,
+    strip_tools_from_call, filter_tools_for_key, is_tool_unsupported_error,
 )
-
-
-def _is_tool_unsupported_error(status_code: int, body: bytes | memoryview | None) -> bool:
-    """Check if a provider error indicates the model doesn't support tools."""
-    if status_code not in (400, 422) or body is None:
-        return False
-    try:
-        text = bytes(body).decode("utf-8", errors="replace").lower()
-        return any(phrase in text for phrase in _TOOL_UNSUPPORTED_PHRASES)
-    except Exception:
-        return False
-
-
-def _filter_tools_for_key(
-    tool_definitions: list[dict],
-    api_key: str | None,
-    ctx,
-) -> list[dict]:
-    """Filter tool definitions based on per-key allow-list stored in the control plane.
-
-    Returns:
-      - All tools unchanged if api_key is None, control_store is None, or key has no
-        restrictions (get_allowed_tools returns None → unrestricted).
-      - Empty list if the key has an explicit empty allow-list (all tools blocked).
-      - Filtered list containing only the tools whose name appears in the allow-list.
-    """
-    if not api_key or ctx.control_store is None:
-        return tool_definitions
-    import hashlib
-    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    allowed = ctx.control_store.get_allowed_tools(key_hash)
-    if allowed is None:
-        return tool_definitions  # no restrictions for this key
-    if not allowed:
-        return []  # explicitly blocked all tools
-    return [
-        t for t in tool_definitions
-        if (t.get("function", {}).get("name") in allowed or t.get("name") in allowed)
-    ]
-
-
-def _inject_tools_into_call(call: ModelCall, tool_definitions: list[dict]) -> ModelCall:
-    """Transparently add MCP tool definitions to request body (active strategy)."""
-    if not tool_definitions:
-        return call
-    try:
-        body = json.loads(call.raw_body)
-        if not body.get("tools"):
-            body["tools"] = tool_definitions
-            new_body = json.dumps_bytes(body)
-            return ModelCall(
-                provider=call.provider, model_id=call.model_id,
-                prompt_text=call.prompt_text, raw_body=new_body,
-                is_streaming=call.is_streaming, metadata=call.metadata,
-            )
-    except Exception:
-        logger.warning(
-            "Failed to inject tool definitions into call: model=%s", call.model_id,
-            exc_info=True,
-        )
-    return call
-
-
-def _serialize_tool_interaction(t: ToolInteraction, source: str) -> dict[str, Any]:
-    """Serialize one ToolInteraction to audit metadata dict (hashes input/output)."""
-    from gateway.core import compute_sha3_512_string
-    d: dict[str, Any] = {"tool_id": t.tool_id, "tool_type": t.tool_type, "tool_name": t.tool_name, "source": source}
-    if t.input_data is not None:
-        d["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
-    if t.output_data is not None:
-        d["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
-    if t.sources:
-        d["sources"] = t.sources
-    if t.metadata:
-        d.update(t.metadata)
-    return d
-
-
-def _build_tool_audit_metadata(
-    interactions: list[ToolInteraction], strategy: str, iterations: int
-) -> dict[str, Any]:
-    """Build tool_* keys to merge into audit_metadata."""
-    if not interactions:
-        return {}
-    source = "provider" if strategy == "passive" else "gateway"
-    result: dict[str, Any] = {
-        "tool_strategy": strategy,
-        "tool_interaction_count": len(interactions),
-        "tool_interactions": [_serialize_tool_interaction(t, source) for t in interactions],
-    }
-    if iterations > 0:
-        result["tool_loop_iterations"] = iterations
-    return result
-
-
-def _build_tool_event_record(
-    t: ToolInteraction,
-    execution_id: str,
-    session_id: str | None,
-    prompt_id: str,
-    source: str,
-    tenant_id: str,
-    gateway_id: str,
-) -> dict[str, Any]:
-    """Build a first-class tool event record for Walacor/WAL (ETId 9000003)."""
-    from gateway.core import compute_sha3_512_string
-    record: dict[str, Any] = {
-        "event_id": str(uuid.uuid4()),
-        "execution_id": execution_id,
-        "session_id": session_id,
-        "prompt_id": prompt_id,
-        "tenant_id": tenant_id,
-        "gateway_id": gateway_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event_type": "tool_call",
-        "tool_id": t.tool_id,
-        "tool_type": t.tool_type,
-        "tool_name": t.tool_name,
-        "source": source,
-    }
-    if t.input_data is not None:
-        record["input_data"] = t.input_data
-        record["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
-    if t.output_data is not None:
-        record["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
-    if t.sources:
-        record["sources"] = t.sources
-    if t.metadata:
-        record["iteration"] = t.metadata.get("iteration")
-        record["duration_ms"] = t.metadata.get("duration_ms")
-        record["is_error"] = t.metadata.get("is_error")
-    return record
-
-
-async def _write_tool_events(
-    interactions: list[ToolInteraction],
-    execution_id: str,
-    call: ModelCall,
-    strategy: str,
-    ctx: Any,
-    settings: Any,
-) -> None:
-    """Write each tool interaction as a first-class audit event record (dual-write: Walacor + WAL)."""
-    if not interactions:
-        return
-    session_id = call.metadata.get("session_id")
-    prompt_id = call.metadata.get("prompt_id", "")
-    source = "provider" if strategy == "passive" else "gateway"
-    for t in interactions:
-        record = _build_tool_event_record(
-            t, execution_id, session_id, prompt_id, source,
-            settings.gateway_tenant_id, settings.gateway_id,
-        )
-        # Analyze tool output for indirect prompt injection
-        if ctx.content_analyzers and t.output_data is not None:
-            output_text = (t.output_data if isinstance(t.output_data, str)
-                           else json.dumps(t.output_data, default=str))
-            analysis = await analyze_text(output_text, ctx.content_analyzers)
-            if analysis:
-                record["content_analysis"] = analysis
-        if ctx.storage:
-            await ctx.storage.write_tool_event(record)
-
-
-def _emit_tool_metrics(interactions: list[ToolInteraction], provider: str, source: str) -> None:
-    for t in interactions:
-        try:
-            tool_calls_total.labels(provider=provider, tool_type=t.tool_type, source=source).inc()
-        except Exception:
-            logger.debug("Metric increment failed (tool_calls_total)", exc_info=True)
-
-
-async def _execute_one_tool(
-    tc: ToolInteraction, ctx, settings, provider: str, iteration: int
-) -> tuple[ToolInteraction, dict]:
-    """Execute one MCP tool call. Returns (enriched_interaction, result_dict)."""
-    # Validate arguments against tool schema before calling MCP
-    if tc.tool_name and ctx.tool_registry:
-        schema = ctx.tool_registry.get_tool_schema(tc.tool_name)
-        if schema:
-            required = schema.get("required", [])
-            args = tc.input_data if isinstance(tc.input_data, dict) else {}
-            missing = [f for f in required if f not in args]
-            if missing:
-                logger.warning("Tool arg validation failed: tool=%s missing=%s", tc.tool_name, missing)
-                enriched = ToolInteraction(
-                    tool_id=tc.tool_id, tool_type=tc.tool_type, tool_name=tc.tool_name,
-                    input_data=tc.input_data, output_data=None, sources=None,
-                    metadata={"iteration": iteration, "duration_ms": 0.0, "is_error": True,
-                              "validation_error": f"missing required args: {missing}"},
-                )
-                return enriched, {"tool_call_id": tc.tool_id,
-                                  "content": f"Tool call rejected: missing required arguments {missing}"}
-
-    t_start = time.perf_counter()
-    result = await ctx.tool_registry.execute_tool(
-        tc.tool_name or "",
-        tc.input_data if isinstance(tc.input_data, dict) else {},
-        timeout_ms=settings.tool_execution_timeout_ms,
-    )
-    duration_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
-
-    # Truncate oversized tool output to prevent memory/token exhaustion
-    if result.content and len(result.content) > settings.tool_max_output_bytes:
-        logger.warning(
-            "Tool %s output truncated: %d > %d bytes",
-            tc.tool_name, len(result.content), settings.tool_max_output_bytes,
-        )
-        from gateway.mcp.client import ToolResult as _ToolResult
-        result = _ToolResult(
-            content=result.content[:settings.tool_max_output_bytes] + "\n[TRUNCATED]",
-            is_error=result.is_error,
-            duration_ms=getattr(result, "duration_ms", None),
-            sources=getattr(result, "sources", None),
-        )
-
-    # Heuristic check for indirect prompt injection patterns in tool output
-    _injection_detected = False
-    if not result.is_error and result.content:
-        _injection_patterns = [
-            "ignore previous instructions",
-            "ignore all previous",
-            "disregard your instructions",
-            "you are now",
-            "new instructions:",
-            "system prompt:",
-            "override:",
-            "<system>",
-        ]
-        content_lower = result.content if isinstance(result.content, str) else str(result.content)
-        content_lower = content_lower.lower()
-        for pattern in _injection_patterns:
-            if pattern in content_lower:
-                logger.warning(
-                    "Potential indirect prompt injection in tool output: tool=%s pattern='%s'",
-                    tc.tool_name, pattern,
-                )
-                _injection_detected = True
-                break
-
-    try:
-        tool_calls_total.labels(provider=provider, tool_type=tc.tool_type, source="gateway").inc()
-    except Exception:
-        logger.debug("Metric increment failed (tool_calls_total gateway)", exc_info=True)
-
-    # Analyse tool output BEFORE feeding back to the LLM (blocks indirect prompt injection)
-    output_content = result.content
-    is_error = result.is_error
-    if (settings.tool_content_analysis_enabled
-            and ctx.content_analyzers
-            and output_content
-            and not is_error):
-        analysis = await analyze_text(output_content, ctx.content_analyzers)
-        blocking = [d for d in analysis if d.get("verdict") == "block"]
-        if blocking:
-            top = blocking[0]
-            logger.warning(
-                "Tool output blocked before LLM injection: tool=%s category=%s analyzer=%s",
-                tc.tool_name, top["category"], top["analyzer_id"],
-            )
-            output_content = f"[Tool output blocked by content policy: {top['category']}]"
-            is_error = True
-
-    _meta: dict = {"iteration": iteration, "duration_ms": duration_ms, "is_error": is_error}
-    if _injection_detected:
-        _meta["injection_warning"] = True
-    enriched = ToolInteraction(
-        tool_id=tc.tool_id, tool_type=tc.tool_type, tool_name=tc.tool_name,
-        input_data=tc.input_data, output_data=output_content, sources=result.sources,
-        metadata=_meta,
-    )
-    return enriched, {"tool_call_id": tc.tool_id, "content": output_content}
-
-
-async def _run_active_tool_loop(
-    adapter: ProviderAdapter,
-    call: ModelCall,
-    request: Request,
-    model_response: ModelResponse,
-    ctx,
-    settings,
-    provider: str,
-) -> tuple[ModelCall, ModelResponse, Response | None, list[ToolInteraction], int, Response | None]:
-    """Gateway-side tool-call loop for local/private models (active strategy).
-
-    Returns (final_call, final_model_response, error_response_or_None, all_interactions, iterations, final_http_response).
-    """
-    all_interactions: list[ToolInteraction] = []
-    iterations = 0
-    current_call = call
-    current_model = model_response
-    final_http_resp: Response | None = None
-    loop_deadline = time.perf_counter() + (settings.tool_loop_total_timeout_ms / 1000.0)
-
-    while (
-        current_model.has_pending_tool_calls
-        and current_model.tool_interactions
-        and iterations < settings.tool_max_iterations
-        and time.perf_counter() < loop_deadline
-    ):
-        iterations += 1
-        pending = current_model.tool_interactions
-        tool_results: list[dict] = []
-
-        for tc in pending:
-            enriched, result_dict = await _execute_one_tool(tc, ctx, settings, provider, iterations)
-            all_interactions.append(enriched)
-            tool_results.append(result_dict)
-
-        try:
-            current_call = adapter.build_tool_result_call(current_call, pending, tool_results)
-        except NotImplementedError:
-            logger.warning("Adapter %s does not support build_tool_result_call — stopping tool loop", adapter.get_provider_name())
-            break
-
-        http_resp, current_model = await forward(adapter, current_call, request)
-        final_http_resp = http_resp
-        if http_resp.status_code >= 500:
-            return current_call, current_model, http_resp, all_interactions, iterations, None
-
-    if time.perf_counter() >= loop_deadline:
-        logger.warning("Tool loop wall-clock timeout reached (%.0fms)", settings.tool_loop_total_timeout_ms)
-
-    if iterations > 0:
-        try:
-            tool_loop_iterations.labels(provider=provider).observe(iterations)
-        except Exception:
-            logger.debug("Metric increment failed (tool_loop_iterations)", exc_info=True)
-
-    return current_call, current_model, None, all_interactions, iterations, final_http_resp
+# Backward-compat aliases for tests/external imports
+_build_tool_audit_metadata = build_tool_audit_metadata
+_write_tool_events = write_tool_events
+_emit_tool_metrics = emit_tool_metrics
+_filter_tools_for_key = filter_tools_for_key
+_inject_tools_into_call = None  # removed — use tool_executor.prepare_tools()
+_run_active_tool_loop = None    # removed — use tool_executor.execute_tools()
+_is_tool_unsupported_error = is_tool_unsupported_error
 
 
 # ── Session chain + record write helpers ─────────────────────────────────────
@@ -918,7 +563,20 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
 
 
 async def _store_execution(record, request: Request, ctx) -> None:
-    """Write execution record via storage router, then tag request state."""
+    """Validate schema then write execution record via storage router."""
+    # Schema validation ALWAYS runs — this is the last gate before permanent storage.
+    # If SchemaIntelligence is unavailable, use standalone validation.
+    try:
+        _si = getattr(ctx, "schema_intelligence", None)
+        if _si:
+            record, _val_report = _si.validate_execution(record)
+        else:
+            from gateway.classifier.unified import validate_execution as _standalone_validate
+            record, _val_report = _standalone_validate(record)
+        if _val_report.issues:
+            logger.info("Execution schema: %d issues fixed before write", len(_val_report.issues))
+    except Exception as _val_err:
+        logger.error("Schema validation failed (writing anyway): %s", _val_err)
     eid = record["execution_id"]
     if ctx.storage:
         result = await ctx.storage.write_execution(record)
@@ -957,11 +615,16 @@ async def _after_stream_record(
     pipeline_start: float | None = None,
     governance_meta: dict | None = None,
     request: Request | None = None,
+    prebuilt_model_response: ModelResponse | None = None,
 ) -> None:
     """Background task: after stream ends, evaluate response, build chain, write record (no hashing — Walcor hashes).
 
     budget_estimated: tokens reserved in check_and_reserve; passed to record_usage so the
     budget tracker can apply only the actual-vs-estimated delta (Finding 4).
+
+    prebuilt_model_response: Phase 24.4 — if set, the streaming response was
+    synthesized from an already-parsed non-streaming forward. Use it directly
+    instead of re-parsing the buffer (which may be empty in that case).
     """
     ctx = get_pipeline_context()
     settings = get_settings()
@@ -969,12 +632,28 @@ async def _after_stream_record(
         return
     _exec_id = "unknown"
     try:
-        model_response = adapter.parse_streamed_response(buffer)
+        if prebuilt_model_response is not None:
+            model_response = prebuilt_model_response
+        else:
+            model_response = adapter.parse_streamed_response(buffer)
 
         if isinstance(adapter, OllamaAdapter) and call.model_id:
             model_hash = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
             if model_hash:
                 model_response = dataclasses.replace(model_response, model_hash=model_hash)
+
+        # Use unified SchemaIntelligence for streaming response normalization
+        try:
+            _si = getattr(ctx, "schema_intelligence", None)
+            if _si:
+                model_response, _norm_report = _si.process_response(model_response, adapter.get_provider_name())
+                if _norm_report.changes:
+                    logger.debug("Stream normalization: %s", "; ".join(_norm_report.changes))
+        except Exception as _norm_err:
+            logger.error("Stream normalization failed (non-fatal): %s", _norm_err)
+        else:
+            from gateway.pipeline.normalizer import normalize_model_response
+            model_response = normalize_model_response(model_response, adapter.get_provider_name())
 
         await _record_token_usage(
             model_response, settings.gateway_tenant_id,
@@ -984,25 +663,53 @@ async def _after_stream_record(
 
         rp_version, rp_result, rp_decisions = await _eval_post_stream_policy(ctx, settings, model_response)
 
-        # Phase 14: capture passive tool interactions from streamed response
+        # Phase 14: capture passive tool interactions from streamed response.
+        # IMPORTANT: capture BEFORE normalization (below) which may replace model_response
+        # and clear tool_interactions.
         stream_tool_meta: dict[str, Any] = {}
-        if model_response.tool_interactions:
-            stream_tool_meta = _build_tool_audit_metadata(model_response.tool_interactions, "passive", 0)
-            _emit_tool_metrics(model_response.tool_interactions, adapter.get_provider_name(), "provider")
+        _raw_tool_interactions = model_response.tool_interactions
+        _raw_thinking = model_response.thinking_content
+        _raw_provider_id = model_response.provider_request_id
+        _raw_usage = model_response.usage
+        if _raw_tool_interactions:
+            stream_tool_meta = _build_tool_audit_metadata(_raw_tool_interactions, "passive", 0)
+            _emit_tool_metrics(_raw_tool_interactions, adapter.get_provider_name(), "provider")
 
         session_id = call.metadata.get("session_id")
+
+        # Phase 24.5: full-fidelity metadata for streaming path.
+        # Uses _raw_* values captured BEFORE normalization (which may replace model_response).
+        _stream_meta: dict = {
+            **call.metadata, **audit_metadata, **stream_tool_meta,
+            "response_policy_version": rp_version,
+            "response_policy_result": rp_result,
+            "analyzer_decisions": rp_decisions,
+            "enforcement_mode": settings.enforcement_mode,
+            "thinking_content": _raw_thinking,
+            "provider_response_id": _raw_provider_id,
+        }
+        if _raw_tool_interactions:
+            _stream_meta["tool_events_detail"] = [
+                {
+                    "tool_id": t.tool_id,
+                    "tool_type": t.tool_type,
+                    "tool_name": t.tool_name,
+                    "input_data": t.input_data,
+                    "output_data": t.output_data,
+                    "sources": t.sources,
+                    "metadata": t.metadata,
+                }
+                for t in _raw_tool_interactions
+            ]
+        if _raw_usage:
+            _stream_meta["token_usage"] = _raw_usage
+
         record = build_execution_record(
             call=call, model_response=model_response, attestation_id=attestation_id,
             policy_version=policy_version, policy_result=policy_result,
             tenant_id=settings.gateway_tenant_id, gateway_id=settings.gateway_id,
             user=call.metadata.get("user"), session_id=session_id,
-            metadata={
-                **call.metadata, **audit_metadata, **stream_tool_meta,
-                "response_policy_version": rp_version,
-                "response_policy_result": rp_result,
-                "analyzer_decisions": rp_decisions,
-                "enforcement_mode": settings.enforcement_mode,
-            },
+            metadata=_stream_meta,
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - pipeline_start) * 1000, 1) if pipeline_start else None,
             file_metadata=getattr(request.state, "file_metadata", None) if request else None,
@@ -1137,7 +844,11 @@ async def _attestation_check(
             _inject_caller_role(att_ctx, request)
             return att_id, att_ctx, True, "attestation", None
         # Model was explicitly revoked — block with clear message
-        _set_disposition(request, "denied_attestation")
+        _set_disposition(
+            request,
+            "denied_attestation",
+            reason=f"model {model!r} provider={provider} not attested or revoked in control plane",
+        )
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_attestation")
         _inject_caller_role(att_ctx, request)
         return att_id, att_ctx, False, None, err
@@ -1194,7 +905,7 @@ async def _pre_policy_check(
             if is_audit_only:
                 logger.warning("AUDIT_ONLY: Would have blocked (OPA) provider=%s model=%s reason=%s", provider, model, opa_reason)
                 return 0, opa_reason, True, reason or "opa", None
-            _set_disposition(request, "denied_by_opa")
+            _set_disposition(request, "denied_by_opa", reason=f"OPA: {opa_reason}")
             _inc_request(provider, model, "blocked_policy")
             return 0, opa_reason, whb, reason, JSONResponse(
                 {"error": "Blocked by OPA policy", "reason": opa_reason},
@@ -1217,23 +928,23 @@ async def _pre_policy_check(
         from gateway.cache.policy_cache import PolicyCache
         per_key_cache = PolicyCache(staleness_threshold_seconds=86400)
         per_key_cache.set_policies(ctx.policy_cache.version if ctx.policy_cache else 0, per_key_policies)
-        _, pv, pr, err = evaluate_pre_inference(per_key_cache, call, att_id, att_ctx)
+        _, pv, pr, err, fail_reason = evaluate_pre_inference(per_key_cache, call, att_id, att_ctx)
         if err is not None:
             if is_audit_only:
                 logger.warning("AUDIT_ONLY: Would have blocked (per-key policy) provider=%s model=%s", provider, model)
                 return pv, pr, True, reason or "policy", None
-            _set_disposition(request, "denied_policy")
+            _set_disposition(request, "denied_policy", reason=fail_reason or "per-key policy blocked")
             _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_policy")
             return pv, pr, whb, reason, err
         return pv, pr, whb, reason, None
 
     # Builtin policy engine path (global policies)
-    _, pv, pr, err = evaluate_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
+    _, pv, pr, err, fail_reason = evaluate_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
     if err is not None:
         if is_audit_only:
             logger.warning("AUDIT_ONLY: Would have blocked (pre-policy) provider=%s model=%s", provider, model)
             return pv, pr, True, reason or "policy", None
-        _set_disposition(request, "denied_policy")
+        _set_disposition(request, "denied_policy", reason=fail_reason or "policy blocked")
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_policy")
         return pv, pr, whb, reason, err
     return pv, pr, whb, reason, None
@@ -1247,7 +958,11 @@ def _wal_backpressure_check(request: Request, ctx, settings, provider: str, mode
     disk_bytes = ctx.wal_writer.disk_usage_bytes()
     max_bytes = int(settings.wal_max_size_gb * (1024 ** 3))
     if pending >= settings.wal_high_water_mark or (max_bytes > 0 and disk_bytes >= max_bytes):
-        _set_disposition(request, "denied_wal_full")
+        _set_disposition(
+            request,
+            "denied_wal_full",
+            reason=f"WAL back-pressure: pending={pending} disk_bytes={disk_bytes} (high_water={settings.wal_high_water_mark})",
+        )
         _inc_request(provider, model, "error")
         return JSONResponse({"error": "WAL retention exhausted; control plane unreachable or backlog too large"}, status_code=503)
     return None
@@ -1285,7 +1000,12 @@ async def _budget_check(
         if is_audit_only:
             logger.warning("AUDIT_ONLY: Would have blocked (budget) provider=%s model=%s", provider, model)
             return budget_rem, 0, True, reason or "budget", None
-        _set_disposition(request, "denied_budget")
+        rem_str = str(budget_rem) if budget_rem is not None else "unknown"
+        _set_disposition(
+            request,
+            "denied_budget",
+            reason=f"tenant={settings.gateway_tenant_id} reserve={estimated} tokens failed; remaining={rem_str}",
+        )
         _inc_request(provider, model, "error")
         try:
             budget_exceeded_total.labels(tenant_id=settings.gateway_tenant_id).inc()
@@ -1305,7 +1025,11 @@ async def _rate_limit_check(request, ctx, settings, call, provider, model) -> Re
     request.state.walacor_ratelimit_remaining = remaining
     request.state.walacor_ratelimit_reset = int(ctx.rate_limiter.reset_time(key, 60))
     if not allowed:
-        _set_disposition(request, "denied_rate_limit")
+        _set_disposition(
+            request,
+            "denied_rate_limit",
+            reason=f"rate_limit hit: user={user} model={call.model_id} limit={settings.rate_limit_rpm}/min",
+        )
         _inc_request(provider, model, "error")
         try:
             rate_limit_hits_total.labels(model=call.model_id).inc()
@@ -1343,7 +1067,7 @@ async def _run_pre_checks(
     step_timings: dict[str, float] = {}
 
     if not ctx.attestation_cache:
-        _set_disposition(request, "error_config")
+        _set_disposition(request, "error_config", reason="attestation cache not configured")
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Attestation cache not configured"}, status_code=503))
 
@@ -1356,7 +1080,7 @@ async def _run_pre_checks(
         return _PreCheckResult(error=err)
 
     if not ctx.policy_cache and settings.policy_engine != "opa":
-        _set_disposition(request, "error_config")
+        _set_disposition(request, "error_config", reason="policy cache not configured")
         _inc_request(provider, model, "error")
         return _PreCheckResult(error=JSONResponse({"error": "Policy cache not configured"}, status_code=503))
 
@@ -1419,24 +1143,9 @@ async def _run_pre_checks(
         except Exception as e:
             logger.warning("Shadow policy evaluation failed: %s", e)
 
-    tool_strategy = _select_tool_strategy(adapter, settings)
-    if tool_strategy == "active" and ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0:
-        # Skip tool injection if we already know this model doesn't support tools
-        _sup = None
-        if ctx.capability_registry:
-            _sup = ctx.capability_registry.supports_tools(call.model_id)
-        if _sup is None:
-            _sup = _model_supports_tools(call.model_id)
-        if _sup is False:
-            logger.debug("Skipping tool injection for %s — known to not support tools", call.model_id)
-            tool_strategy = "none"
-        else:
-            from gateway.auth.api_key import get_api_key_from_request as _get_key
-            _api_key = _get_key(request)
-            _tool_defs = _filter_tools_for_key(
-                ctx.tool_registry.get_tool_definitions(), _api_key, ctx
-            )
-            call = _inject_tools_into_call(call, _tool_defs)
+    tool_prep = await prepare_tools(call, request, ctx, settings)
+    call = tool_prep.call
+    tool_strategy = tool_prep.strategy
 
     audit_metadata: dict = {}
     if is_audit_only:
@@ -1516,41 +1225,7 @@ async def _maybe_fetch_ollama_hash(
     return model_response
 
 
-async def _route_tool_strategy(
-    tool_strategy: str,
-    model_response: ModelResponse,
-    call: ModelCall,
-    adapter: ProviderAdapter,
-    ctx,
-    settings,
-    request: Request,
-    provider: str,
-) -> _ToolStrategyResult:
-    """Step 3.5: passive — collect tool interactions; active — run tool loop."""
-    if tool_strategy == "passive" and model_response.tool_interactions:
-        interactions = list(model_response.tool_interactions)
-        _emit_tool_metrics(interactions, provider, "provider")
-        return _ToolStrategyResult(
-            call=call, model_response=model_response,
-            interactions=interactions, iterations=0, error=None,
-        )
-    if tool_strategy == "active" and ctx.tool_registry and model_response.has_pending_tool_calls:
-        try:
-            call, model_response, loop_err, interactions, iters, final_http = await _run_active_tool_loop(
-                adapter, call, request, model_response, ctx, settings, provider
-            )
-        except Exception:
-            logger.error("Active tool loop failed — falling back to original response", exc_info=True)
-            return _ToolStrategyResult(
-                call=call, model_response=model_response,
-                interactions=[], iterations=0, error=None,
-            )
-        return _ToolStrategyResult(
-            call=call, model_response=model_response,
-            interactions=interactions, iterations=iters, error=loop_err,
-            http_response=final_http,
-        )
-    return _ToolStrategyResult(call=call, model_response=model_response, interactions=[], iterations=0, error=None)
+# _route_tool_strategy removed — replaced by tool_executor.execute_tools()
 
 
 # ── Input content analysis (B.7: parallel mode) ───────────────────────────────
@@ -1610,7 +1285,12 @@ async def _run_response_policy(
         logger.warning("AUDIT_ONLY: Would have blocked (response_policy) provider=%s model=%s", provider, model)
         return rp_version, rp_result, decisions, whb, reason, None
 
-    _set_disposition(request, "denied_response_policy")
+    blocking_analyzers = ",".join(sorted({d.get("analyzer", "unknown") for d in (decisions or []) if d.get("action") == "block"})) or "unknown"
+    _set_disposition(
+        request,
+        "denied_response_policy",
+        reason=f"response policy blocked by analyzers: {blocking_analyzers} (result={rp_result})",
+    )
     _inc_request(provider, model, "blocked_response_policy")
     # Increment per-analyzer content block counters
     for d in (decisions or []):
@@ -1641,21 +1321,91 @@ async def _build_and_write_record(
     session_id = call.metadata.get("session_id")
     tool_meta = _build_tool_audit_metadata(params.tool_interactions, params.tool_strategy, params.tool_iterations)
 
+    # ── Phase 24.5: full-fidelity metadata capture ──────────────────────────
+    # The metadata field is the COMPLETE audit record. ONNX models (SchemaMapper,
+    # SafetyClassifier, IntentClassifier) and the adapter's parse_response produce
+    # structured data — dump ALL of it so nothing is lost.
+    full_metadata: dict = {
+        **call.metadata, **params.audit_metadata, **tool_meta,
+        "response_policy_version": params.rp_version,
+        "response_policy_result": params.rp_result,
+        "analyzer_decisions": params.rp_decisions,
+        "token_usage": model_response.usage,
+        "budget_remaining": params.budget_remaining,
+        "enforcement_mode": settings.enforcement_mode,
+        # Model response extras (thinking, provider ID)
+        "thinking_content": model_response.thinking_content,
+        "provider_response_id": model_response.provider_request_id,
+    }
+
+    # Full tool interactions with actual data, not just hashes.
+    # Hashes are in tool_meta.tool_interactions (for tamper-proof linking);
+    # full data is here for audit inspection without needing separate queries.
+    if params.tool_interactions:
+        full_metadata["tool_events_detail"] = [
+            {
+                "tool_id": t.tool_id,
+                "tool_type": t.tool_type,
+                "tool_name": t.tool_name,
+                "input_data": t.input_data,
+                "output_data": t.output_data,
+                "sources": t.sources,
+                "metadata": t.metadata,
+            }
+            for t in params.tool_interactions
+        ]
+
+    # SchemaMapper canonical output (ONNX-extracted structured response).
+    # This is the provider-agnostic view: same shape regardless of whether
+    # the upstream was OpenAI, Anthropic, Ollama, Gemini, or anything else.
+    _canonical = getattr(request.state, "_canonical_response", None)
+    if _canonical:
+        _can_dict: dict = {
+            "content_length": len(_canonical.content) if _canonical.content else 0,
+            "thinking_content_length": len(_canonical.thinking_content) if _canonical.thinking_content else 0,
+            "finish_reason": _canonical.finish_reason,
+            "response_id": _canonical.response_id,
+            "model": _canonical.model,
+            "mapping_confidence": round(_canonical._mapping_confidence, 3),
+        }
+        if _canonical.usage:
+            _can_dict["usage"] = {
+                "prompt_tokens": _canonical.usage.prompt_tokens,
+                "completion_tokens": _canonical.usage.completion_tokens,
+                "total_tokens": _canonical.usage.total_tokens,
+                "reasoning_tokens": _canonical.usage.reasoning_tokens,
+                "cached_tokens": _canonical.usage.cached_tokens,
+                "cache_creation_tokens": _canonical.usage.cache_creation_tokens,
+                "cost_usd": _canonical.usage.cost_usd,
+            }
+        if _canonical.tool_calls:
+            _can_dict["tool_calls"] = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments, "type": tc.type}
+                for tc in _canonical.tool_calls
+            ]
+        if _canonical.citations:
+            _can_dict["citations"] = [
+                {"url": c.url, "title": c.title, "snippet": c.snippet}
+                for c in _canonical.citations
+            ]
+        if _canonical.timing:
+            _can_dict["timing"] = {
+                "total_ms": _canonical.timing.total_ms,
+                "prompt_ms": _canonical.timing.prompt_ms,
+                "completion_ms": _canonical.timing.completion_ms,
+                "queue_ms": _canonical.timing.queue_ms,
+            }
+        if _canonical.overflow:
+            _can_dict["overflow_keys"] = list(_canonical.overflow.keys())[:30]
+        full_metadata["canonical"] = _can_dict
+
     record = build_execution_record(
         call=call, model_response=model_response, attestation_id=params.attestation_id,
         policy_version=params.policy_version,
         policy_result=params.policy_result,
         tenant_id=settings.gateway_tenant_id, gateway_id=settings.gateway_id,
         user=call.metadata.get("user"), session_id=session_id,
-        metadata={
-            **call.metadata, **params.audit_metadata, **tool_meta,
-            "response_policy_version": params.rp_version,
-            "response_policy_result": params.rp_result,
-            "analyzer_decisions": params.rp_decisions,
-            "token_usage": model_response.usage,
-            "budget_remaining": params.budget_remaining,
-            "enforcement_mode": settings.enforcement_mode,
-        },
+        metadata=full_metadata,
         model_id=call.model_id, provider=params.provider,
         latency_ms=params.latency_ms,
         timings=params.timings,
@@ -1681,6 +1431,65 @@ async def _build_and_write_record(
     record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
     if params.timings is not None:
         params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
+
+    # ── Consistency check (inline, < 1ms) ───────────────────────────
+    _consistency_tracker = getattr(ctx, "consistency_tracker", None)
+    if _consistency_tracker:
+        try:
+            _con_result = _consistency_tracker.check(
+                prompt=record.get("prompt_text", ""),
+                response=record.get("response_content", ""),
+                model_id=record.get("model_id", ""),
+                execution_id=record.get("execution_id", ""),
+                session_id=session_id or "",
+                user=record.get("user", ""),
+            )
+            if _con_result:
+                meta = record.get("metadata") or {}
+                meta["consistency_check"] = {
+                    "compared_with": _con_result.execution_id_a[:12],
+                    "prompt_similarity": _con_result.prompt_similarity,
+                    "response_similarity": _con_result.response_similarity,
+                    "consistent": _con_result.consistent,
+                }
+                if not _con_result.consistent:
+                    meta.setdefault("anomalies", []).append("consistency_flag")
+                record["metadata"] = meta
+        except Exception as _ct_err:
+            logger.debug("Consistency check failed (non-fatal): %s", _ct_err)
+
+    # ── Anomaly detection (inline, < 2ms) ────────────────────────────
+    _anomaly_detector = getattr(ctx, "anomaly_detector", None)
+    if _anomaly_detector:
+        try:
+            _anomaly_report = _anomaly_detector.detect(record)
+            if _anomaly_report.to_list():
+                meta = record.get("metadata") or {}
+                meta["anomalies"] = _anomaly_report.to_list()
+                record["metadata"] = meta
+        except Exception as _ad_err:
+            logger.debug("Anomaly detection failed (non-fatal): %s", _ad_err)
+
+    # ── Self-healing overflow (capture unknown response fields) ──────
+    _schema_mapper = getattr(ctx, "schema_mapper", None)
+    _field_registry = getattr(ctx, "field_registry", None)
+    if _schema_mapper and _field_registry:
+        try:
+            _canonical = getattr(request.state, "_canonical_response", None)
+            if _canonical and _canonical.overflow:
+                from gateway.schema.overflow import build_overflow_envelope
+                _overflow_env = build_overflow_envelope(
+                    _canonical.overflow,
+                    provider=record.get("provider", "unknown"),
+                    registry=_field_registry,
+                )
+                if _overflow_env:
+                    meta = record.get("metadata") or {}
+                    meta["_overflow"] = _overflow_env
+                    record["metadata"] = meta
+        except Exception as _of_err:
+            logger.debug("Overflow capture failed (non-fatal): %s", _of_err)
+
     await _store_execution(record, request, ctx)
     # Expose governance metadata for response headers (Phase 23)
     request.state.walacor_chain_seq = record.get("sequence_number")
@@ -1723,6 +1532,27 @@ async def _build_and_write_record(
         except Exception:
             logger.debug("Audit exporter failed (non-critical)", exc_info=True)
 
+    # ── Background LLM intelligence (fire-and-forget, zero latency) ──
+    _intel_worker = getattr(ctx, "intelligence_worker", None)
+    if _intel_worker:
+        try:
+            from gateway.intelligence.worker import IntelligenceJob
+            _meta = record.get("metadata") or {}
+            _audit = _meta.get("walacor_audit") or {}
+            job = IntelligenceJob(
+                execution_id=record["execution_id"],
+                prompt_text=record.get("prompt_text") or "",
+                response_content=record.get("response_content") or "",
+                model_id=record.get("model_id") or "",
+                session_id=session_id or "",
+                intent=_meta.get("_intent", "normal"),
+                intent_confidence=_meta.get("_intent_confidence", 1.0),
+                conversation_turns=_audit.get("conversation_turns", 1),
+            )
+            await _intel_worker.enqueue(job)
+        except Exception:
+            pass  # Truly fire-and-forget
+
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
@@ -1751,7 +1581,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     is_audit_only = settings.enforcement_mode == "audit_only"
 
     if request.method != "POST":
-        _set_disposition(request, "error_method_not_allowed")
+        _set_disposition(
+            request,
+            "error_method_not_allowed",
+            reason=f"only POST accepted; got {request.method} on {request.url.path}",
+        )
         _inc_request("unknown", "unknown", "error")
         resp = JSONResponse({"error": "Method not allowed"}, status_code=405)
         _record_status(405)
@@ -1760,7 +1594,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     model_hint = await _peek_model_id(request) if get_settings().model_routes else ""
     adapter = _resolve_adapter(request.url.path, model_hint)
     if not adapter:
-        _set_disposition(request, "error_no_adapter")
+        _set_disposition(
+            request,
+            "error_no_adapter",
+            reason=f"no adapter registered for path={request.url.path} model_hint={model_hint or '?'}",
+        )
         _inc_request("unknown", "unknown", "error")
         resp = JSONResponse({"error": "No adapter for this path"}, status_code=404)
         _record_status(404)
@@ -1770,7 +1608,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         call = await adapter.parse_request(request)
     except Exception as e:
         logger.warning("parse_request failed: %s", e)
-        _set_disposition(request, "error_parse")
+        _set_disposition(request, "error_parse", reason=f"adapter parse_request failed: {e}")
         _inc_request("unknown", "unknown", "error")
         resp = JSONResponse({"error": "Invalid request body"}, status_code=400)
         _record_status(400)
@@ -1812,10 +1650,17 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             call.prompt_text or "", dict(request.headers), body_dict)
     else:
         extra["request_type"] = _classify_request_type(call.prompt_text or "")
-    # Propagate OpenWebUI message ID for per-message audit correlation
+    # Propagate OpenWebUI message/chat IDs for per-message audit correlation
     msg_id = request.headers.get("x-openwebui-message-id")
     if msg_id:
         extra["message_id"] = msg_id
+    # Also check body metadata for chat_id/message_id (from Walacor filter plugin)
+    _body_meta_ids = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
+    if isinstance(_body_meta_ids, dict):
+        if not msg_id and _body_meta_ids.get("message_id"):
+            extra["message_id"] = _body_meta_ids["message_id"]
+        if _body_meta_ids.get("chat_id"):
+            extra["chat_id"] = _body_meta_ids["chat_id"]
     # Merge caller identity from middleware (JWT or header-based).
     # Second-pass: if middleware didn't resolve identity (no headers),
     # try body metadata (OpenWebUI plugin injects user info there).
@@ -1856,6 +1701,74 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     except Exception:
         logger.debug("Audit classifier skipped", exc_info=True)
 
+    # ── File/attachment extraction ─────────────────────────────────────────
+    # Extract images from base64 content blocks + OpenWebUI file metadata.
+    # Stores metadata (hash, mimetype, size) in request.state.file_metadata
+    # so build_execution_record picks it up for the audit trail.
+    _file_metadata: list[dict] = []
+    _body = body_dict if isinstance(body_dict, dict) else {}
+    try:
+        from gateway.middleware.attachment_tracker import (
+            extract_images_from_messages,
+            extract_openwebui_files,
+        )
+        _messages = _body.get("messages", [])
+        if _messages:
+            _extracted_images = extract_images_from_messages(_messages)
+            for img in _extracted_images:
+                _file_metadata.append({
+                    "filename": f"image_{img['index']}.{(img.get('mimetype') or 'png').split('/')[-1]}",
+                    "mimetype": img.get("mimetype", "image/png"),
+                    "size_bytes": img.get("size_bytes", 0),
+                    "hash_sha3_512": img.get("hash_sha3_512", ""),
+                    "source": "inline_base64",
+                })
+            # Run OCR + PII scan on extracted images if analyzer is available
+            if _extracted_images and ctx.image_ocr_analyzer is not None:
+                try:
+                    from gateway.content.image_ocr import evaluate_image_ocr
+                    _blocked, _block_resp, _ocr_results = await evaluate_image_ocr(
+                        ctx.image_ocr_analyzer, _extracted_images,
+                    )
+                    # Merge OCR results into file metadata
+                    for ocr_r in _ocr_results:
+                        idx = ocr_r.get("image_index", 0)
+                        if idx < len(_file_metadata):
+                            _file_metadata[idx].update({
+                                k: v for k, v in ocr_r.items()
+                                if k.startswith("ocr_")
+                            })
+                    if _blocked and _block_resp is not None:
+                        request.state.file_metadata = _file_metadata
+                        _set_disposition(
+                            request,
+                            "blocked_image_pii",
+                            reason="OCR PII detected in attached image(s); see file_metadata for details",
+                        )
+                        _inc_request(provider, model, "blocked")
+                        return _block_resp
+                except Exception:
+                    logger.debug("Image OCR analysis failed (non-blocking)", exc_info=True)
+
+        _owui_files = extract_openwebui_files(_body)
+        _file_metadata.extend(_owui_files)
+
+        # Correlate with webhook notification cache if available
+        if _file_metadata and ctx.attachment_cache is not None:
+            for fm in _file_metadata:
+                fh = fm.get("hash_sha3_512")
+                if fh:
+                    cached = ctx.attachment_cache.get(fh)
+                    if cached:
+                        fm["filename"] = cached.get("filename", fm.get("filename", ""))
+                        fm["upload_source"] = cached.get("source", "")
+    except Exception:
+        logger.debug("File extraction skipped", exc_info=True)
+
+    if _file_metadata:
+        request.state.file_metadata = _file_metadata
+        logger.info("Extracted %d file(s)/image(s) from request", len(_file_metadata))
+
     call = dataclasses.replace(call, metadata={**call.metadata, **extra})
 
     # ── B.9: A/B model testing — rewrite model before adapter resolution ──────
@@ -1881,13 +1794,83 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     _test_name, _original_model, _resolved_model,
                 )
 
-    # ── System task detection: skip audit for auto-generated requests ────────
-    _req_type = extra.get("request_type", "user_message")
-    if settings.skip_system_task_audit and isinstance(_req_type, str) and _req_type.startswith("system_task:"):
-        request.state.skip_audit = True
-        logger.debug("System task detected (%s) — will skip audit record", _req_type)
+    # ── Unified Schema Intelligence ─────────────────────────────────────
+    # Single decision point: extract prompt, classify intent, and enrich
+    # metadata. Replaces scattered IntentClassifier + audit_classifier
+    # + _concat_messages with one coherent system.
+    _body_meta = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
 
     ctx = get_pipeline_context()
+    from gateway.classifier.unified import SchemaIntelligence, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG, NORMAL
+    _si = getattr(ctx, "schema_intelligence", None)
+    if _si is None:
+        _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
+                        and settings.mcp_servers_json)
+        _onnx_path = str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+        _si = SchemaIntelligence(onnx_model_path=_onnx_path, has_mcp_tools=_has_mcp)
+        ctx.schema_intelligence = _si
+
+    # Build metadata context for intent classification
+    _intent_metadata = {**call.metadata}
+    if isinstance(_body_meta, dict):
+        _intent_metadata["_body_metadata"] = _body_meta
+
+    # Extract messages from request body for prompt extraction
+    _body = body_dict if isinstance(body_dict, dict) else {}
+    _messages = _body.get("messages", [])
+
+    # process_request() does prompt extraction + intent classification in one pass
+    # Wrapped in try/except — SI failure must NEVER block the request pipeline
+    _si_enrichment: dict[str, Any] = {}
+    try:
+        _si_enrichment = _si.process_request(
+            messages=_messages,
+            metadata=_intent_metadata,
+            model_id=call.model_id or "",
+        )
+    except Exception as _si_err:
+        logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
+
+    # Override prompt_text with the extracted user question (THE KEY FIX)
+    # _concat_messages in adapters joins ALL messages — we replace that
+    # with just the actual question the user asked.
+    _user_question = _si_enrichment.get("user_question", "")
+    if _user_question:
+        call = dataclasses.replace(call, prompt_text=_user_question)
+
+    # Update walacor_audit with better prompt extraction data
+    _existing_audit = extra.get("walacor_audit", {})
+    _existing_audit["user_question"] = _si_enrichment.get("user_question", _existing_audit.get("user_question", ""))
+    _existing_audit["conversation_context"] = _si_enrichment.get("conversation_context", "")
+    _existing_audit["conversation_turns"] = _si_enrichment.get("conversation_turns", 0)
+    _existing_audit["question_fingerprint"] = _si_enrichment.get("question_fingerprint", "")
+    _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "fallback")
+    _existing_audit["has_rag_context"] = _si_enrichment.get("has_rag_context", _existing_audit.get("has_rag_context", False))
+    _existing_audit["has_files"] = _si_enrichment.get("has_files", _existing_audit.get("has_files", False))
+    extra["walacor_audit"] = _existing_audit
+
+    # Merge intent + routing into call metadata
+    _meta_updates: dict[str, Any] = {
+        k: v for k, v in _si_enrichment.items()
+        if k.startswith("_") or k in ("chat_id", "message_id")
+    }
+    if isinstance(_body_meta, dict):
+        if _body_meta.get("chat_id"):
+            _meta_updates["chat_id"] = _body_meta["chat_id"]
+        if _body_meta.get("message_id"):
+            _meta_updates["message_id"] = _body_meta["message_id"]
+
+    call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
+
+    logger.info(
+        "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s prompt=%d chars",
+        _si_enrichment.get("_intent", "unknown"),
+        _si_enrichment.get("_intent_confidence", 0.0),
+        _si_enrichment.get("_intent_tier", ""),
+        _si_enrichment.get("_intent_reason", ""),
+        call.model_id,
+        len(_user_question),
+    )
     provider = adapter.get_provider_name()
     model = call.model_id or "unknown"
     provider_var.set(provider)
@@ -1934,22 +1917,14 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         except Exception:
             logger.debug("Metric increment failed (cache_misses)", exc_info=True)
 
-    # Active tool strategy requires non-streaming: we need to intercept the
-    # response, execute tools, and loop before returning anything to the client.
+    # Active tool strategy: force non-streaming for the tool loop (need full
+    # response to parse tool_calls). The final answer is re-streamed by
+    # tool_executor if the original request was streaming.
+    _original_streaming = call.is_streaming
     if pre.tool_strategy == "active" and call.is_streaming:
-        try:
-            body = json.loads(call.raw_body)
-            body["stream"] = False
-            call = dataclasses.replace(
-                call, is_streaming=False, raw_body=json.dumps_bytes(body)
-            )
-            logger.debug("Active tool strategy: overriding stream=False for %s/%s", provider, model)
-        except Exception:
-            logger.warning(
-                "Active tool strategy: failed to override stream=False for %s/%s — "
-                "tool loop will be skipped; proceeding on streaming path",
-                provider, model, exc_info=True,
-            )
+        from gateway.pipeline.tool_executor import _force_non_streaming
+        call = _force_non_streaming(call)
+        logger.debug("Active tool strategy: stream=False for tool loop %s/%s", provider, model)
 
     # ── Step 2.9: PII Sanitization (pre-forward, non-streaming only) ─────────
     # Strip high-risk PII from the prompt before it reaches the LLM.
@@ -1981,7 +1956,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 "Adaptive concurrency limit reached for provider=%s limit=%d inflight=%d",
                 provider, limiter.limit, limiter.inflight,
             )
-            _set_disposition(request, "error_overloaded")
+            _set_disposition(
+                request,
+                "error_overloaded",
+                reason=f"adaptive concurrency limit reached for provider={provider} (limit={limiter.limit}, inflight={limiter.inflight})",
+            )
             _inc_request(provider, model, "overloaded")
             _record_status(503)
             return JSONResponse(
@@ -2007,14 +1986,9 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
 
     # ── Step 3: Forward ───────────────────────────────────────────────────────
     if call.is_streaming:
-        # For streaming, we do a quick non-streaming probe only if tools were
-        # injected and the model might not support them.  Actually, the easier
-        # path: strip tools from streaming requests and let the stream proceed;
-        # tool-loop already forces non-streaming for active strategy.  If we
-        # reach here with is_streaming=True and tools injected, it means the
-        # active strategy override failed — just strip tools to be safe.
+        # If we reach here streaming with active strategy, the override failed — strip tools
         if pre.tool_strategy == "active":
-            call = _strip_tools_from_call(call)
+            call = strip_tools_from_call(call)
         _set_disposition(request, "allowed")
         buf: list[bytes] = []
         governance_meta: dict = {
@@ -2070,27 +2044,94 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     else:
         http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
 
-    # ── Tool-unsupported retry: if the model rejects tools, strip and retry ──
-    if _is_tool_unsupported_error(http_response.status_code, bytes(http_response.body)):
-        if ctx.capability_registry:
-            ctx.capability_registry.record(call.model_id, supports_tools=False, provider=provider)
-        else:
-            _record_model_capability(call.model_id, supports_tools=False)
-        logger.info(
-            "Model %s does not support tools — retrying without tool definitions",
-            call.model_id,
-        )
-        call = _strip_tools_from_call(call)
-        pre = dataclasses.replace(pre, tool_strategy="none")
-        http_response, model_response, _used_fallback = await _forward_with_resilience(adapter, call, request)
-    elif pre.tool_strategy == "active" and http_response.status_code < 400:
-        # Model accepted tools successfully — cache this
-        if ctx.capability_registry:
-            ctx.capability_registry.record(call.model_id, supports_tools=True, provider=provider)
-        else:
-            _record_model_capability(call.model_id, supports_tools=True)
+    # ── Tool-unsupported retry: handled by execute_tools() below ──
 
     model_response = await _maybe_fetch_ollama_hash(adapter, call, model_response, ctx)
+    # Use unified SchemaIntelligence for response normalization
+    _si = getattr(ctx, "schema_intelligence", None)
+    _pre_norm_content = model_response.content
+    try:
+        if _si:
+            model_response, _norm_report = _si.process_response(model_response, provider)
+            if _norm_report.changes:
+                logger.debug("Normalization: %s", "; ".join(_norm_report.changes))
+        else:
+            from gateway.pipeline.normalizer import normalize_model_response
+            model_response = normalize_model_response(model_response, provider)
+    except Exception as _norm_err:
+        logger.error("Response normalization failed (non-fatal): %s", _norm_err)
+
+    # ── SchemaMapper ML cross-validation ─────────────────────────────
+    # Run the ONNX schema mapper on the raw response to cross-validate
+    # adapter parsing and capture overflow fields the adapter missed.
+    _schema_mapper = getattr(ctx, "schema_mapper", None)
+    if _schema_mapper is None:
+        try:
+            from gateway.schema.mapper import SchemaMapper
+            _schema_mapper = SchemaMapper()
+            ctx.schema_mapper = _schema_mapper
+        except Exception as _sm_init_err:
+            logger.debug("SchemaMapper init failed (non-fatal): %s", _sm_init_err)
+    if _schema_mapper and http_response.status_code < 400:
+        try:
+            _raw_resp = json.loads(http_response.body)
+            _canonical = _schema_mapper.map_response(_raw_resp)
+
+            # Cross-validate: if adapter found no usage but ML did, enrich
+            _adapter_usage = model_response.usage or {}
+            if not _adapter_usage.get("prompt_tokens") and _canonical.usage.prompt_tokens:
+                _adapter_usage = dict(_adapter_usage)
+                _adapter_usage["prompt_tokens"] = _canonical.usage.prompt_tokens
+                _adapter_usage["completion_tokens"] = _canonical.usage.completion_tokens
+                _adapter_usage["total_tokens"] = _canonical.usage.total_tokens
+                model_response = dataclasses.replace(model_response, usage=_adapter_usage)
+                logger.info("SchemaMapper enriched missing token usage from ML classification")
+
+            # If adapter found no content but ML did (edge case)
+            if not model_response.content and _canonical.content:
+                model_response = dataclasses.replace(model_response, content=_canonical.content)
+                logger.info("SchemaMapper recovered content from ML classification")
+
+            # If adapter found no thinking_content but ML did
+            if not model_response.thinking_content and _canonical.thinking_content:
+                model_response = dataclasses.replace(model_response, thinking_content=_canonical.thinking_content)
+                logger.info("SchemaMapper recovered thinking_content from ML classification")
+
+            # Store canonical response for overflow capture in _build_and_write_record
+            request.state._canonical_response = _canonical
+
+            # Store ML mapping metadata for audit trail
+            _mapping_meta = {
+                "schema_mapper_confidence": round(_canonical._mapping_confidence, 3),
+                "schema_mapper_mapped": len(_canonical._mapped_fields),
+                "schema_mapper_unmapped": len(_canonical._unmapped_fields),
+            }
+            if _canonical.overflow:
+                _mapping_meta["schema_mapper_overflow_keys"] = list(_canonical.overflow.keys())[:20]
+            if _canonical.timing:
+                _mapping_meta["schema_mapper_timing"] = dataclasses.asdict(_canonical.timing)
+            if _canonical.citations:
+                _mapping_meta["schema_mapper_citations"] = len(_canonical.citations)
+
+            call = dataclasses.replace(call, metadata={**call.metadata, **_mapping_meta})
+        except Exception as _sm_err:
+            logger.debug("SchemaMapper cross-validation failed (non-fatal): %s", _sm_err)
+    # If normalizer changed content (e.g. thinking fallback for qwen3), rebuild the
+    # client response body so the user sees the actual content, not the raw empty string.
+    if model_response.content and model_response.content != _pre_norm_content and http_response.status_code == 200:
+        try:
+            resp_data = json.loads(http_response.body)
+            if "choices" in resp_data and resp_data["choices"]:
+                resp_data["choices"][0].setdefault("message", {})["content"] = model_response.content
+                rebuilt_headers = {k: v for k, v in http_response.headers.items()
+                                   if k.lower() not in ("content-length", "transfer-encoding")}
+                http_response = Response(
+                    content=json.dumps_bytes(resp_data),
+                    status_code=http_response.status_code,
+                    headers=rebuilt_headers,
+                )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
     fwd_rtt = time.perf_counter() - t_fwd
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
     forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)
@@ -2111,7 +2152,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         _concurrency_limiter.release(fwd_rtt)
 
     if http_response.status_code >= 500:
-        _set_disposition(request, "error_provider")
+        _set_disposition(
+            request,
+            "error_provider",
+            reason=f"{provider} returned HTTP {http_response.status_code} for model {model}",
+        )
         _inc_request(provider, model, "error")
         _record_status(http_response.status_code, source="provider")
         await _record_token_usage(
@@ -2129,12 +2174,21 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
         return http_response
 
-    # ── Step 3.5: Tool strategy router ───────────────────────────────────────
-    tool_result = await _route_tool_strategy(
-        pre.tool_strategy, model_response, call, adapter, ctx, settings, request, provider
+    # ── Step 3.5: Tool executor (handles retry, capability cache, active loop) ─
+    tool_result = await execute_tools(
+        pre.tool_strategy, call, model_response, http_response,
+        adapter, request, ctx, settings, provider,
+        original_streaming=_original_streaming,
     )
+    # If tool executor retried without tools, update our references
+    if tool_result.http_response is not None and tool_result.http_response is not http_response:
+        http_response = tool_result.http_response
     if tool_result.error is not None:
-        _set_disposition(request, "error_provider")
+        _set_disposition(
+            request,
+            "error_provider",
+            reason=f"tool executor error for provider={provider} model={model} after {tool_result.iterations} iteration(s)",
+        )
         _inc_request(provider, model, "error")
         _record_status(500)
         await _record_token_usage(
@@ -2154,8 +2208,30 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         return tool_result.error
 
     call, model_response = tool_result.call, tool_result.model_response
-    # If the active tool loop ran and produced a final HTTP response, use it instead of the
-    # original http_response (which still has finish_reason=tool_calls from the first forward).
+
+    # If the tool executor streamed the final answer, return it directly
+    # (with after-stream background task for audit record writing).
+    if tool_result.streaming_response is not None and tool_result.stream_buffer is not None:
+        buf = tool_result.stream_buffer
+        _prebuilt = tool_result.model_response if tool_result.synthetic_stream else None
+        task = BackgroundTask(
+            _after_stream_record, buf, call, adapter,
+            pre.att_id, pre.pv, pre.pr,
+            {**pre.audit_metadata, **build_tool_audit_metadata(tool_result.interactions, pre.tool_strategy, tool_result.iterations)},
+            pre.budget_estimated, t0, None, request,
+            prebuilt_model_response=_prebuilt,
+        )
+        tool_result.streaming_response.background = task
+        if _concurrency_acquired and _concurrency_limiter is not None:
+            _concurrency_limiter.release(time.perf_counter() - t0)
+        pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
+        outcome = "audit_only_allowed" if (is_audit_only and pre.whb) else "allowed"
+        _set_disposition(request, "allowed")
+        _inc_request(provider, model, outcome)
+        _record_status(200, source="provider")
+        return tool_result.streaming_response
+
+    # If the active tool loop ran and produced a final HTTP response, use it
     if tool_result.http_response is not None:
         http_response = tool_result.http_response
 

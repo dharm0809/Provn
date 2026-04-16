@@ -121,7 +121,7 @@ class GenericAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list, data)
 
         fmt = _detect_request_format(data) if self._auto_detect else "unknown"
 

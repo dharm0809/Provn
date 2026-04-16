@@ -40,23 +40,52 @@ class SessionChainTracker:
 
     async def next_chain_values(self, session_id: str) -> tuple[int, str]:
         """
-        Return (sequence_number, previous_record_hash) for the next record in this session.
+        Atomically reserve and return (sequence_number, previous_record_hash)
+        for the next record in this session.
         First record in a new session returns (0, GENESIS_HASH).
+
+        The sequence number is incremented immediately under the lock so that
+        concurrent requests to the same session get distinct values. The hash
+        is updated later via update(). A sequence gap (from a failed request)
+        is acceptable; duplicate sequence numbers corrupt the Merkle chain.
         """
+        now = datetime.now(timezone.utc)
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
+                # Reserve seq 0 — create placeholder state
+                self._sessions[session_id] = SessionState(
+                    session_id=session_id,
+                    last_sequence_number=0,
+                    last_record_hash=_GENESIS_HASH,
+                    last_activity=now,
+                )
+                self._sessions.move_to_end(session_id)
                 return 0, _GENESIS_HASH
+            next_seq = state.last_sequence_number + 1
+            prev_hash = state.last_record_hash
+            # Reserve this sequence number immediately
+            state.last_sequence_number = next_seq
+            state.last_activity = now
             self._sessions.move_to_end(session_id)
-            return state.last_sequence_number + 1, state.last_record_hash
+            return next_seq, prev_hash
 
     async def update(self, session_id: str, sequence_number: int, record_hash: str) -> None:
-        """Record the chain state after a WAL write. Evicts stale sessions when over limit."""
+        """Record the chain hash after a WAL write. Evicts stale sessions when over limit.
+
+        Uses max(current, incoming) for sequence_number so that a slow request's
+        update() cannot regress the counter that a faster concurrent request
+        already advanced via next_chain_values().
+        """
         now = datetime.now(timezone.utc)
         async with self._lock:
+            existing = self._sessions.get(session_id)
+            # Never regress the sequence number — a concurrent next_chain_values()
+            # may have already advanced it past what this update() carries.
+            effective_seq = max(sequence_number, existing.last_sequence_number) if existing else sequence_number
             self._sessions[session_id] = SessionState(
                 session_id=session_id,
-                last_sequence_number=sequence_number,
+                last_sequence_number=effective_seq,
                 last_record_hash=record_hash,
                 last_activity=now,
             )
@@ -76,6 +105,23 @@ class SessionChainTracker:
         # If still over limit, pop from front (oldest in LRU order) — O(1)
         while len(self._sessions) > self._max:
             self._sessions.popitem(last=False)
+
+    def warm(self, sessions: list[tuple[str, int, str]]) -> None:
+        """Bulk-load session chain state on startup (e.g. from WAL).
+
+        *sessions* is a list of (session_id, last_sequence_number, last_record_hash).
+        Called synchronously during startup before any requests, so no lock needed.
+        """
+        now = datetime.now(timezone.utc)
+        for sid, seq, hash_val in sessions:
+            self._sessions[sid] = SessionState(
+                session_id=sid,
+                last_sequence_number=seq,
+                last_record_hash=hash_val,
+                last_activity=now,
+            )
+        if sessions:
+            logger.info("Session chain warmed with %d sessions from WAL", len(sessions))
 
     def active_session_count(self) -> int:
         return len(self._sessions)
@@ -105,12 +151,12 @@ class RedisSessionChainTracker:
         return f"gateway:session:{session_id}"
 
     async def next_chain_values(self, session_id: str) -> tuple[int, str]:
-        """Read-only peek: returns (next_seq, prev_hash) without modifying Redis.
+        """Atomically reserve next sequence number and return (next_seq, prev_hash).
 
-        Reads the last stored seq, returns last_seq + 1 (0 for a new session),
-        matching in-memory SessionChainTracker.  No mutation happens here —
-        update() atomically writes both seq and hash after a successful write.
-        This eliminates orphan sequence-number gaps on write failure (Finding 3).
+        Uses HINCRBY to atomically increment the sequence counter so concurrent
+        requests to the same session get distinct values. The hash is read in
+        the same pipeline. A sequence gap from a failed request is acceptable;
+        duplicate sequence numbers corrupt the Merkle chain.
 
         Raises on Redis error — callers must catch and skip chain fields rather
         than forging (0, GENESIS_HASH) for an established session, which would
@@ -118,12 +164,12 @@ class RedisSessionChainTracker:
         """
         key = self._key(session_id)
         async with self._r.pipeline(transaction=True) as pipe:
-            pipe.hget(key, self._HASH_FIELD_SEQ)
+            pipe.hincrby(key, self._HASH_FIELD_SEQ, 1)
             pipe.hget(key, self._HASH_FIELD_HASH)
             pipe.expire(key, self._ttl)
-            raw_seq, raw_hash, _ = await pipe.execute()
-        last_seq = int(raw_seq) if raw_seq else -1
-        seq_num = last_seq + 1  # 0 for the first record (matches in-memory; Finding 1)
+            new_seq_raw, raw_hash, _ = await pipe.execute()
+        # HINCRBY returns the value AFTER increment. First call: 0→1, so seq_num = 1-1 = 0
+        seq_num = int(new_seq_raw) - 1
         prev_hash = (
             (raw_hash.decode() if isinstance(raw_hash, bytes) else raw_hash)
             if raw_hash else GENESIS_HASH

@@ -49,20 +49,21 @@ _OLLAMA_NATIVE_PARAMS = (
 async def _fetch_model_digest_raw(
     base_url: str, model_name: str, client: httpx.AsyncClient | None = None
 ) -> str | None:
-    """Call Ollama /api/show and return the digest string. No caching — callers handle it."""
-    url = f"{base_url.rstrip('/')}/api/show"
+    """Fetch model digest from Ollama /api/tags listing. No caching — callers handle it."""
+    url = f"{base_url.rstrip('/')}/api/tags"
     try:
         if client is not None:
-            resp = await client.post(url, json={"name": model_name}, timeout=5.0)
+            resp = await client.get(url, timeout=5.0)
         else:
             async with httpx.AsyncClient() as c:
-                resp = await c.post(url, json={"name": model_name}, timeout=5.0)
+                resp = await c.get(url, timeout=5.0)
         if resp.status_code == 200:
             data = resp.json()
-            # Ollama returns digest under "details.digest" or top-level "digest"
-            digest = (data.get("details") or {}).get("digest") or data.get("digest")
-            if digest:
-                return str(digest)
+            for m in data.get("models", []):
+                if m.get("name") == model_name or m.get("model") == model_name:
+                    digest = m.get("digest")
+                    if digest:
+                        return str(digest)
     except Exception as e:
         logger.warning("Failed to fetch Ollama model digest for %s: %s", model_name, e)
     return None
@@ -134,7 +135,7 @@ class OllamaAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list, data)
 
         # OpenAI-standard inference params
         params = _extract_inference_params(data)
@@ -200,9 +201,17 @@ class OllamaAdapter(ProviderAdapter):
             elif content:
                 content, thinking_content = strip_thinking_tokens(content)
 
+        usage = data.get("usage")
+        if usage:
+            # Normalize cache fields to match OpenAI structure so downstream
+            # (hasher, lineage, dashboard) always sees cache_hit/cached_tokens.
+            from gateway.adapters.caching import detect_cache_hit
+            cache_info = detect_cache_hit(usage)
+            usage = {**usage, **cache_info}
+
         return ModelResponse(
             content=content,
-            usage=data.get("usage"),
+            usage=usage,
             raw_body=response.content,
             provider_request_id=data.get("id"),
             tool_interactions=tool_interactions if tool_interactions else None,
@@ -246,9 +255,15 @@ class OllamaAdapter(ProviderAdapter):
             elif joined:
                 joined, thinking_content = strip_thinking_tokens(joined)
 
+        usage = state.get("usage")
+        if usage:
+            from gateway.adapters.caching import detect_cache_hit
+            cache_info = detect_cache_hit(usage)
+            usage = {**usage, **cache_info}
+
         return ModelResponse(
             content=joined,
-            usage=state.get("usage"),
+            usage=usage,
             raw_body=b"".join(chunks),
             provider_request_id=state["provider_request_id"],
             tool_interactions=tool_interactions if tool_interactions else None,

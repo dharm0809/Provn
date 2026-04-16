@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 _RAG_PATTERNS = re.compile(
     r"\[context\]|\[source\]|\[document\]|<context>|<document>"
     r"|use the following context|based on the provided context"
-    r"|here are the relevant",
+    r"|based on the following"
+    r"|here are the relevant|here is the relevant"
+    r"|according to the provided|given the following"
+    r"|reference material|internal documentation"
+    r"|retrieved documents|search results"
+    r"|knowledge base|context window"
+    r"|\bRAG\b|retrieved context",
     re.IGNORECASE,
 )
 

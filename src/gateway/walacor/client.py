@@ -188,19 +188,28 @@ class WalacorClient:
 
     # ── Public write methods ─────────────────────────────────────────────────
 
-    # Fields defined in the Walacor gateway_executions schema (ETId 9000011).
+    # Fields defined in the Walacor gateway_executions schema (ETId 9000021).
     # Records with unknown fields are silently rejected (HTTP 200 + success:false).
-    # Session chain fields (record_hash, previous_record_hash, sequence_number) and
-    # response policy fields are in the local WAL but NOT yet in the Walacor schema.
-    # They can be added via schema versioning when the Walacor admin UI supports it.
+    # Run scripts/setup_walacor_schemas.py to create schemas with all fields.
     _EXECUTION_SCHEMA_FIELDS = frozenset({
+        # Core identity
         "execution_id", "model_attestation_id", "model_id", "provider",
-        "policy_version", "policy_result", "tenant_id", "gateway_id",
-        "timestamp", "user", "session_id", "metadata_json", "prompt_text",
-        "response_content", "provider_request_id", "model_hash",
-        "thinking_content", "latency_ms", "prompt_tokens", "completion_tokens",
-        "total_tokens", "cache_hit", "cached_tokens", "cache_creation_tokens",
-        "retry_of", "variant_id",
+        "tenant_id", "gateway_id", "timestamp", "user", "session_id",
+        # Policy
+        "policy_version", "policy_result",
+        # Content
+        "prompt_text", "response_content", "thinking_content", "metadata_json",
+        # Provider details
+        "provider_request_id", "model_hash",
+        # Token usage
+        "prompt_tokens", "completion_tokens", "total_tokens",
+        "cached_tokens", "cache_creation_tokens", "cache_hit", "latency_ms",
+        # Session chain (Merkle integrity)
+        "sequence_number", "record_hash", "previous_record_hash", "record_signature",
+        # Tool awareness
+        "tool_strategy", "tool_count",
+        # Routing
+        "variant_id", "retry_of",
     })
 
     async def write_execution(self, record: ExecutionRecord | dict[str, Any]) -> None:
@@ -215,9 +224,40 @@ class WalacorClient:
             data = dict(record)
         else:
             data = record.model_dump(mode="json")
+        # Schema validation: ensure all fields have correct types before write
+        from gateway.classifier.schema import validate_execution
+        data = validate_execution(data)
         meta = data.pop("metadata", None)
+        fm = data.pop("file_metadata", None)
+        # Extract tool_strategy and tool_count from metadata to top-level fields
         if meta:
-            data["metadata_json"] = json.dumps(meta)
+            if meta.get("tool_strategy") and "tool_strategy" not in data:
+                data["tool_strategy"] = meta["tool_strategy"]
+            if meta.get("tool_interaction_count") and "tool_count" not in data:
+                data["tool_count"] = meta["tool_interaction_count"]
+        # Store file_metadata inside metadata (no separate Walacor schema field needed)
+        if fm and meta:
+            meta["file_metadata"] = fm
+        elif fm:
+            meta = {"file_metadata": fm}
+        if meta:
+            # Strip bulky OpenWebUI-injected fields that bloat metadata_json
+            for _strip_key in ("features", "tool_ids", "files", "variables",
+                               "params", "knowledge", "citations"):
+                meta.pop(_strip_key, None)
+            raw = json.dumps(meta)
+            # Walacor schema field limit — truncate to prevent write rejection
+            if len(raw) > 4000:
+                # Keep essential audit fields, drop the rest
+                _keep = {"session_id", "prompt_id", "client_context", "request_type",
+                         "user", "identity_source", "walacor_audit", "_intent",
+                         "_intent_confidence", "_intent_tier", "_intent_reason",
+                         "chat_id", "user_email", "user_name",
+                         "tool_strategy", "tool_interaction_count", "tool_interactions",
+                         "sequence_number", "record_hash", "previous_record_hash"}
+                meta = {k: v for k, v in meta.items() if k in _keep}
+                raw = json.dumps(meta)
+            data["metadata_json"] = raw
         # Strip fields not in the Walacor schema (timings, cache_hit, etc.)
         data = {k: v for k, v in data.items()
                 if v is not None and k in self._EXECUTION_SCHEMA_FIELDS}
@@ -243,6 +283,7 @@ class WalacorClient:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Persist one gateway_attempts row to Walacor (ETId=walacor_attempts_etid).
 
@@ -265,6 +306,8 @@ class WalacorClient:
             record["execution_id"] = execution_id
         if user:
             record["user"] = user
+        if reason:
+            record["reason"] = reason
         try:
             await self._submit(self._attempts_etid, [record])
             logger.debug(
@@ -278,12 +321,18 @@ class WalacorClient:
             )
             # Swallow — attempt records are best-effort
 
-    # Fields defined in the Walacor gateway_tool_events schema (ETId 9000013).
+    # Fields defined in the Walacor gateway_tool_events schema (ETId 9000023).
+    # Run scripts/setup_walacor_schemas.py to create schemas with all fields.
     _TOOL_EVENT_SCHEMA_FIELDS = frozenset({
+        # Identity
         "event_id", "execution_id", "session_id", "tenant_id", "gateway_id",
-        "timestamp", "tool_name", "tool_type", "tool_source", "input_data",
-        "input_hash", "output_data", "output_hash", "duration_ms", "iteration",
-        "is_error", "content_analysis", "metadata_json",
+        "prompt_id", "timestamp",
+        # Tool details
+        "tool_name", "tool_type", "tool_source", "mcp_server_name",
+        # Input/output
+        "input_data", "input_hash", "output_data", "output_hash", "sources",
+        # Execution metadata
+        "duration_ms", "iteration", "is_error", "content_analysis",
     })
 
     async def write_tool_event(self, record: dict[str, Any]) -> None:
@@ -293,14 +342,16 @@ class WalacorClient:
         auditing never blocks the response path.
         """
         data = dict(record)
+        from gateway.classifier.schema import validate_tool_event
+        data = validate_tool_event(data)
         # Field mapping: gateway uses "source", schema uses "tool_source"
         if "source" in data:
             data["tool_source"] = data.pop("source")
-        # Serialise dict/list fields to JSON strings
-        for key in ("input_data", "sources", "content_analysis"):
+        # Serialise dict/list fields to JSON strings for Walacor LongText columns
+        for key in ("input_data", "output_data", "sources", "content_analysis"):
             if key in data and isinstance(data[key], (dict, list)):
                 data[key] = json.dumps(data[key], default=str)
-        # Drop prompt_id and other fields not in schema
+        # Strip fields not in the Walacor schema
         data = {k: v for k, v in data.items()
                 if v is not None and k in self._TOOL_EVENT_SCHEMA_FIELDS}
         try:
@@ -311,3 +362,29 @@ class WalacorClient:
                 "Walacor write_tool_event FAILED event_id=%s: %s",
                 data.get("event_id", "?"), e,
             )
+
+    # ── Query API ─────────────────────────────────────────────────────────
+
+    async def query_complex(self, etid: int, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Query Walacor via /api/query/getcomplex with a MongoDB-style aggregation pipeline.
+
+        Returns the result list from ``response.data``.  Re-authenticates once on 401.
+        """
+        assert self._http is not None, "call start() first"
+        url = f"{self._server}/query/getcomplex"
+        for attempt in range(2):
+            resp = await self._http.post(
+                url,
+                json=pipeline,
+                headers=self._headers(etid),
+            )
+            if resp.status_code == 401 and attempt == 0:
+                logger.debug("WalacorClient query_complex: 401 — re-authenticating")
+                await self._authenticate()
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            if isinstance(body, dict):
+                return body.get("data", [])
+            return body if isinstance(body, list) else []
+        return []

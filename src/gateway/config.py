@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     wal_max_age_hours: float = Field(default=72.0, description="Max WAL record age hours before action")
     wal_high_water_mark: int = Field(default=10000, description="Max undelivered records before rejecting new requests (enforced mode)")
     max_stream_buffer_bytes: int = Field(default=10_485_760, description="Max stream buffer for hashing (10MB)")
-    wal_batch_enabled: bool = Field(default=False, description="Enable group commit batching for WAL writes")
+    wal_batch_enabled: bool = Field(default=True, description="Enable group commit batching for WAL writes")
     wal_batch_flush_ms: int = Field(default=10, description="Max flush delay in milliseconds")
     wal_batch_max_size: int = Field(default=50, description="Max records per batch before immediate flush")
 
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # Phase 10: Response policy / content analysis
     response_policy_enabled: bool = Field(default=True, description="Enable post-inference content analysis")
     pii_detection_enabled: bool = Field(default=True, description="Enable built-in PII detector (walacor.pii.v1)")
-    toxicity_detection_enabled: bool = Field(default=False, description="Enable built-in toxicity detector (walacor.toxicity.v1)")
+    toxicity_detection_enabled: bool = Field(default=True, description="Enable built-in toxicity detector (walacor.toxicity.v1)")
     toxicity_deny_terms: str = Field(default="", description="Comma-separated extra deny-list terms for toxicity detector")
 
     # Stage B.7: Parallel content analysis
@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     )
 
     # System task filtering: skip audit for OpenWebUI auto-generated requests (tags, suggestions, titles)
-    skip_system_task_audit: bool = Field(default=True, description="Skip audit records for system-generated requests (tag/title/suggestion generation)")
+    skip_system_task_audit: bool = Field(default=False, description="Skip audit records for system-generated requests (tag/title/suggestion generation)")
 
     # Multimodal audit: attachment tracking
     attachment_tracking_enabled: bool = Field(default=True, description="Track file/image metadata in execution records")
@@ -153,7 +153,7 @@ class Settings(BaseSettings):
 
     # B.8: DLP data classification
     dlp_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable DLP data classification for financial, health, secrets, and infrastructure data",
     )
     dlp_categories: str = Field(
@@ -204,7 +204,7 @@ class Settings(BaseSettings):
     session_chain_ttl: int = Field(default=3600, description="Session state TTL seconds (evict inactive sessions)")
 
     # Phase 11: Adaptive concurrency limiting (Gradient2)
-    adaptive_concurrency_enabled: bool = Field(default=False, description="Enable Gradient2 adaptive concurrency limiting")
+    adaptive_concurrency_enabled: bool = Field(default=True, description="Enable Gradient2 adaptive concurrency limiting")
     adaptive_concurrency_min: int = Field(default=5, description="Min concurrency limit per provider")
     adaptive_concurrency_max: int = Field(default=100, description="Max concurrency limit per provider")
 
@@ -255,6 +255,14 @@ class Settings(BaseSettings):
     provider_openai_key: str = Field(default="", description="API key for OpenAI forwarding")
     provider_anthropic_url: str = Field(default="https://api.anthropic.com", description="Anthropic API base URL")
     provider_anthropic_key: str = Field(default="", description="API key for Anthropic")
+    provider_anthropic_beta_headers: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of anthropic-beta header values to send on every "
+            "Anthropic upstream request (e.g. 'prompt-caching-2024-07-31,"
+            "extended-thinking-2025-02-19'). Empty means no beta header."
+        ),
+    )
     provider_huggingface_url: str = Field(default="", description="HuggingFace Inference Endpoints URL")
     provider_huggingface_key: str = Field(default="", description="HuggingFace API key")
     provider_ollama_url: str = Field(default="http://localhost:11434", description="Ollama base URL")
@@ -298,38 +306,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("WALACOR_PASSWORD", "walacor_password"),
     )
     walacor_executions_etid: int = Field(
-        default=9000011,
-        description="Walacor ETId for gateway execution records table",
+        default=9000021,
+        description="Walacor ETId for gateway execution records table (v2 schema with chain+tool fields)",
         validation_alias=AliasChoices("WALACOR_EXECUTIONS_ETID", "walacor_executions_etid"),
     )
     walacor_attempts_etid: int = Field(
-        default=9000012,
+        default=9000022,
         description="Walacor ETId for gateway attempts table",
         validation_alias=AliasChoices("WALACOR_ATTEMPTS_ETID", "walacor_attempts_etid"),
     )
     walacor_tool_events_etid: int = Field(
-        default=9000013,
-        description="Walacor ETId for gateway tool event records table",
+        default=9000023,
+        description="Walacor ETId for gateway tool events table (v2 schema with sources+prompt_id)",
         validation_alias=AliasChoices("WALACOR_TOOL_EVENTS_ETID", "walacor_tool_events_etid"),
     )
 
     # Phase 14: Tool-aware gateway
-    tool_aware_enabled: bool = Field(default=False, description="Enable tool-call awareness and auditing (Phase 14)")
-    tool_strategy: str = Field(
-        default="auto",
-        description="Tool strategy: 'auto' (detect from provider), 'passive', 'active', or 'disabled'",
-    )
+    tool_aware_enabled: bool = Field(default=True, description="Enable tool-call awareness and auditing")
     tool_max_iterations: int = Field(
         default=10,
-        description="Max tool-call loop iterations for the active strategy (guard against infinite loops)",
+        description="Max tool-call loop iterations (guard against infinite loops)",
     )
     tool_loop_total_timeout_ms: int = Field(
-        default=120_000,
+        default=300_000,
         description="Total wall-clock timeout for all tool loop iterations (ms)",
     )
     tool_execution_timeout_ms: int = Field(
         default=30_000,
-        description="Per-tool execution timeout in ms (active strategy)",
+        description="Per-tool execution timeout in ms",
     )
     tool_max_output_bytes: int = Field(
         default=1_048_576,
@@ -337,11 +341,11 @@ class Settings(BaseSettings):
     )
     tool_content_analysis_enabled: bool = Field(
         default=True,
-        description="Run content analyzers on tool inputs/outputs (active strategy)",
+        description="Run content analyzers on tool inputs/outputs",
     )
     mcp_servers_json: str = Field(
         default="",
-        description="JSON array of MCP server configs, or path to a JSON file. Required for active strategy.",
+        description="JSON array of MCP server configs, or path to a JSON file.",
     )
     mcp_allowed_commands: str = Field(
         default="",
@@ -352,10 +356,10 @@ class Settings(BaseSettings):
         ),
     )
     web_search_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Enable built-in web search tool for local/private models (Ollama active strategy). "
-            "When enabled, the 'web_search' tool is auto-registered and injected into Ollama requests."
+            "Enable built-in web search tool. Gateway executes searches and injects results "
+            "into the model context with full audit trail. Works with all providers."
         ),
     )
     web_search_provider: str = Field(
@@ -369,6 +373,23 @@ class Settings(BaseSettings):
     web_search_max_results: int = Field(
         default=5,
         description="Default number of search results returned per query.",
+    )
+    # Backward compat: old flags that mapped to web_search_enabled
+    openai_web_search_enabled: bool = Field(default=False, description="Deprecated — use web_search_enabled")
+    gateway_web_search_enabled: bool = Field(default=True, description="Deprecated — use web_search_enabled")
+    tool_strategy: str = Field(default="auto", description="Deprecated — strategy is automatic per-request")
+
+    # OpenWebUI auto-integration
+    openwebui_url: str = Field(
+        default="",
+        description=(
+            "OpenWebUI base URL (e.g. http://localhost:3000). When set, the Gateway "
+            "automatically installs its audit filter plugin into OpenWebUI at startup."
+        ),
+    )
+    openwebui_api_key: str = Field(
+        default="",
+        description="OpenWebUI admin API key for auto-installing the filter plugin.",
     )
 
     # Phase 15: Multi-model routing + Redis state sharing
@@ -410,7 +431,7 @@ class Settings(BaseSettings):
 
     # Network tuning
     max_request_body_mb: float = Field(default=50.0, description="Max request body size in MB (0 = unlimited)")
-    provider_timeout: float = Field(default=120.0, description="Provider HTTP request timeout in seconds (120s default for CPU inference + thinking models)")
+    provider_timeout: float = Field(default=300.0, description="Provider HTTP request timeout in seconds (300s default for CPU inference + tool loops + thinking models)")
     provider_connect_timeout: float = Field(default=10.0, description="Provider connection timeout in seconds")
     provider_max_connections: int = Field(default=200, description="Max concurrent provider connections")
     provider_max_keepalive: int = Field(default=50, description="Max keepalive provider connections")
@@ -508,7 +529,7 @@ class Settings(BaseSettings):
     record_signing_key_path: str = Field(default="", description="Path to Ed25519 private key PEM file")
 
     # Phase 24: Periodic Merkle tree checkpoints
-    merkle_checkpoint_enabled: bool = Field(default=False, description="Enable periodic Merkle tree checkpoints for session chains")
+    merkle_checkpoint_enabled: bool = Field(default=True, description="Enable periodic Merkle tree checkpoints for session chains")
     merkle_checkpoint_interval_seconds: int = Field(default=3600, description="Seconds between Merkle tree checkpoint builds")
 
     # Phase 25: Transparency log publishing
@@ -517,7 +538,7 @@ class Settings(BaseSettings):
 
     # ── B.4: Semantic caching (exact-match tier) ──────────────────────────────
     semantic_cache_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Cache LLM responses for identical prompts (exact-match SHA-256 key)",
     )
     semantic_cache_ttl: int = Field(

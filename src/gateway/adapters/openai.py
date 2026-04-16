@@ -326,7 +326,7 @@ class OpenAIAdapter(ProviderAdapter):
         metadata: dict[str, Any] = {}
         if request.headers.get("x-user-id"):
             metadata["user"] = request.headers["x-user-id"]
-        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list)
+        metadata["session_id"] = resolve_session_id(request, get_settings().session_header_names_list, data)
         params = _extract_inference_params(data)
         if params:
             metadata["inference_params"] = params
@@ -337,9 +337,29 @@ class OpenAIAdapter(ProviderAdapter):
         if has_mm:
             metadata["has_multimodal_input"] = True
             metadata["multimodal_input_count"] = mm_count
-        # Tag reasoning models early so the orchestrator can force non-streaming.
-        if _is_reasoning_model(model_id) and self._base_url.rstrip("/").endswith("api.openai.com"):
-            metadata["_responses_api"] = True
+        # Tag for Responses API routing: reasoning models always, others when web search enabled.
+        # Web search is always gateway-executed (active tool loop) for full audit trail.
+        is_openai_direct = self._base_url.rstrip("/").endswith("api.openai.com")
+        settings = get_settings()
+        if is_openai_direct:
+            if _is_reasoning_model(model_id):
+                metadata["_responses_api"] = True
+            elif settings.web_search_enabled:
+                metadata["_gateway_web_search"] = True
+        # Strip non-standard fields from body before forwarding to provider.
+        # OpenWebUI adds "metadata", "chat_id", etc. that OpenAI rejects.
+        _OPENAI_STANDARD_FIELDS = {
+            "model", "messages", "stream", "temperature", "top_p", "n", "stop",
+            "max_tokens", "max_completion_tokens", "presence_penalty", "frequency_penalty",
+            "logit_bias", "logprobs", "top_logprobs", "user", "tools", "tool_choice",
+            "response_format", "seed", "service_tier", "stream_options", "store",
+            "reasoning_effort", "parallel_tool_calls", "functions", "function_call",
+        }
+        if is_openai_direct and isinstance(data, dict):
+            cleaned = {k: v for k, v in data.items() if k in _OPENAI_STANDARD_FIELDS}
+            if cleaned != data:
+                body_bytes = json.dumps(cleaned).encode("utf-8")
+
         return ModelCall(
             provider=self.get_provider_name(),
             model_id=model_id,
@@ -359,13 +379,14 @@ class OpenAIAdapter(ProviderAdapter):
         if sid:
             headers["X-Session-Id"] = sid
 
-        # For OpenAI reasoning models, transform to Responses API for reasoning summaries.
-        if _is_reasoning_model(call.model_id) and self._base_url.rstrip("/").endswith("api.openai.com"):
+        # Route through Responses API: reasoning models (for summaries) or web-search-enabled models.
+        if call.metadata.get("_responses_api") and self._base_url.rstrip("/").endswith("api.openai.com"):
             url = f"{self._base_url}/v1/responses"
             body = self._build_responses_api_body(call)
+            reason = "web search" if call.metadata.get("_openai_web_search") else "reasoning summary"
             logger.info(
-                "Routing %s to Responses API with reasoning summary",
-                call.model_id,
+                "Routing %s to Responses API with %s",
+                call.model_id, reason,
             )
             return httpx.Request(method="POST", url=url, headers=headers, content=body)
 
@@ -398,16 +419,29 @@ class OpenAIAdapter(ProviderAdapter):
             else:
                 input_messages.append(msg)
 
-        reasoning_config: dict[str, Any] = {"effort": "medium"}
-        # Only request summary if we haven't learned that it's unavailable.
-        if OpenAIAdapter._reasoning_summary_available is not False:
-            reasoning_config["summary"] = "auto"
+        is_reasoning = _is_reasoning_model(call.model_id)
+        uses_web_search = call.metadata.get("_openai_web_search", False)
 
         responses_body: dict[str, Any] = {
             "model": data.get("model", call.model_id),
             "input": input_messages if input_messages else data.get("messages", []),
-            "reasoning": reasoning_config,
         }
+
+        # Add reasoning config only for reasoning models.
+        if is_reasoning:
+            reasoning_config: dict[str, Any] = {"effort": "medium"}
+            if OpenAIAdapter._reasoning_summary_available is not False:
+                reasoning_config["summary"] = "auto"
+            responses_body["reasoning"] = reasoning_config
+
+        # Add web_search tool for OpenAI native web search.
+        if uses_web_search or is_reasoning:
+            tools: list[dict[str, Any]] = []
+            if uses_web_search:
+                tools.append({"type": "web_search"})
+            if tools:
+                responses_body["tools"] = tools
+
         if instructions:
             responses_body["instructions"] = instructions
         # Carry over max_tokens if specified.
@@ -476,8 +510,10 @@ class OpenAIAdapter(ProviderAdapter):
             OpenAIAdapter._reasoning_summary_available = True
 
         # If no summary text but reasoning tokens were used, create an indicator.
+        # Check both Responses API field (output_tokens_details) and Chat Completions
+        # field (completion_tokens_details) since the usage may come from either path.
         if not thinking_content and usage:
-            details = usage.get("output_tokens_details") or {}
+            details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
             reasoning_tokens = details.get("reasoning_tokens", 0)
             if reasoning_tokens > 0:
                 thinking_content = (

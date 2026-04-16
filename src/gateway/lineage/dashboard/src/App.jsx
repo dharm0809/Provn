@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { getHealth, getSessions } from './api';
 import { formatUptime } from './utils';
 import Overview from './views/Overview';
@@ -50,6 +50,37 @@ const navIcons = {
     </svg>
   ),
 };
+
+function readViewFromUrl() {
+  if (typeof window === 'undefined') return { name: 'overview', params: {} };
+  const sp = new URLSearchParams(window.location.search);
+  if (sp.get('view') === 'sessions') {
+    return {
+      name: 'sessions',
+      params: {
+        offset: Math.max(0, parseInt(sp.get('offset') || '0', 10) || 0),
+        q: sp.get('q') || '',
+        sort: ['last_activity', 'record_count', 'model'].includes(sp.get('sort'))
+          ? sp.get('sort')
+          : 'last_activity',
+        order: sp.get('order') === 'asc' ? 'asc' : 'desc',
+      },
+    };
+  }
+  if (sp.get('view') === 'attempts') {
+    const sortKeys = ['timestamp', 'disposition', 'request_id', 'user', 'model_id', 'path', 'status_code'];
+    return {
+      name: 'attempts',
+      params: {
+        offset: Math.max(0, parseInt(sp.get('offset') || '0', 10) || 0),
+        q: sp.get('q') || '',
+        sort: sortKeys.includes(sp.get('sort')) ? sp.get('sort') : 'timestamp',
+        order: sp.get('order') === 'asc' ? 'asc' : 'desc',
+      },
+    };
+  }
+  return { name: 'overview', params: {} };
+}
 
 function StatusPulse({ status }) {
   const colors = { healthy: '#34d399', degraded: '#f59e0b', fail_closed: '#ef4444' };
@@ -110,7 +141,7 @@ function HashTicker() {
 }
 
 export default function App() {
-  const [view, setView] = useState({ name: 'overview', params: {} });
+  const [view, setView] = useState(() => readViewFromUrl());
   const [theme, setTheme] = useState(() => localStorage.getItem('walacor_theme') || 'dark');
   const [health, setHealth] = useState(null);
   const [time, setTime] = useState(new Date());
@@ -145,6 +176,35 @@ export default function App() {
 
   const navigate = useCallback((name, params = {}) => {
     setView({ name, params });
+    if (typeof window === 'undefined') return;
+    const path = window.location.pathname.split('?')[0];
+    if (name === 'sessions') {
+      const p = { offset: 0, q: '', sort: 'last_activity', order: 'desc', ...params };
+      const sp = new URLSearchParams();
+      sp.set('view', 'sessions');
+      sp.set('offset', String(Math.max(0, Number(p.offset) || 0)));
+      const qq = String(p.q || '').trim();
+      if (qq) sp.set('q', qq);
+      const st = ['last_activity', 'record_count', 'model'].includes(p.sort) ? p.sort : 'last_activity';
+      sp.set('sort', st);
+      sp.set('order', p.order === 'asc' ? 'asc' : 'desc');
+      window.history.replaceState({}, '', `${path}?${sp.toString()}`);
+    } else if (name === 'attempts') {
+      const p = { offset: 0, q: '', sort: 'timestamp', order: 'desc', ...params };
+      const sp = new URLSearchParams();
+      sp.set('view', 'attempts');
+      sp.set('offset', String(Math.max(0, Number(p.offset) || 0)));
+      const qq = String(p.q || '').trim();
+      if (qq) sp.set('q', qq);
+      const st = ['timestamp', 'disposition', 'request_id', 'user', 'model_id', 'path', 'status_code'].includes(p.sort)
+        ? p.sort
+        : 'timestamp';
+      sp.set('sort', st);
+      sp.set('order', p.order === 'asc' ? 'asc' : 'desc');
+      window.history.replaceState({}, '', `${path}?${sp.toString()}`);
+    } else {
+      window.history.replaceState({}, '', path);
+    }
   }, []);
 
   const toggleTheme = () => {
@@ -178,11 +238,10 @@ export default function App() {
     <div className="app-layout">
       {/* ── Sidebar ── */}
       <aside className={`sidebar${sidebarOpen ? ' expanded' : ''}`}>
-        <div className="sidebar-brand" onClick={() => navigate('overview')} title="Walacor Lineage">
+        <div className="sidebar-brand" onClick={() => navigate('overview')} title="TruzenAI">
           <span className="sidebar-diamond">◆</span>
           <div className="sidebar-brand-text">
-            <span className="sidebar-brand-name">WALACOR</span>
-            <span className="sidebar-brand-sub">LINEAGE</span>
+            <span className="sidebar-brand-name">TRUZENAI</span>
           </div>
         </div>
 
@@ -232,13 +291,30 @@ export default function App() {
             {/* Subsystem status row */}
             <div className="subsystem-row">
               {[
-                { label: 'WAL', ok: !!health?.storage },
-                { label: 'PROVIDERS', ok: health?.status === 'healthy' },
-                { label: 'CHAIN', ok: !!health?.session_chain },
-                { label: 'BUDGET', ok: health?.status !== 'fail_closed' },
-                { label: 'ANALYZERS', ok: (health?.content_analyzers ?? 0) > 0 },
+                {
+                  label: 'WAL',
+                  /* Remote Walacor writes use `storage`; local lineage uses `wal` */
+                  ok: !!(health?.wal || health?.storage),
+                  hint: health?.storage
+                    ? 'Walacor backend connected'
+                    : health?.wal
+                      ? 'Local WAL active'
+                      : 'No audit persistence',
+                },
+                { label: 'PROVIDERS', ok: health?.status === 'healthy', hint: 'Gateway reachability' },
+                { label: 'CHAIN', ok: !!health?.session_chain, hint: 'Session chain tracker' },
+                { label: 'BUDGET', ok: health?.status !== 'fail_closed', hint: 'Not in fail-closed mode' },
+                {
+                  label: 'ANALYZERS',
+                  ok: (health?.content_analyzers ?? 0) > 0,
+                  hint: `${health?.content_analyzers ?? 0} content analyzer(s)`,
+                },
               ].map(s => (
-                <div key={s.label} className="subsystem-dot" title={`${s.label}: ${s.ok ? 'OK' : 'DOWN'}`}>
+                <div
+                  key={s.label}
+                  className="subsystem-dot"
+                  title={`${s.label}: ${s.ok ? 'OK' : 'attention'} — ${s.hint ?? ''}`}
+                >
                   <span className={`subsystem-indicator ${s.ok ? 'ok' : 'down'}`} />
                   <span className="subsystem-label">{s.label}</span>
                 </div>

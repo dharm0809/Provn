@@ -238,16 +238,18 @@ def test_lineage_reader_get_attachments(tmp_path):
 
     db_path = str(tmp_path / "wal.db")
     conn = sqlite3.connect(db_path)
-    conn.execute("""CREATE TABLE wal_records (
-        execution_id TEXT PRIMARY KEY, record_json TEXT NOT NULL,
-        created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, delivered_at TEXT)""")
+    from gateway.wal.writer import _apply_schema
+    _apply_schema(conn)
 
     record = {
         "execution_id": "exec-1",
         "session_id": "sess-1",
         "file_metadata": [{"filename": "test.pdf", "hash_sha3_512": "abc", "mimetype": "application/pdf", "size_bytes": 1000}],
     }
-    conn.execute("INSERT INTO wal_records VALUES (?, ?, ?, 0, NULL)", ("exec-1", json.dumps(record), "2026-03-14T00:00:00Z"))
+    conn.execute(
+        "INSERT INTO wal_records (execution_id, record_json, created_at, event_type, session_id, timestamp) VALUES (?, ?, ?, 'execution', 'sess-1', '2026-03-14T00:00:00Z')",
+        ("exec-1", json.dumps(record), "2026-03-14T00:00:00Z"),
+    )
     conn.commit()
     conn.close()
 

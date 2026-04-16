@@ -20,6 +20,137 @@ from gateway.core.models.execution import ExecutionRecord
 logger = logging.getLogger(__name__)
 
 
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    """Create tables, indexes, and run idempotent column migrations.
+
+    Called from both _ensure_conn (main thread) and _ensure_thread_conn
+    (writer thread) so the schema is always ready before the first write.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS wal_records (
+            execution_id  TEXT    PRIMARY KEY,
+            record_json   TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL,
+            delivered     INTEGER NOT NULL DEFAULT 0,
+            delivered_at  TEXT
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_records_pending"
+        " ON wal_records (delivered, created_at)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS gateway_attempts (
+            request_id    TEXT    PRIMARY KEY,
+            timestamp     TEXT    NOT NULL,
+            tenant_id     TEXT    NOT NULL,
+            provider      TEXT,
+            model_id      TEXT,
+            path          TEXT    NOT NULL,
+            disposition   TEXT    NOT NULL,
+            execution_id  TEXT,
+            status_code   INTEGER NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_timestamp"
+        " ON gateway_attempts (timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
+        " ON gateway_attempts (tenant_id, disposition)"
+    )
+
+    # ── Idempotent column migrations ──────────────────────────────────────
+    _add_columns = [
+        # gateway_attempts (Phase 21)
+        ("gateway_attempts", "user", "TEXT"),
+        ("gateway_attempts", "reason", "TEXT"),
+        # wal_records — extracted hot columns for indexed lineage queries
+        ("wal_records", "event_type", "TEXT NOT NULL DEFAULT 'execution'"),
+        ("wal_records", "session_id", "TEXT"),
+        ("wal_records", "timestamp", "TEXT"),
+        ("wal_records", "model_id", "TEXT"),
+        ("wal_records", "provider", "TEXT"),
+        ("wal_records", "user", "TEXT"),
+        ("wal_records", "prompt_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("wal_records", "completion_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("wal_records", "total_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("wal_records", "latency_ms", "REAL"),
+        ("wal_records", "sequence_number", "INTEGER"),
+        ("wal_records", "policy_result", "TEXT"),
+        ("wal_records", "parent_execution_id", "TEXT"),
+        ("wal_records", "tool_name", "TEXT"),
+        ("wal_records", "tool_type", "TEXT"),
+    ]
+    for table, col, col_type in _add_columns:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+    # ── Indexes on extracted columns ──────────────────────────────────────
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_session"
+        " ON wal_records (session_id, event_type, sequence_number)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_time"
+        " ON wal_records (event_type, timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_tool_parent"
+        " ON wal_records (parent_execution_id)"
+        " WHERE event_type = 'tool_call'"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_model"
+        " ON wal_records (model_id, provider)"
+        " WHERE event_type = 'execution'"
+    )
+
+    # ── Backfill: populate extracted columns from existing record_json ────
+    # Only runs once — rows with NULL timestamp have not yet been backfilled.
+    try:
+        needs_backfill = conn.execute(
+            "SELECT COUNT(*) FROM wal_records WHERE timestamp IS NULL LIMIT 1"
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        needs_backfill = 0
+
+    if needs_backfill > 0:
+        logger.info("Backfilling %d wal_records with extracted columns...", needs_backfill)
+        conn.execute("""
+            UPDATE wal_records SET
+                event_type = CASE
+                    WHEN json_extract(record_json, '$.event_type') = 'tool_call' THEN 'tool_call'
+                    ELSE 'execution'
+                END,
+                session_id = json_extract(record_json, '$.session_id'),
+                timestamp = COALESCE(json_extract(record_json, '$.timestamp'), created_at),
+                model_id = json_extract(record_json, '$.model_id'),
+                provider = json_extract(record_json, '$.provider'),
+                user = json_extract(record_json, '$.user'),
+                prompt_tokens = COALESCE(json_extract(record_json, '$.prompt_tokens'), 0),
+                completion_tokens = COALESCE(json_extract(record_json, '$.completion_tokens'), 0),
+                total_tokens = COALESCE(json_extract(record_json, '$.total_tokens'), 0),
+                latency_ms = json_extract(record_json, '$.latency_ms'),
+                sequence_number = json_extract(record_json, '$.sequence_number'),
+                policy_result = json_extract(record_json, '$.policy_result'),
+                parent_execution_id = CASE
+                    WHEN json_extract(record_json, '$.event_type') = 'tool_call'
+                    THEN json_extract(record_json, '$.execution_id')
+                    ELSE NULL
+                END,
+                tool_name = json_extract(record_json, '$.tool_name'),
+                tool_type = json_extract(record_json, '$.tool_type')
+            WHERE timestamp IS NULL
+        """)
+        conn.commit()
+        logger.info("Backfill complete.")
+
+
 class WALWriter:
     """SQLite WAL mode. Tables: wal_records (execution records), gateway_attempts (completeness invariant).
 
@@ -101,50 +232,10 @@ class WALWriter:
             conn.execute("PRAGMA synchronous=FULL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA secure_delete=ON")
-            # Enforce 0600 file permissions (owner read/write only)
             db_path = Path(self._path)
             if db_path.exists():
                 os.chmod(str(db_path), stat.S_IRUSR | stat.S_IWUSR)
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS wal_records (
-                    execution_id  TEXT    PRIMARY KEY,
-                    record_json   TEXT    NOT NULL,
-                    created_at    TEXT    NOT NULL,
-                    delivered     INTEGER NOT NULL DEFAULT 0,
-                    delivered_at  TEXT
-                )"""
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_wal_records_pending"
-                " ON wal_records (delivered, created_at)"
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS gateway_attempts (
-                    request_id    TEXT    PRIMARY KEY,
-                    timestamp     TEXT    NOT NULL,
-                    tenant_id     TEXT    NOT NULL,
-                    provider      TEXT,
-                    model_id      TEXT,
-                    path          TEXT    NOT NULL,
-                    disposition   TEXT    NOT NULL,
-                    execution_id  TEXT,
-                    status_code   INTEGER NOT NULL
-                )"""
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_timestamp"
-                " ON gateway_attempts (timestamp)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
-                " ON gateway_attempts (tenant_id, disposition)"
-            )
-            try:
-                conn.execute("ALTER TABLE gateway_attempts ADD COLUMN user TEXT")
-                conn.commit()
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise
+            _apply_schema(conn)
             self._thread_conn = conn
         return self._thread_conn
 
@@ -210,8 +301,20 @@ class WALWriter:
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
         conn.execute(
-            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
-            (execution_id, record_json, now),
+            """INSERT OR REPLACE INTO wal_records
+               (execution_id, record_json, created_at, delivered,
+                event_type, session_id, timestamp, model_id, provider, user,
+                prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                sequence_number, policy_result)
+               VALUES (?, ?, ?, 0,
+                       'execution', ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?)""",
+            (execution_id, record_json, now,
+             data.get("session_id"), data.get("timestamp") or now,
+             data.get("model_id"), data.get("provider"), data.get("user"),
+             data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
+             data.get("total_tokens") or 0, data.get("latency_ms"),
+             data.get("sequence_number"), data.get("policy_result")),
         )
         logger.debug("WAL (thread) write execution_id=%s", execution_id)
 
@@ -227,22 +330,32 @@ class WALWriter:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None),
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
         )
         logger.debug("WAL (thread) gateway_attempts request_id=%s disposition=%s", request_id, disposition)
 
     @staticmethod
     def _do_write_tool_event(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
         event_id = record["event_id"]
+        now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
-            (event_id, json.dumps(record), datetime.now(timezone.utc).isoformat()),
+            """INSERT OR REPLACE INTO wal_records
+               (execution_id, record_json, created_at, delivered,
+                event_type, session_id, timestamp, parent_execution_id,
+                tool_name, tool_type)
+               VALUES (?, ?, ?, 0,
+                       'tool_call', ?, ?, ?, ?, ?)""",
+            (event_id, json.dumps(record), now,
+             record.get("session_id"), record.get("timestamp") or now,
+             record.get("execution_id"), record.get("tool_name"),
+             record.get("tool_type")),
         )
         logger.debug("WAL (thread) write_tool_event event_id=%s", event_id)
 
@@ -265,11 +378,12 @@ class WALWriter:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Non-blocking enqueue of an attempt record to the dedicated writer thread."""
         self._queue.put((
             self._do_write_attempt,
-            (request_id, tenant_id, path, disposition, status_code, provider, model_id, execution_id, user),
+            (request_id, tenant_id, path, disposition, status_code, provider, model_id, execution_id, user, reason),
         ))
 
     def enqueue_write_tool_event(self, record: dict[str, Any]) -> None:
@@ -289,54 +403,10 @@ class WALWriter:
             self._conn.execute("PRAGMA synchronous=FULL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA secure_delete=ON")
-            # Enforce 0600 file permissions (owner read/write only)
             db_path = Path(self._path)
             if db_path.exists():
                 os.chmod(str(db_path), stat.S_IRUSR | stat.S_IWUSR)
-            self._conn.execute(
-                """CREATE TABLE IF NOT EXISTS wal_records (
-                    execution_id  TEXT    PRIMARY KEY,
-                    record_json   TEXT    NOT NULL,
-                    created_at    TEXT    NOT NULL,
-                    delivered     INTEGER NOT NULL DEFAULT 0,
-                    delivered_at  TEXT
-                )"""
-            )
-            # Composite index: delivery worker queries undelivered rows ordered by age.
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_wal_records_pending"
-                " ON wal_records (delivered, created_at)"
-            )
-            self._conn.execute(
-                """CREATE TABLE IF NOT EXISTS gateway_attempts (
-                    request_id    TEXT    PRIMARY KEY,
-                    timestamp     TEXT    NOT NULL,
-                    tenant_id     TEXT    NOT NULL,
-                    provider      TEXT,
-                    model_id      TEXT,
-                    path          TEXT    NOT NULL,
-                    disposition   TEXT    NOT NULL,
-                    execution_id  TEXT,
-                    status_code   INTEGER NOT NULL
-                )"""
-            )
-            # Index for time-range purge queries.
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_timestamp"
-                " ON gateway_attempts (timestamp)"
-            )
-            # Composite index for per-tenant disposition reporting.
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
-                " ON gateway_attempts (tenant_id, disposition)"
-            )
-            # Phase 21: add user column to gateway_attempts (non-destructive migration)
-            try:
-                self._conn.execute("ALTER TABLE gateway_attempts ADD COLUMN user TEXT")
-                self._conn.commit()
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise  # Only suppress "duplicate column" errors
+            _apply_schema(self._conn)
         return self._conn
 
     def write_and_fsync(self, record: ExecutionRecord | dict[str, Any]) -> None:
@@ -350,8 +420,20 @@ class WALWriter:
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
         conn.execute(
-            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
-            (execution_id, record_json, now),
+            """INSERT OR REPLACE INTO wal_records
+               (execution_id, record_json, created_at, delivered,
+                event_type, session_id, timestamp, model_id, provider, user,
+                prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                sequence_number, policy_result)
+               VALUES (?, ?, ?, 0,
+                       'execution', ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?)""",
+            (execution_id, record_json, now,
+             data.get("session_id"), data.get("timestamp") or now,
+             data.get("model_id"), data.get("provider"), data.get("user"),
+             data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
+             data.get("total_tokens") or 0, data.get("latency_ms"),
+             data.get("sequence_number"), data.get("policy_result")),
         )
         conn.commit()
         logger.debug("WAL write execution_id=%s", execution_id)
@@ -364,15 +446,65 @@ class WALWriter:
         now = datetime.now(timezone.utc).isoformat()
         rows = []
         for data in records:
-            execution_id = data.get("execution_id") or data.get("event_id", "")
+            is_tool = data.get("event_type") == "tool_call"
+            pk = data.get("event_id", "") if is_tool else data.get("execution_id", "")
             record_json = json.dumps(data)
-            rows.append((execution_id, record_json, now, 0))
+            rows.append((
+                pk, record_json, now, 0,
+                "tool_call" if is_tool else "execution",
+                data.get("session_id"),
+                data.get("timestamp") or now,
+                data.get("model_id"),
+                data.get("provider"),
+                data.get("user"),
+                data.get("prompt_tokens") or 0,
+                data.get("completion_tokens") or 0,
+                data.get("total_tokens") or 0,
+                data.get("latency_ms"),
+                data.get("sequence_number"),
+                data.get("policy_result"),
+                data.get("execution_id") if is_tool else None,
+                data.get("tool_name"),
+                data.get("tool_type"),
+            ))
         conn.executemany(
-            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, ?)",
+            """INSERT OR REPLACE INTO wal_records
+               (execution_id, record_json, created_at, delivered,
+                event_type, session_id, timestamp, model_id, provider, user,
+                prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                sequence_number, policy_result, parent_execution_id,
+                tool_name, tool_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         conn.commit()
         logger.debug("WAL write_batch count=%d", len(rows))
+
+    def get_chain_heads(self, ttl_hours: int = 24) -> list[tuple[str, int, str]]:
+        """Return (session_id, max_sequence_number, last_record_hash) for recent sessions.
+
+        Used to warm the SessionChainTracker on startup so chains survive restarts.
+        Only loads sessions active within *ttl_hours* to avoid loading stale data.
+        """
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """SELECT session_id, MAX(sequence_number) AS seq,
+                      -- record_hash from the row with the highest sequence_number
+                      json_extract(record_json, '$.record_hash') AS rh
+               FROM wal_records
+               WHERE event_type = 'execution'
+                 AND session_id IS NOT NULL
+                 AND sequence_number IS NOT NULL
+                 AND timestamp >= datetime('now', ?)
+               GROUP BY session_id""",
+            (f"-{ttl_hours} hours",),
+        )
+        results = []
+        for row in cur.fetchall():
+            sid, seq, rh = row
+            if sid and seq is not None and rh:
+                results.append((sid, int(seq), str(rh)))
+        return results
 
     def get_undelivered(self, limit: int = 50) -> list[tuple[str, str, str]]:
         """Return list of (execution_id, record_json, created_at) for undelivered records, oldest first."""
@@ -432,15 +564,16 @@ class WALWriter:
         model_id: str | None = None,
         execution_id: str | None = None,
         user: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Append one row to gateway_attempts for the completeness invariant."""
         conn = self._ensure_conn()
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None),
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
         )
         conn.commit()
         logger.debug("gateway_attempts request_id=%s disposition=%s user=%s", request_id, disposition, user)
@@ -449,9 +582,18 @@ class WALWriter:
         """Append one tool event record to wal_records using event_id as the primary key."""
         conn = self._ensure_conn()
         event_id = record["event_id"]
+        now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT OR REPLACE INTO wal_records (execution_id, record_json, created_at, delivered) VALUES (?, ?, ?, 0)",
-            (event_id, json.dumps(record), datetime.now(timezone.utc).isoformat()),
+            """INSERT OR REPLACE INTO wal_records
+               (execution_id, record_json, created_at, delivered,
+                event_type, session_id, timestamp, parent_execution_id,
+                tool_name, tool_type)
+               VALUES (?, ?, ?, 0,
+                       'tool_call', ?, ?, ?, ?, ?)""",
+            (event_id, json.dumps(record), now,
+             record.get("session_id"), record.get("timestamp") or now,
+             record.get("execution_id"), record.get("tool_name"),
+             record.get("tool_type")),
         )
         conn.commit()
         logger.debug("WAL write_tool_event event_id=%s", event_id)

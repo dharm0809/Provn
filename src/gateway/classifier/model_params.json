@@ -1,0 +1,16 @@
+{
+  "model_type": "tfidf_logreg",
+  "features": 5000,
+  "ngrams": "1-2",
+  "classes": [
+    "normal",
+    "rag",
+    "reasoning",
+    "system_task",
+    "web_search"
+  ],
+  "training_samples": 1940,
+  "cv_accuracy": 0.9871134020618557,
+  "cv_std": 0.00922089887628781,
+  "training_accuracy": 0.9948453608247423
+}

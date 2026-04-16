@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -10,6 +12,14 @@ from starlette.responses import JSONResponse
 from gateway.pipeline.context import get_pipeline_context
 
 logger = logging.getLogger(__name__)
+
+
+async def _call(method, *args, **kwargs) -> Any:
+    """Call a reader method, awaiting if async (WalacorLineageReader) or calling directly (SQLite)."""
+    result = method(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 _DEFAULT_SESSION_LIMIT = 50
 _MAX_SESSION_LIMIT = 200
@@ -27,6 +37,45 @@ def _safe_int(value: str | None, default: int) -> int:
         return default
 
 
+def _sessions_list_params(request: Request) -> tuple[int, int, str | None, str, str]:
+    limit = min(_safe_int(request.query_params.get("limit"), _DEFAULT_SESSION_LIMIT), _MAX_SESSION_LIMIT)
+    offset = max(0, _safe_int(request.query_params.get("offset"), 0))
+    q = request.query_params.get("q")
+    if q is not None:
+        q = q.strip() or None
+    sort = request.query_params.get("sort") or "last_activity"
+    if sort not in ("last_activity", "record_count", "model"):
+        sort = "last_activity"
+    order_raw = request.query_params.get("order") or "desc"
+    order = "asc" if str(order_raw).lower() == "asc" else "desc"
+    return limit, offset, q, sort, order
+
+
+_ATTEMPTS_SORT_ALLOW = frozenset({
+    "timestamp",
+    "disposition",
+    "request_id",
+    "user",
+    "model_id",
+    "path",
+    "status_code",
+})
+
+
+def _attempts_list_params(request: Request) -> tuple[int, int, str | None, str, str]:
+    limit = min(_safe_int(request.query_params.get("limit"), _DEFAULT_ATTEMPT_LIMIT), _MAX_ATTEMPT_LIMIT)
+    offset = max(0, _safe_int(request.query_params.get("offset"), 0))
+    q = request.query_params.get("q")
+    if q is not None:
+        q = q.strip() or None
+    sort = request.query_params.get("sort") or "timestamp"
+    if sort not in _ATTEMPTS_SORT_ALLOW:
+        sort = "timestamp"
+    order_raw = request.query_params.get("order") or "desc"
+    order = "asc" if str(order_raw).lower() == "asc" else "desc"
+    return limit, offset, q, sort, order
+
+
 def _reader_or_503():
     """Return lineage reader or raise 503 JSONResponse."""
     ctx = get_pipeline_context()
@@ -40,12 +89,23 @@ async def lineage_sessions(request: Request) -> JSONResponse:
     reader = _reader_or_503()
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
-    limit = min(_safe_int(request.query_params.get("limit"), _DEFAULT_SESSION_LIMIT), _MAX_SESSION_LIMIT)
-    offset = _safe_int(request.query_params.get("offset"), 0)
+    limit, offset, q, sort, order = _sessions_list_params(request)
     try:
-        sessions = reader.list_sessions(limit=limit, offset=offset)
-        total = reader.count_sessions() if hasattr(reader, 'count_sessions') else len(sessions)
-        return JSONResponse({"sessions": sessions, "total": total, "limit": limit, "offset": offset})
+        sessions = await _call(
+            reader.list_sessions, limit=limit, offset=offset, search=q, sort=sort, order=order
+        )
+        total = await _call(reader.count_sessions, q) if hasattr(reader, "count_sessions") else len(sessions)
+        return JSONResponse(
+            {
+                "sessions": sessions,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "q": q or "",
+                "sort": sort,
+                "order": order,
+            }
+        )
     except Exception as e:
         logger.error("lineage_sessions error: %s", e, exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -58,7 +118,7 @@ async def lineage_session_timeline(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     session_id = request.path_params["session_id"]
     try:
-        records = reader.get_session_timeline(session_id)
+        records = await _call(reader.get_session_timeline, session_id)
         if not records:
             return JSONResponse({"error": "Session not found", "session_id": session_id}, status_code=404)
         records = [_enrich_execution_record(r) for r in records]
@@ -85,6 +145,10 @@ def _enrich_execution_record(record: dict) -> dict:
     if not record.get("content_analysis") and meta.get("analyzer_decisions"):
         record["content_analysis"] = meta["analyzer_decisions"]
 
+    # Promote file_metadata from metadata to top level for dashboard
+    if not record.get("file_metadata") and meta.get("file_metadata"):
+        record["file_metadata"] = meta.pop("file_metadata")
+
     return record
 
 
@@ -95,11 +159,11 @@ async def lineage_execution(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     execution_id = request.path_params["execution_id"]
     try:
-        record = reader.get_execution(execution_id)
+        record = await _call(reader.get_execution, execution_id)
         if record is None:
             return JSONResponse({"error": "Execution not found", "execution_id": execution_id}, status_code=404)
         record = _enrich_execution_record(record)
-        tool_events = reader.get_tool_events(execution_id)
+        tool_events = await _call(reader.get_tool_events, execution_id)
         # Keep "record" wrapper for dashboard compat + spread top-level for API consumers
         return JSONResponse({
             "record": record,
@@ -119,10 +183,24 @@ async def lineage_attempts(request: Request) -> JSONResponse:
     reader = _reader_or_503()
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
-    limit = min(_safe_int(request.query_params.get("limit"), _DEFAULT_ATTEMPT_LIMIT), _MAX_ATTEMPT_LIMIT)
-    offset = _safe_int(request.query_params.get("offset"), 0)
+    limit, offset, q, sort, order = _attempts_list_params(request)
     try:
-        data = reader.get_attempts(limit=limit, offset=offset)
+        data = await _call(reader.get_attempts, limit=limit, offset=offset, search=q, sort=sort, order=order)
+        # Normalize keys: Walacor reader returns "items" with "model_id",
+        # SQLite reader returns "attempts" with "model". Normalize both.
+        if "items" in data and "attempts" not in data:
+            data["attempts"] = data.pop("items")
+        for att in data.get("attempts", []):
+            if "model_id" in att and "model" not in att:
+                att["model"] = att["model_id"]
+        data = {
+            **data,
+            "limit": limit,
+            "offset": offset,
+            "q": q or "",
+            "sort": sort,
+            "order": order,
+        }
         return JSONResponse(data)
     except Exception as e:
         logger.error("lineage_attempts error: %s", e, exc_info=True)
@@ -136,7 +214,7 @@ async def lineage_metrics_history(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
     try:
-        data = reader.get_metrics_history(range_key)
+        data = await _call(reader.get_metrics_history, range_key)
         return JSONResponse(data)
     except Exception as e:
         logger.error("lineage_metrics_history error: %s", e, exc_info=True)
@@ -150,7 +228,7 @@ async def lineage_token_latency_history(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
     try:
-        data = reader.get_token_latency_history(range_key)
+        data = await _call(reader.get_token_latency_history, range_key)
         return JSONResponse(data)
     except Exception as e:
         logger.error("lineage_token_latency_history error: %s", e, exc_info=True)
@@ -164,7 +242,7 @@ async def lineage_trace(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     execution_id = request.path_params["execution_id"]
     try:
-        trace = reader.get_execution_trace(execution_id)
+        trace = await _call(reader.get_execution_trace, execution_id)
         if trace is None:
             return JSONResponse({"error": "Execution not found", "execution_id": execution_id}, status_code=404)
         return JSONResponse(trace)
@@ -180,7 +258,7 @@ async def lineage_verify(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     session_id = request.path_params["session_id"]
     try:
-        result = reader.verify_chain(session_id)
+        result = await _call(reader.verify_chain, session_id)
         return JSONResponse(result)
     except Exception as e:
         logger.error("lineage_verify error: %s", e, exc_info=True)
@@ -195,7 +273,7 @@ async def lineage_attachments(request: Request) -> JSONResponse:
     ctx = get_pipeline_context()
     if not ctx.lineage_reader:
         return JSONResponse({"error": "Lineage not enabled"}, status_code=503)
-    attachments = ctx.lineage_reader.get_attachments(session_id)
+    attachments = await _call(ctx.lineage_reader.get_attachments, session_id)
     return JSONResponse({"session_id": session_id, "attachments": attachments})
 
 
@@ -212,7 +290,7 @@ async def lineage_ab_test_results(request: Request) -> JSONResponse:
     if not test_name:
         return JSONResponse({"error": "test_name path parameter required"}, status_code=400)
     try:
-        results = reader.get_ab_test_results(test_name)
+        results = await _call(reader.get_ab_test_results, test_name)
         return JSONResponse(results)
     except Exception as exc:
         logger.error("lineage_ab_test_results error: %s", exc, exc_info=True)

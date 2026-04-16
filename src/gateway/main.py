@@ -193,6 +193,7 @@ async def api_key_middleware(request: Request, call_next):
             _cross_validate_identity(request, settings)
             return await call_next(request)
         request.state.walacor_disposition = "denied_auth"
+        request.state.walacor_reason = "jwt_mode: missing or invalid JWT token"
         return JSONResponse({"error": "Missing or invalid JWT"}, status_code=401)
 
     if mode == "both":
@@ -205,6 +206,7 @@ async def api_key_middleware(request: Request, call_next):
         err = require_api_key_if_configured(request, settings.api_keys_list)
         if err is not None:
             request.state.walacor_disposition = "denied_auth"
+            request.state.walacor_reason = "both_mode: JWT failed and API key missing/invalid"
             return err
         _resolve_header_identity_fallback(request)
         _cross_validate_identity(request, settings)
@@ -214,6 +216,7 @@ async def api_key_middleware(request: Request, call_next):
     err = require_api_key_if_configured(request, settings.api_keys_list)
     if err is not None:
         request.state.walacor_disposition = "denied_auth"
+        request.state.walacor_reason = "api_key missing or not in allowlist"
         return err
     _resolve_header_identity_fallback(request)
     _cross_validate_identity(request, settings)
@@ -413,10 +416,14 @@ def _init_wal(settings, ctx) -> None:
     ctx.wal_writer = WALWriter(str(wal_dir / "wal.db"))
     ctx.wal_writer.start()
     if settings.control_plane_url:
+        # Delivery worker ships WAL records to a remote control plane aggregator.
+        # Only needed when a separate control plane URL is configured.
+        # When walacor_storage_enabled=True, records go directly to Walacor
+        # via the storage router (dual-write) — no delivery worker needed.
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
-    else:
-        logger.info("Delivery worker skipped: WALACOR_CONTROL_PLANE_URL not configured")
+    elif not settings.walacor_storage_enabled:
+        logger.info("Delivery worker skipped: no Walacor backend or control plane configured")
 
 
 async def _init_batch_writer(settings, ctx) -> None:
@@ -480,6 +487,20 @@ def _init_content_analyzers(settings, ctx) -> None:
         extra = [t.strip() for t in settings.toxicity_deny_terms.split(",") if t.strip()]
         ctx.content_analyzers.append(ToxicityDetector(extra_terms=extra or None))
         logger.info("Content analyzer loaded: walacor.toxicity.v1 (extra_terms=%d)", len(extra))
+
+
+def _init_safety_classifier(settings, ctx) -> None:
+    """ONNX Safety Classifier — lightweight Llama Guard replacement. Always-on."""
+    try:
+        from gateway.content.safety_classifier import SafetyClassifier
+        classifier = SafetyClassifier()
+        if classifier._loaded:
+            ctx.content_analyzers.append(classifier)
+            logger.info("Content analyzer loaded: truzenai.safety.v1 (ONNX, %d categories)", len(classifier._labels))
+        else:
+            logger.warning("SafetyClassifier ONNX not found — skipping")
+    except Exception as e:
+        logger.warning("SafetyClassifier init failed (non-fatal): %s", e)
 
 
 def _init_llama_guard(settings, ctx) -> None:
@@ -642,6 +663,15 @@ def _init_session_chain(settings, ctx) -> None:
         settings.session_chain_ttl,
     )
 
+    # Warm in-memory tracker from WAL so chains survive gateway restarts
+    if ctx.redis_client is None and ctx.wal_writer is not None:
+        try:
+            heads = ctx.wal_writer.get_chain_heads(ttl_hours=settings.session_chain_ttl // 3600 or 1)
+            if heads and hasattr(ctx.session_chain, 'warm'):
+                ctx.session_chain.warm(heads)
+        except Exception:
+            logger.warning("Chain warm from WAL failed — new sessions will start fresh", exc_info=True)
+
 
 async def _init_tool_registry(settings, ctx) -> None:
     """Phase 14: MCP tool registry for the active tool strategy."""
@@ -689,20 +719,36 @@ async def _init_web_search_tool(settings, ctx) -> None:
 
 
 def _init_lineage(settings, ctx) -> None:
-    """Phase 18: Lineage dashboard reader (read-only SQLite connection to WAL db)."""
+    """Phase 18: Lineage dashboard reader.
+
+    Prefers WalacorLineageReader (reads from Walacor API) when walacor_client
+    is available. Falls back to SQLite LineageReader for local-only mode.
+    """
     if not settings.lineage_enabled:
         return
-    from gateway.lineage.reader import LineageReader
 
-    wal_db = Path(settings.wal_path) / "wal.db"
-    # Force WALWriter to create the DB file if it hasn't yet (lazy init).
-    if not wal_db.exists() and ctx.wal_writer:
-        ctx.wal_writer._ensure_conn()
-    if not wal_db.exists():
-        logger.info("Lineage dashboard: WAL db not found at %s — skipping", wal_db)
+    # Dashboard reads exclusively from Walacor. The local SQLite WAL remains a
+    # durability sink for the delivery worker (replay on outage), but is never
+    # used as a read source for the dashboard. Lineage requires a Walacor client.
+    if ctx.walacor_client is None:
+        logger.warning(
+            "Lineage dashboard disabled: no Walacor client configured. "
+            "Set WALACOR_SERVER + credentials to enable the dashboard."
+        )
         return
-    ctx.lineage_reader = LineageReader(str(wal_db))
-    logger.info("Lineage dashboard enabled: reading from %s", wal_db)
+
+    from gateway.lineage.walacor_reader import WalacorLineageReader
+    ctx.lineage_reader = WalacorLineageReader(
+        client=ctx.walacor_client,
+        executions_etid=settings.walacor_executions_etid,
+        attempts_etid=settings.walacor_attempts_etid,
+        tool_events_etid=settings.walacor_tool_events_etid,
+    )
+    logger.info(
+        "Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
+        settings.walacor_executions_etid, settings.walacor_attempts_etid,
+        settings.walacor_tool_events_etid,
+    )
 
 
 def _init_otel(settings, ctx) -> None:
@@ -985,8 +1031,9 @@ async def on_startup() -> None:
         _init_lineage(settings, ctx)
         ctx.redis_client = await _init_redis(settings)
         _init_content_analyzers(settings, ctx)
+        _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard
         if settings.llama_guard_enabled:
-            _init_llama_guard(settings, ctx)
+            _init_llama_guard(settings, ctx)  # Optional Tier 3 — max accuracy when Ollama available
         if settings.prompt_guard_enabled:
             _init_prompt_guard(settings, ctx)
         if settings.presidio_pii_enabled:
@@ -1113,6 +1160,53 @@ async def on_startup() -> None:
             from gateway.middleware.attachment_tracker import AttachmentNotificationCache
             ctx.attachment_cache = AttachmentNotificationCache()
             logger.info("Attachment tracking cache enabled")
+        # ── Schema Intelligence v2: SchemaMapper + Anomaly + Overflow + LLM Intelligence ──
+        try:
+            from gateway.schema.mapper import SchemaMapper
+            ctx.schema_mapper = SchemaMapper()
+            logger.info("SchemaMapper initialized (ONNX=%s)", ctx.schema_mapper._session is not None)
+        except Exception as e:
+            logger.warning("SchemaMapper init failed (non-fatal): %s", e)
+
+        try:
+            from gateway.intelligence.consistency import ConsistencyTracker
+            ctx.consistency_tracker = ConsistencyTracker()
+            logger.info("Consistency tracker initialized (AuditLLM passive mode)")
+        except Exception as e:
+            logger.warning("Consistency tracker init failed (non-fatal): %s", e)
+
+        try:
+            from gateway.schema.anomaly import AnomalyDetector
+            ctx.anomaly_detector = AnomalyDetector()
+            logger.info("Anomaly detector initialized")
+        except Exception as e:
+            logger.warning("Anomaly detector init failed (non-fatal): %s", e)
+
+        try:
+            from gateway.schema.overflow import FieldRegistry
+            ctx.field_registry = FieldRegistry()
+            logger.info("Field registry initialized")
+        except Exception as e:
+            logger.warning("Field registry init failed (non-fatal): %s", e)
+
+        # Background LLM intelligence worker (only if Ollama is configured)
+        if settings.gateway_provider == "ollama" or settings.provider_ollama_url:
+            try:
+                from gateway.intelligence.worker import IntelligenceWorker
+                _ollama_url = settings.provider_ollama_url or "http://localhost:11434"
+                ctx.intelligence_worker = IntelligenceWorker(
+                    ollama_url=_ollama_url,
+                    enabled=True,
+                )
+                ctx.intelligence_worker_task = asyncio.create_task(ctx.intelligence_worker.run())
+                logger.info("Intelligence worker started (ollama=%s)", _ollama_url)
+
+                # AuditLLM probe generator for active consistency testing
+                from gateway.intelligence.consistency import ProbeGenerator
+                ctx.probe_generator = ProbeGenerator(ollama_url=_ollama_url)
+            except Exception as e:
+                logger.warning("Intelligence worker init failed (non-fatal): %s", e)
+
         logger.info(
             "Gateway config: tenant=%s provider=%s auth_mode=%s enforcement=%s "
             "tool_aware=%s web_search=%s rate_limit=%s",
@@ -1120,6 +1214,26 @@ async def on_startup() -> None:
             settings.enforcement_mode, settings.tool_aware_enabled,
             settings.web_search_enabled, settings.rate_limit_enabled,
         )
+        # Auto-install audit filter into OpenWebUI (non-blocking, fail-open)
+        if settings.openwebui_url and settings.openwebui_api_key:
+            try:
+                from gateway.integrations.openwebui_setup import install_openwebui_filter
+                # Determine the gateway's own URL for the filter to call back
+                gateway_self_url = f"http://localhost:{os.environ.get('PORT', '8000')}"
+                gw_api_key = (settings.gateway_api_keys or [""])[0] if settings.gateway_api_keys else ""
+                ok = await install_openwebui_filter(
+                    openwebui_url=settings.openwebui_url,
+                    openwebui_api_key=settings.openwebui_api_key,
+                    gateway_url=gateway_self_url,
+                    gateway_api_key=gw_api_key,
+                )
+                if ok:
+                    logger.info("OpenWebUI filter auto-installed at %s", settings.openwebui_url)
+                else:
+                    logger.warning("OpenWebUI filter auto-install failed (non-fatal)")
+            except Exception:
+                logger.warning("OpenWebUI filter auto-install skipped", exc_info=True)
+
         logger.info("Gateway startup complete: governance pipeline ready, WAL and delivery worker started")
     except Exception:
         logger.critical("Gateway startup FAILED — cleaning up partially initialized resources", exc_info=True)
@@ -1190,6 +1304,14 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"tool_registry.shutdown: {e}")
         ctx.tool_registry = None
+
+    # Stop intelligence worker
+    _intel_worker = getattr(ctx, "intelligence_worker", None)
+    if _intel_worker:
+        try:
+            await _intel_worker.stop()
+        except Exception as e:
+            errors.append(f"intelligence_worker.stop: {e}")
 
     if ctx.redis_client:
         try:

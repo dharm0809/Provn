@@ -63,10 +63,12 @@ def test_g3_stale_policy_returns_503():
     call = MagicMock()
     call.prompt_text = "hello"
     call.metadata = {}
-    blocked, version, policy_result, err = evaluate_pre_inference(
+    blocked, version, policy_result, err, failure_reason = evaluate_pre_inference(
         cache, call, "att_001", {"model_id": "gpt-4", "verification_level": "self_reported", "tenant_id": "t1"}
     )
     assert err is not None
     assert err.status_code == 503
     assert blocked is True
     assert policy_result == "fail_closed"
+    assert failure_reason is not None
+    assert "stale" in failure_reason.lower()

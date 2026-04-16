@@ -179,3 +179,17 @@ Walacor Gateway — ASGI audit/governance proxy for LLM providers. Source: `src/
 - Content analysis caching: SHA256-keyed bounded cache (max 1000 entries) in response_evaluator
 - Config: `startup_probes_enabled`, `provider_health_check_on_startup`, `capability_probe_ttl_seconds`, `identity_validation_enabled`, `disk_monitor_enabled`, `disk_min_free_percent`, `resource_monitor_interval_seconds`, `custom_startup_probes`, `custom_request_classifiers`, `custom_identity_validators`, `custom_resource_monitors`
 - Tests: `test_adaptive_interfaces.py`, `test_startup_probes.py`, `test_request_classifier.py`, `test_identity_validator.py`, `test_content_policies.py`, `test_content_policy_configure.py`, `test_resource_monitor.py`, `test_capability_registry.py`, `test_analysis_cache.py`
+
+## Phase 24: OpenAI ↔ Anthropic Protocol Bridge + Native Provider Tools
+- `src/gateway/adapters/anthropic.py` — full bidirectional translator: OpenAI `/v1/chat/completions` ↔ Anthropic `/v1/messages`
+- **Request translation**: system extraction, max_tokens default, stop→stop_sequences, multimodal images (data URL + http URL), role:tool→tool_result content blocks, role:assistant tool_calls→tool_use blocks, reasoning_effort→thinking.budget_tokens, tool definitions (function-calling→input_schema), tool_choice
+- **Response translation**: text+thinking+tool_use blocks→OpenAI chat.completion shape, finish_reason mapping, cache token breakdown in usage, error body translation (Anthropic error→OpenAI error)
+- **SSE streaming**: `_AnthropicToOpenAISSE` stateful translator handles text_delta, input_json_delta (tool streaming), thinking_delta (suppressed client-side, captured for audit), server_tool_use (hidden from client), web_search_tool_result (hidden from client), citations_delta
+- **Native Anthropic web_search**: auto-injects `web_search_20250305` server tool when `web_search_enabled=true`; Anthropic runs search server-side in same streaming forward. Zero gateway overhead. `_select_strategy` returns "passive" for anthropic — no active tool loop, no non-streaming peek, real-time streaming.
+- **Audit capture**: `_parse_content_block` handles `server_tool_use` (ToolInteraction with source="anthropic_native") + `web_search_tool_result` (extracts URLs/titles/page_age into sources). `_merge_server_tool_pairs` collapses paired blocks into single ToolInteraction. `_iter_sse_objects` concatenates chunks before parsing (fixes 46KB web_search_tool_result split across TCP chunks).
+- **Provider tool strategy**: Anthropic=passive (native tools), OpenAI/Ollama=active (gateway DDG loop)
+- **Speed**: synthesize_openai_sse_from_response in forwarder.py builds fake stream from non-streaming peek (for non-Anthropic active strategy). Eliminates double-forward. 855ms vs 2.4s.
+- Config: `provider_anthropic_beta_headers` (comma-separated, sent as `anthropic-beta` header)
+- `src/gateway/control/discovery.py` — `_discover_anthropic()` queries `/v1/models` with x-api-key + anthropic-version headers
+- **Metadata enrichment**: `_build_and_write_record` and `_after_stream_record` dump thinking_content, provider_response_id, tool_events_detail (with full input/output/sources), canonical (SchemaMapper output), token_usage into metadata dict. Note: metadata goes to Walacor backend; WAL has flat columns only (follow-up: add metadata TEXT column to WAL).
+- **Dashboard fix**: `te.sources` stored as JSON string in WAL (type coercion); Execution.jsx now JSON.parse + Array.isArray guard before .map(). ErrorBoundary added to main.jsx for crash visibility.

@@ -52,7 +52,7 @@ async def health_response(request: Request) -> JSONResponse:
             "attempts_etid": settings.walacor_attempts_etid,
         }
 
-    if not ctx.skip_governance and ctx.wal_writer is not None:
+    if ctx.wal_writer is not None:
         pending = ctx.wal_writer.pending_count()
         disk = ctx.wal_writer.disk_usage_bytes()
         max_bytes = int(settings.wal_max_size_gb * (1024**3)) if settings.wal_max_size_gb else 0
@@ -65,14 +65,16 @@ async def health_response(request: Request) -> JSONResponse:
             "disk_usage_bytes": disk,
             "disk_usage_percent": disk_pct,
         }
-        if ctx.policy_cache and ctx.policy_cache.is_stale:
-            payload["status"] = "fail_closed"
-        elif attestation_stale:
-            payload["status"] = "fail_closed"
-        elif disk_pct >= 100 or pending >= high_water:
-            payload["status"] = "fail_closed"
-        elif pending > high_water * settings.disk_degraded_threshold or disk_pct >= settings.disk_degraded_threshold * 100:
-            payload["status"] = "degraded"
+        # Capacity / sync gate applies only when full governance is active
+        if not ctx.skip_governance:
+            if ctx.policy_cache and ctx.policy_cache.is_stale:
+                payload["status"] = "fail_closed"
+            elif attestation_stale:
+                payload["status"] = "fail_closed"
+            elif disk_pct >= 100 or pending >= high_water:
+                payload["status"] = "fail_closed"
+            elif pending > high_water * settings.disk_degraded_threshold or disk_pct >= settings.disk_degraded_threshold * 100:
+                payload["status"] = "degraded"
 
     # Phase 11: token budget snapshot
     if ctx.budget_tracker and settings.token_budget_enabled:
@@ -90,15 +92,11 @@ async def health_response(request: Request) -> JSONResponse:
         # Redis tracker returns -1 as a sentinel (SCAN-by-prefix is too expensive)
         payload["session_chain"] = {"active_sessions": count if count >= 0 else "unavailable"}
 
-    # Model capability registry (prefer CapabilityRegistry, fall back to raw dict)
+    # Model capability registry
     if ctx.capability_registry:
         caps = ctx.capability_registry.all_capabilities()
         if caps:
             payload["model_capabilities"] = caps
-    else:
-        from gateway.pipeline.orchestrator import _model_capabilities
-        if _model_capabilities:
-            payload["model_capabilities"] = dict(_model_capabilities)
 
     # Phase 23: Resource monitor status
     if ctx.resource_monitor:
