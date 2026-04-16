@@ -969,6 +969,33 @@ def _init_model_registry(settings, ctx) -> None:
         ctx.model_registry = None
 
 
+def _init_harvesters(settings, ctx) -> None:
+    """Phase 25 Task 13: verdict harvester runner.
+
+    Creates an empty-harvester `HarvesterRunner` and starts its background
+    consumer task. Per-model harvesters (Tasks 14-16) register themselves
+    on this runner during their own init hooks. Keeping framework init
+    separate from harvester registration means the dispatcher is always
+    available even during partial enablement — e.g. if only the safety
+    harvester is wired, intent signals are accepted and immediately
+    discarded (no matching harvesters), which is fine.
+
+    Fail-open: any failure leaves `ctx.harvester_runner=None` and the
+    orchestrator hook short-circuits.
+    """
+    if not settings.intelligence_enabled:
+        return
+    try:
+        from gateway.intelligence.harvesters import HarvesterRunner
+        runner = HarvesterRunner(harvesters=[], max_queue=1000)
+        runner.start()
+        ctx.harvester_runner = runner
+        logger.info("Harvester runner started (queue size=1000)")
+    except Exception as e:
+        logger.warning("Harvester runner init failed (non-fatal): %s", e)
+        ctx.harvester_runner = None
+
+
 def _init_intelligence(settings, ctx) -> None:
     """Phase 25: ONNX self-learning intelligence layer.
 
@@ -1189,6 +1216,7 @@ async def on_startup() -> None:
         # promoted candidates via the Task 11 reload hook.
         _init_model_registry(settings, ctx)
         _init_intelligence(settings, ctx)
+        _init_harvesters(settings, ctx)
         _init_content_analyzers(settings, ctx)
         _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard
         if settings.llama_guard_enabled:
@@ -1594,6 +1622,18 @@ async def on_shutdown() -> None:
             errors.append(f"intelligence_retention_task: {e}")
     ctx.intelligence_retention_task = None
     ctx.intelligence_retention_sweeper = None
+
+    # Phase 25 Task 13: drain the harvester runner. stop() injects a
+    # sentinel so the background task wakes from its queue-get and exits;
+    # a cancel fallback handles the pathologically-full queue case.
+    if ctx.harvester_runner is not None:
+        try:
+            await asyncio.wait_for(ctx.harvester_runner.stop(), timeout=2.0)
+        except asyncio.TimeoutError:
+            errors.append("harvester_runner: stop timed out")
+        except Exception as e:
+            errors.append(f"harvester_runner: {e}")
+        ctx.harvester_runner = None
 
     ctx.intelligence_db = None
     ctx.verdict_buffer = None

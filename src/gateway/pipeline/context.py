@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from gateway.content.base import ContentAnalyzer
     from gateway.export.base import AuditExporter
     from gateway.intelligence.db import IntelligenceDB
+    from gateway.intelligence.harvesters import HarvesterRunner
     from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.retention import RetentionSweeper
     from gateway.intelligence.verdict_buffer import VerdictBuffer
@@ -100,6 +101,11 @@ class PipelineContext:
         # `ctx.model_registry.production_path(model_name)` and rebuild their
         # session when the per-model generation counter moves.
         self.model_registry: ModelRegistry | None = None
+        # Phase 25 Task 13: verdict harvester runner. Tasks 14-16 register
+        # per-model harvesters that back-write divergence signals onto the
+        # verdict log. Signals are enqueued fire-and-forget from the
+        # orchestrator's audit-finalization path.
+        self.harvester_runner: HarvesterRunner | None = None
 
 
 _ctx = PipelineContext()
