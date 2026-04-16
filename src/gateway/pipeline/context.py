@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from gateway.cache.semantic_cache import SemanticCache
     from gateway.content.base import ContentAnalyzer
     from gateway.export.base import AuditExporter
+    from gateway.intelligence.db import IntelligenceDB
+    from gateway.intelligence.verdict_buffer import VerdictBuffer
     from gateway.mcp.registry import ToolRegistry
     from gateway.pipeline.budget_tracker import BudgetTracker
     from gateway.pipeline.session_chain import SessionChainTracker
@@ -84,6 +86,11 @@ class PipelineContext:
         self.audit_exporter: AuditExporter | None = None
         # B.4: Semantic cache (exact-match tier)
         self.semantic_cache: SemanticCache | None = None
+        # Phase 25: ONNX self-learning intelligence layer
+        self.verdict_buffer: VerdictBuffer | None = None
+        self.intelligence_db: IntelligenceDB | None = None
+        self.intelligence_flush_task: Any | None = None
+        self.intelligence_flush_worker: Any | None = None
 
 
 _ctx = PipelineContext()

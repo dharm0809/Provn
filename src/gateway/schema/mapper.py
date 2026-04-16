@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -34,6 +34,9 @@ from gateway.schema.canonical import (
 )
 from gateway.schema.features import FlatField, extract_features, flatten_json
 
+if TYPE_CHECKING:
+    from gateway.intelligence.verdict_buffer import VerdictBuffer
+
 logger = logging.getLogger(__name__)
 
 _MODEL_DIR = Path(__file__).parent
@@ -49,11 +52,16 @@ class SchemaMapper:
     ONNX is unavailable.
     """
 
-    def __init__(self, onnx_path: str | None = None) -> None:
+    def __init__(
+        self,
+        onnx_path: str | None = None,
+        verdict_buffer: "VerdictBuffer | None" = None,
+    ) -> None:
         self._session = None
         self._input_name = ""
         self._labels: list[str] = []
         self._label_to_idx: dict[str, int] = {}
+        self._verdict_buffer = verdict_buffer
 
         model_path = onnx_path or str(_ONNX_PATH)
         labels_path = str(_LABELS_PATH)
@@ -87,21 +95,46 @@ class SchemaMapper:
             unrecognized fields preserved in overflow.
         """
         if not isinstance(raw, dict):
-            return CanonicalResponse(_mapping_incomplete=True)
+            result = CanonicalResponse(_mapping_incomplete=True)
+        else:
+            # 1. Flatten JSON to field list
+            fields = flatten_json(raw)
+            if not fields:
+                result = CanonicalResponse(_mapping_incomplete=True)
+            else:
+                # 2. Classify each field
+                classifications = self._classify_fields(fields)
+                # 3. Post-process: path-name safety net for UNKNOWN classifications
+                classifications = self._apply_path_fallbacks(fields, classifications)
+                # 4. Assemble canonical response
+                result = self._assemble(fields, classifications, raw)
 
-        # 1. Flatten JSON to field list
-        fields = flatten_json(raw)
-        if not fields:
-            return CanonicalResponse(_mapping_incomplete=True)
+        # Phase 25: record verdict for self-learning (observational only).
+        # Never allowed to break inference — wrap the whole stanza defensively.
+        if self._verdict_buffer is not None:
+            try:
+                from gateway.intelligence.types import ModelVerdict
+                # Serialize raw dict as input_text for input_hash. Use sort_keys
+                # so logically-equal dicts produce a stable hash. Fallback to
+                # repr() if the dict contains non-JSON-serializable values.
+                try:
+                    input_text = json.dumps(raw, sort_keys=True, default=str)
+                except (TypeError, ValueError):
+                    input_text = repr(raw)
+                prediction = "incomplete" if result._mapping_incomplete else "complete"
+                self._verdict_buffer.record(
+                    ModelVerdict.from_inference(
+                        model_name="schema_mapper",
+                        input_text=input_text,
+                        prediction=prediction,
+                        confidence=float(result._mapping_confidence or 0.0),
+                        request_id=None,
+                    )
+                )
+            except Exception:
+                logger.debug("verdict recording failed", exc_info=True)
 
-        # 2. Classify each field
-        classifications = self._classify_fields(fields)
-
-        # 3. Post-process: path-name safety net for UNKNOWN classifications
-        classifications = self._apply_path_fallbacks(fields, classifications)
-
-        # 4. Assemble canonical response
-        return self._assemble(fields, classifications, raw)
+        return result
 
     # Path-name patterns that strongly indicate a canonical field.
     # Used as safety net when ONNX says UNKNOWN but the path is obvious.
