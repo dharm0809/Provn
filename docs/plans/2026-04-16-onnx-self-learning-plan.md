@@ -317,31 +317,68 @@ git commit -m "feat(intelligence): SQLite schema for verdict log + shadow + trai
 
 **Files:**
 - Create: `src/gateway/intelligence/events.py`
-- Modify: `src/gateway/walacor/client.py` (register new ETId)
+- Modify: `src/gateway/config.py` (add `walacor_lifecycle_events_etid` field)
+- Modify: `src/gateway/walacor/client.py` (add `lifecycle_events_etid` constructor param)
+- Modify: `.env.example` (add `WALACOR_LIFECYCLE_EVENTS_ETID=9000024` line)
 - Test: `tests/unit/test_lifecycle_events.py`
+
+**Background** (read before coding):
+- Walacor ETIds are **numeric ints**, not strings. Existing config fields: `walacor_executions_etid=9000021`, `walacor_attempts_etid=9000022`, `walacor_tool_events_etid=9000023`. Pick `9000024` for lifecycle events.
+- The ETId is passed in the HTTP header (`"ETId": str(etid)` in `WalacorClient._headers`), **not** in the record payload. `LifecycleEvent.to_record()` must return the payload only — no `etid` key.
+- Task 3 ONLY scaffolds: config field, constructor param, the event dataclass/enum/factories, tests. The full retry-with-backoff `write_lifecycle_event(...)` method on `WalacorClient` is **Task 21**, not here.
 
 **Step 1: Write the failing test**
 
 ```python
 # tests/unit/test_lifecycle_events.py
 from __future__ import annotations
+
 from gateway.intelligence.events import (
-    LifecycleEvent, EventType, build_training_fingerprint, build_promotion_event,
+    LifecycleEvent,
+    EventType,
+    build_training_fingerprint,
+    build_promotion_event,
+    build_candidate_created,
+    build_shadow_validation_complete,
+    build_model_rejected,
 )
+
 
 def test_event_type_enum():
     assert EventType.TRAINING_DATASET_FINGERPRINT.value == "training_dataset_fingerprint"
+    assert EventType.CANDIDATE_CREATED.value == "candidate_created"
+    assert EventType.SHADOW_VALIDATION_COMPLETE.value == "shadow_validation_complete"
     assert EventType.MODEL_PROMOTED.value == "model_promoted"
+    assert EventType.MODEL_REJECTED.value == "model_rejected"
+
+
+def test_to_record_does_not_include_etid():
+    # ETId lives in the HTTP header, not the payload — to_record must NOT include it.
+    ev = build_promotion_event(
+        model_name="intent", candidate_version="v3", dataset_hash="deadbeef",
+        shadow_metrics={"accuracy": 0.94}, approver="alice@example.com",
+    )
+    rec = ev.to_record()
+    assert "etid" not in rec
+    assert rec["event_type"] == "model_promoted"
+    assert "timestamp" in rec
+
 
 def test_build_training_fingerprint_deterministic():
     row_ids = [3, 1, 2]
     ev = build_training_fingerprint(model_name="intent", row_ids=row_ids, content_hash="abc")
-    # sorted row_ids for reproducibility
     assert ev.event_type == EventType.TRAINING_DATASET_FINGERPRINT
-    assert ev.payload["row_ids"] == [1, 2, 3]
+    assert ev.payload["row_ids"] == [1, 2, 3]  # sorted
     assert ev.payload["content_hash"] == "abc"
     assert ev.payload["model_name"] == "intent"
     assert len(ev.payload["dataset_hash"]) == 64  # sha256 hex
+
+
+def test_training_fingerprint_is_order_independent():
+    a = build_training_fingerprint(model_name="intent", row_ids=[3, 1, 2], content_hash="x")
+    b = build_training_fingerprint(model_name="intent", row_ids=[2, 3, 1], content_hash="x")
+    assert a.payload["dataset_hash"] == b.payload["dataset_hash"]
+
 
 def test_build_promotion_event():
     ev = build_promotion_event(
@@ -351,25 +388,67 @@ def test_build_promotion_event():
     assert ev.event_type == EventType.MODEL_PROMOTED
     assert ev.payload["approver"] == "alice@example.com"
     assert ev.payload["shadow_metrics"]["accuracy"] == 0.94
+
+
+def test_build_candidate_created():
+    ev = build_candidate_created(
+        model_name="safety", candidate_version="v7", dataset_hash="abc",
+        training_sample_count=842,
+    )
+    assert ev.event_type == EventType.CANDIDATE_CREATED
+    assert ev.payload["training_sample_count"] == 842
+
+
+def test_build_shadow_validation_complete():
+    ev = build_shadow_validation_complete(
+        model_name="schema_mapper", candidate_version="v4",
+        metrics={"accuracy_delta": 0.03, "disagreement": 0.12, "samples": 1000},
+        passed=True,
+    )
+    assert ev.event_type == EventType.SHADOW_VALIDATION_COMPLETE
+    assert ev.payload["passed"] is True
+    assert ev.payload["metrics"]["samples"] == 1000
+
+
+def test_build_model_rejected():
+    ev = build_model_rejected(
+        model_name="intent", candidate_version="v5",
+        reason="accuracy delta below threshold", stage="shadow",
+    )
+    assert ev.event_type == EventType.MODEL_REJECTED
+    assert ev.payload["reason"] == "accuracy delta below threshold"
+    assert ev.payload["stage"] == "shadow"
 ```
 
 **Step 2: Run to verify fail**
 
 ```
-pytest tests/unit/test_lifecycle_events.py -v
+.venv/bin/python -m pytest tests/unit/test_lifecycle_events.py -v
+# expect: ModuleNotFoundError for gateway.intelligence.events
 ```
 
-**Step 3: Implement**
+**Step 3: Implement `src/gateway/intelligence/events.py`**
 
 ```python
-# src/gateway/intelligence/events.py
+"""Lifecycle events for the Phase 25 ONNX self-learning loop.
+
+Records model-registry actions to the Walacor audit chain under a dedicated ETId
+(configurable via `walacor_lifecycle_events_etid`, default 9000024). `LifecycleEvent`
+is the in-memory representation; `to_record()` produces the payload the Walacor
+client submits — the ETId itself travels in the HTTP header, not the payload.
+
+Full write-with-retry plumbing lives in Task 21's walacor_writer.py. This module
+only defines types + factory builders.
+"""
 from __future__ import annotations
-import hashlib, json, time
+
+import hashlib
+import json
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-ONNX_LIFECYCLE_ETID = "onnx_lifecycle_event"
 
 class EventType(str, Enum):
     TRAINING_DATASET_FINGERPRINT = "training_dataset_fingerprint"
@@ -378,6 +457,7 @@ class EventType(str, Enum):
     MODEL_PROMOTED = "model_promoted"
     MODEL_REJECTED = "model_rejected"
 
+
 @dataclass
 class LifecycleEvent:
     event_type: EventType
@@ -385,27 +465,64 @@ class LifecycleEvent:
     timestamp: float = field(default_factory=time.time)
 
     def to_record(self) -> dict[str, Any]:
+        # ETId is passed in the HTTP header by the Walacor client, NOT embedded here.
         return {
-            "etid": ONNX_LIFECYCLE_ETID,
             "event_type": self.event_type.value,
             "timestamp": self.timestamp,
             **self.payload,
         }
 
-def _sorted_row_hash(row_ids: list[int], content_hash: str) -> str:
-    canonical = json.dumps({"row_ids": sorted(row_ids), "content_hash": content_hash}, sort_keys=True)
+
+def _dataset_hash(row_ids: list[int], content_hash: str) -> str:
+    canonical = json.dumps(
+        {"row_ids": sorted(row_ids), "content_hash": content_hash}, sort_keys=True
+    )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
-def build_training_fingerprint(*, model_name: str, row_ids: list[int], content_hash: str) -> LifecycleEvent:
+
+def build_training_fingerprint(
+    *, model_name: str, row_ids: list[int], content_hash: str
+) -> LifecycleEvent:
     return LifecycleEvent(
         event_type=EventType.TRAINING_DATASET_FINGERPRINT,
         payload={
             "model_name": model_name,
             "row_ids": sorted(row_ids),
             "content_hash": content_hash,
-            "dataset_hash": _sorted_row_hash(row_ids, content_hash),
+            "dataset_hash": _dataset_hash(row_ids, content_hash),
         },
     )
+
+
+def build_candidate_created(
+    *, model_name: str, candidate_version: str, dataset_hash: str,
+    training_sample_count: int,
+) -> LifecycleEvent:
+    return LifecycleEvent(
+        event_type=EventType.CANDIDATE_CREATED,
+        payload={
+            "model_name": model_name,
+            "candidate_version": candidate_version,
+            "dataset_hash": dataset_hash,
+            "training_sample_count": training_sample_count,
+        },
+    )
+
+
+def build_shadow_validation_complete(
+    *, model_name: str, candidate_version: str,
+    metrics: dict[str, Any], passed: bool,
+) -> LifecycleEvent:
+    return LifecycleEvent(
+        event_type=EventType.SHADOW_VALIDATION_COMPLETE,
+        payload={
+            "model_name": model_name,
+            "candidate_version": candidate_version,
+            "metrics": metrics,
+            "passed": passed,
+        },
+    )
+
 
 def build_promotion_event(
     *, model_name: str, candidate_version: str, dataset_hash: str,
@@ -422,25 +539,70 @@ def build_promotion_event(
         },
     )
 
-# Similar factories for CANDIDATE_CREATED, SHADOW_VALIDATION_COMPLETE, MODEL_REJECTED
+
+def build_model_rejected(
+    *, model_name: str, candidate_version: str, reason: str, stage: str,
+) -> LifecycleEvent:
+    return LifecycleEvent(
+        event_type=EventType.MODEL_REJECTED,
+        payload={
+            "model_name": model_name,
+            "candidate_version": candidate_version,
+            "reason": reason,
+            "stage": stage,  # "load" | "sanity" | "shadow" | "manual"
+        },
+    )
 ```
 
-**Step 4: Register ETId in `walacor/client.py`**
+**Step 4: Add config field for lifecycle events ETId**
 
-Add `ONNX_LIFECYCLE_ETID` to the existing ETId registration map so the Walacor client accepts writes of this type. Look at how `9000003` is registered for tool events and follow the same pattern.
+In `src/gateway/config.py`, add a new field alongside the existing `walacor_*_etid` block (the block currently contains `walacor_executions_etid`, `walacor_attempts_etid`, `walacor_tool_events_etid`). Follow the exact same `Field(default=..., description=..., validation_alias=AliasChoices(...))` pattern:
 
-**Step 5: Run tests**
+```python
+walacor_lifecycle_events_etid: int = Field(
+    default=9000024,
+    description="Walacor ETId for ONNX lifecycle event records (training fingerprint, candidate, shadow, promote, reject)",
+    validation_alias=AliasChoices("WALACOR_LIFECYCLE_EVENTS_ETID", "walacor_lifecycle_events_etid"),
+)
+```
+
+**Step 5: Extend `WalacorClient` constructor**
+
+In `src/gateway/walacor/client.py`:
+- Add `lifecycle_events_etid: int = 9000024` to `__init__` signature (right after `tool_events_etid`).
+- Store as `self._lifecycle_events_etid = lifecycle_events_etid` alongside the other `self._*_etid` fields.
+- Include in the `logger.info("WalacorClient ready ...")` line.
+- Do NOT add a `write_lifecycle_event(...)` method here — that's Task 21.
+
+Also update the call sites that instantiate `WalacorClient` (check `main.py`) to pass `lifecycle_events_etid=settings.walacor_lifecycle_events_etid`.
+
+**Step 6: Document in `.env.example`**
+
+Add a line in the existing Walacor ETId block (where `WALACOR_TOOL_EVENTS_ETID` lives):
 
 ```
-pytest tests/unit/test_lifecycle_events.py -v
-# expect: 3 passed
+WALACOR_LIFECYCLE_EVENTS_ETID=9000024              # Phase 25 ONNX lifecycle events (training, candidate, shadow, promotion, rejection)
 ```
 
-**Step 6: Commit**
+**Step 7: Run tests**
 
 ```
-git add src/gateway/intelligence/events.py src/gateway/walacor/client.py tests/unit/test_lifecycle_events.py
-git commit -m "feat(intelligence): lifecycle event types + Walacor ETId registration"
+.venv/bin/python -m pytest tests/unit/test_lifecycle_events.py -v
+# expect: 8 passed
+```
+
+Also smoke-check that you didn't break existing Walacor tests:
+
+```
+.venv/bin/python -m pytest tests/unit/ -k "walacor or config" -v
+```
+
+**Step 8: Commit**
+
+```
+git add src/gateway/intelligence/events.py src/gateway/config.py src/gateway/walacor/client.py .env.example tests/unit/test_lifecycle_events.py
+# also stage main.py only if you had to update a WalacorClient instantiation
+git commit -m "feat(intelligence): lifecycle event types + Walacor ETId 9000024"
 ```
 
 ---
@@ -448,9 +610,11 @@ git commit -m "feat(intelligence): lifecycle event types + Walacor ETId registra
 ### Task 4: `ModelVerdict` dataclass + `intelligence/__init__.py`
 
 **Files:**
-- Create: `src/gateway/intelligence/__init__.py`
+- Modify: `src/gateway/intelligence/__init__.py` (file already exists — keep/update the module docstring, add `ModelVerdict` export)
 - Create: `src/gateway/intelligence/types.py`
 - Test: `tests/unit/test_intelligence_types.py`
+
+**Note on `__init__.py`:** The file was added in commit `eb188d9` (Apr 6, Schema Intelligence v2) and currently contains only a one-line docstring. Modify it to reflect the broader Phase 25 scope and re-export `ModelVerdict`. Do NOT replace the file — preserve the package structure and update the docstring.
 
 **Step 1: Test**
 
