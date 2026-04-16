@@ -82,6 +82,7 @@ class WalacorClient:
         executions_etid: int = 9000001,
         attempts_etid: int = 9000002,
         tool_events_etid: int = 9000003,
+        lifecycle_events_etid: int = 9000024,
     ) -> None:
         self._server = server.rstrip("/")
         self._username = username
@@ -89,6 +90,7 @@ class WalacorClient:
         self._executions_etid = executions_etid
         self._attempts_etid = attempts_etid
         self._tool_events_etid = tool_events_etid
+        self._lifecycle_events_etid = lifecycle_events_etid
         self._token: str | None = None
         self._http: httpx.AsyncClient | None = None
         self._auth_lock: asyncio.Lock = asyncio.Lock()
@@ -105,8 +107,11 @@ class WalacorClient:
         )
         await self._authenticate()
         self._refresh_task = asyncio.create_task(self._refresh_loop())
-        logger.info("WalacorClient ready server=%s executions_etid=%d attempts_etid=%d tool_events_etid=%d",
-                    self._server, self._executions_etid, self._attempts_etid, self._tool_events_etid)
+        logger.info(
+            "WalacorClient ready server=%s executions_etid=%d attempts_etid=%d tool_events_etid=%d lifecycle_events_etid=%d",
+            self._server, self._executions_etid, self._attempts_etid, self._tool_events_etid,
+            self._lifecycle_events_etid,
+        )
 
     async def close(self) -> None:
         """Close the underlying HTTP client and stop the refresh task."""

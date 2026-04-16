@@ -453,6 +453,7 @@ async def _init_walacor(settings, ctx) -> None:
         executions_etid=settings.walacor_executions_etid,
         attempts_etid=settings.walacor_attempts_etid,
         tool_events_etid=settings.walacor_tool_events_etid,
+        lifecycle_events_etid=settings.walacor_lifecycle_events_etid,
     )
     await ctx.walacor_client.start()
     logger.info(
