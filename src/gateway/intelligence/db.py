@@ -1,3 +1,13 @@
+"""SQLite store for the Phase 25 self-learning intelligence layer.
+
+Holds three tables: `onnx_verdicts` (per-inference predictions), `shadow_comparisons`
+(candidate vs. production side-by-side), and `training_snapshots` (dataset fingerprints).
+
+Connections are opened in **autocommit mode** (`isolation_level=None`) — the `with`
+statement around `_connect()` does NOT provide transaction rollback on exception.
+Callers that need atomic multi-statement writes (e.g., batch verdict flushes) must
+issue an explicit `BEGIN IMMEDIATE` / `COMMIT` themselves.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -61,8 +71,13 @@ class IntelligenceDB:
             conn.executescript(SCHEMA)
 
     def list_tables(self) -> List[str]:
+        # Filter `sqlite_%` so SQLite's internal bookkeeping tables — created
+        # eagerly by AUTOINCREMENT columns — don't leak to callers doing set
+        # comparisons or iterating for DDL operations.
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
             ).fetchall()
             return [r[0] for r in rows]
