@@ -1305,6 +1305,81 @@ async def _run_response_policy(
 
 # ── Record build + write (Steps 6–8) ─────────────────────────────────────────
 
+def _emit_harvester_signals(record: dict, session_id: str | None) -> None:
+    """Fan out HarvesterSignals for each ONNX model that ran in this request.
+
+    Reads from the finalized execution record (not request.state) so the
+    signal reflects exactly what was audited. One signal per model — the
+    runner filters by `target_model` on its side. Non-blocking: uses
+    `submit()` which returns False on queue overflow, never raises.
+
+    The `request_id` on the signal matches the value used by the verdict
+    recording sites (`request_id_var.get()`), so harvesters that
+    `UPDATE onnx_verdicts WHERE request_id=?` find the row we enqueued
+    the signal for.
+    """
+    from gateway.intelligence.harvesters import HarvesterSignal
+
+    ctx = get_pipeline_context()
+    runner = ctx.harvester_runner
+    if runner is None:
+        return
+
+    rid = request_id_var.get() or None
+    meta = record.get("metadata") or {}
+    prompt = record.get("prompt_text") or ""
+    common_context = {"session_id": session_id, "prompt": prompt}
+
+    # Intent — `_intent` is populated in `classify_intent`'s post-process
+    # path (orchestrator wiring above SchemaIntelligence). When the request
+    # short-circuited before intent inference, skip the signal.
+    intent_label = meta.get("_intent")
+    if isinstance(intent_label, str) and intent_label:
+        runner.submit(HarvesterSignal(
+            request_id=rid,
+            model_name="intent",
+            prediction=intent_label,
+            response_payload=meta,
+            context=common_context,
+        ))
+
+    # SchemaMapper — `canonical` is present when `map_response` ran. The
+    # prediction is a coarse label ("complete" when content was recovered,
+    # "incomplete" otherwise) matching what SchemaMapper records to the
+    # verdict log.
+    canonical = meta.get("canonical")
+    if isinstance(canonical, dict):
+        runner.submit(HarvesterSignal(
+            request_id=rid,
+            model_name="schema_mapper",
+            prediction="complete" if canonical.get("content_length", 0) > 0 else "incomplete",
+            response_payload=meta,
+            context=common_context,
+        ))
+
+    # Safety — look for a safety analyzer's decision in `analyzer_decisions`.
+    # `truzenai.safety.v1` is the canonical analyzer_id for SafetyClassifier
+    # (set on the class). Any decision with category != "safety" means it
+    # flagged a specific category; prediction carries that label so the
+    # harvester can diff against LlamaGuard.
+    decisions = meta.get("analyzer_decisions") or []
+    if isinstance(decisions, list):
+        for d in decisions:
+            if not isinstance(d, dict):
+                continue
+            if d.get("analyzer_id") != "truzenai.safety.v1":
+                continue
+            category = d.get("category") or "safe"
+            runner.submit(HarvesterSignal(
+                request_id=rid,
+                model_name="safety",
+                prediction=category,
+                response_payload=meta,
+                context=common_context,
+            ))
+            break
+
+
 async def _build_and_write_record(
     request: Request,
     call: ModelCall,
@@ -1552,6 +1627,19 @@ async def _build_and_write_record(
             await _intel_worker.enqueue(job)
         except Exception:
             pass  # Truly fire-and-forget
+
+    # ── Phase 25 Task 13: harvester dispatch (fire-and-forget) ──────
+    # Emits one HarvesterSignal per ONNX model that participated in the
+    # request so per-model harvesters (Tasks 14-16) can back-write
+    # divergence labels onto the matching verdict row. Guarded in its
+    # own try/except because this runs AFTER the WAL write — the user
+    # response is already out, but the orchestrator task is still on the
+    # return path and must not raise.
+    if getattr(ctx, "harvester_runner", None) is not None:
+        try:
+            _emit_harvester_signals(record, session_id)
+        except Exception:
+            logger.debug("harvester dispatch failed (non-fatal)", exc_info=True)
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
