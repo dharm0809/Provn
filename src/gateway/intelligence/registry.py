@@ -16,8 +16,10 @@ InferenceSession reload signaling is Task 11.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Canonical set of model names this registry serves. Matches the `model_name`
@@ -47,6 +49,25 @@ def _validate_model_name(model: str) -> None:
         raise ValueError(
             f"unknown model name {model!r}; "
             f"expected one of {sorted(ALLOWED_MODEL_NAMES)}"
+        )
+
+
+def _validate_archived_filename(filename: str, model: str) -> None:
+    """Validate an archive filename is a safe pure filename and belongs to `model`.
+
+    Rejects path separators and `..` traversal segments to keep the archive
+    input to `rollback` confined to the archive directory. Also enforces that
+    the filename starts with `{model}-` so callers can't rollback one model
+    onto another's archive (e.g. restore a safety archive into intent's slot).
+    """
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise ValueError(
+            f"invalid archived_filename {filename!r}: "
+            "no path separators or '..' allowed"
+        )
+    if not filename.startswith(f"{model}-"):
+        raise ValueError(
+            f"archived_filename {filename!r} does not belong to model {model!r}"
         )
 
 
@@ -109,3 +130,67 @@ class ModelRegistry:
         if model not in self._locks:
             self._locks[model] = asyncio.Lock()
         return self._locks[model]
+
+    def _archive_filename(self, model: str) -> Path:
+        """Generate a collision-safe archive filename for the current production file.
+
+        Uses ISO-8601 UTC timestamp with microseconds, falling back to a counter
+        suffix if (pathologically) the filename is already in use — catches
+        clock-reset cases without racing. Called only from inside
+        `self.lock_for(model)`, so concurrent callers for the same model are
+        already serialized.
+        """
+        archive_dir = self.base / "archive"
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        base = f"{model}-archived-{ts}.onnx"
+        candidate = archive_dir / base
+        if not candidate.exists():
+            return candidate
+        # Extremely unlikely under the lock, but defend against clock reset
+        # or identical-microsecond calls: append a bounded counter.
+        for i in range(1, 1000):
+            alt = archive_dir / f"{model}-archived-{ts}-{i}.onnx"
+            if not alt.exists():
+                return alt
+        raise RuntimeError(f"could not find unique archive filename for {model}")
+
+    async def promote(self, model: str, version: str) -> None:
+        """Atomically promote a candidate to production.
+
+        1. Current production (if any) is moved to archive under a
+           collision-safe timestamped filename.
+        2. The candidate at `candidates/{model}-{version}.onnx` is renamed
+           onto `production/{model}.onnx`.
+
+        Both moves are `os.rename` within the same filesystem (subdirs of
+        `base_path`), so each step is atomic on POSIX. Serialized per-model
+        via `lock_for(model)`.
+        """
+        _validate_model_name(model)
+        async with self.lock_for(model):
+            cand_path = self.base / "candidates" / f"{model}-{version}.onnx"
+            if not cand_path.exists():
+                raise FileNotFoundError(cand_path)
+            prod_path = self.production_path(model)
+            if prod_path.exists():
+                os.rename(prod_path, self._archive_filename(model))
+            os.rename(cand_path, prod_path)
+
+    async def rollback(self, model: str, archived_filename: str) -> None:
+        """Restore a previously archived version to production.
+
+        The current production file (if any) is archived under a new
+        collision-safe timestamped filename before the rollback target is
+        moved into production — rollback must not discard live state.
+        Serialized per-model via `lock_for(model)`.
+        """
+        _validate_model_name(model)
+        _validate_archived_filename(archived_filename, model)
+        async with self.lock_for(model):
+            archive_path = self.base / "archive" / archived_filename
+            if not archive_path.exists():
+                raise FileNotFoundError(archive_path)
+            prod_path = self.production_path(model)
+            if prod_path.exists():
+                os.rename(prod_path, self._archive_filename(model))
+            os.rename(archive_path, prod_path)
