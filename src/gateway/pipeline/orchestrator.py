@@ -663,25 +663,53 @@ async def _after_stream_record(
 
         rp_version, rp_result, rp_decisions = await _eval_post_stream_policy(ctx, settings, model_response)
 
-        # Phase 14: capture passive tool interactions from streamed response
+        # Phase 14: capture passive tool interactions from streamed response.
+        # IMPORTANT: capture BEFORE normalization (below) which may replace model_response
+        # and clear tool_interactions.
         stream_tool_meta: dict[str, Any] = {}
-        if model_response.tool_interactions:
-            stream_tool_meta = _build_tool_audit_metadata(model_response.tool_interactions, "passive", 0)
-            _emit_tool_metrics(model_response.tool_interactions, adapter.get_provider_name(), "provider")
+        _raw_tool_interactions = model_response.tool_interactions
+        _raw_thinking = model_response.thinking_content
+        _raw_provider_id = model_response.provider_request_id
+        _raw_usage = model_response.usage
+        if _raw_tool_interactions:
+            stream_tool_meta = _build_tool_audit_metadata(_raw_tool_interactions, "passive", 0)
+            _emit_tool_metrics(_raw_tool_interactions, adapter.get_provider_name(), "provider")
 
         session_id = call.metadata.get("session_id")
+
+        # Phase 24.5: full-fidelity metadata for streaming path.
+        # Uses _raw_* values captured BEFORE normalization (which may replace model_response).
+        _stream_meta: dict = {
+            **call.metadata, **audit_metadata, **stream_tool_meta,
+            "response_policy_version": rp_version,
+            "response_policy_result": rp_result,
+            "analyzer_decisions": rp_decisions,
+            "enforcement_mode": settings.enforcement_mode,
+            "thinking_content": _raw_thinking,
+            "provider_response_id": _raw_provider_id,
+        }
+        if _raw_tool_interactions:
+            _stream_meta["tool_events_detail"] = [
+                {
+                    "tool_id": t.tool_id,
+                    "tool_type": t.tool_type,
+                    "tool_name": t.tool_name,
+                    "input_data": t.input_data,
+                    "output_data": t.output_data,
+                    "sources": t.sources,
+                    "metadata": t.metadata,
+                }
+                for t in _raw_tool_interactions
+            ]
+        if _raw_usage:
+            _stream_meta["token_usage"] = _raw_usage
+
         record = build_execution_record(
             call=call, model_response=model_response, attestation_id=attestation_id,
             policy_version=policy_version, policy_result=policy_result,
             tenant_id=settings.gateway_tenant_id, gateway_id=settings.gateway_id,
             user=call.metadata.get("user"), session_id=session_id,
-            metadata={
-                **call.metadata, **audit_metadata, **stream_tool_meta,
-                "response_policy_version": rp_version,
-                "response_policy_result": rp_result,
-                "analyzer_decisions": rp_decisions,
-                "enforcement_mode": settings.enforcement_mode,
-            },
+            metadata=_stream_meta,
             model_id=call.model_id, provider=adapter.get_provider_name(),
             latency_ms=round((time.perf_counter() - pipeline_start) * 1000, 1) if pipeline_start else None,
             file_metadata=getattr(request.state, "file_metadata", None) if request else None,
@@ -1293,21 +1321,91 @@ async def _build_and_write_record(
     session_id = call.metadata.get("session_id")
     tool_meta = _build_tool_audit_metadata(params.tool_interactions, params.tool_strategy, params.tool_iterations)
 
+    # ── Phase 24.5: full-fidelity metadata capture ──────────────────────────
+    # The metadata field is the COMPLETE audit record. ONNX models (SchemaMapper,
+    # SafetyClassifier, IntentClassifier) and the adapter's parse_response produce
+    # structured data — dump ALL of it so nothing is lost.
+    full_metadata: dict = {
+        **call.metadata, **params.audit_metadata, **tool_meta,
+        "response_policy_version": params.rp_version,
+        "response_policy_result": params.rp_result,
+        "analyzer_decisions": params.rp_decisions,
+        "token_usage": model_response.usage,
+        "budget_remaining": params.budget_remaining,
+        "enforcement_mode": settings.enforcement_mode,
+        # Model response extras (thinking, provider ID)
+        "thinking_content": model_response.thinking_content,
+        "provider_response_id": model_response.provider_request_id,
+    }
+
+    # Full tool interactions with actual data, not just hashes.
+    # Hashes are in tool_meta.tool_interactions (for tamper-proof linking);
+    # full data is here for audit inspection without needing separate queries.
+    if params.tool_interactions:
+        full_metadata["tool_events_detail"] = [
+            {
+                "tool_id": t.tool_id,
+                "tool_type": t.tool_type,
+                "tool_name": t.tool_name,
+                "input_data": t.input_data,
+                "output_data": t.output_data,
+                "sources": t.sources,
+                "metadata": t.metadata,
+            }
+            for t in params.tool_interactions
+        ]
+
+    # SchemaMapper canonical output (ONNX-extracted structured response).
+    # This is the provider-agnostic view: same shape regardless of whether
+    # the upstream was OpenAI, Anthropic, Ollama, Gemini, or anything else.
+    _canonical = getattr(request.state, "_canonical_response", None)
+    if _canonical:
+        _can_dict: dict = {
+            "content_length": len(_canonical.content) if _canonical.content else 0,
+            "thinking_content_length": len(_canonical.thinking_content) if _canonical.thinking_content else 0,
+            "finish_reason": _canonical.finish_reason,
+            "response_id": _canonical.response_id,
+            "model": _canonical.model,
+            "mapping_confidence": round(_canonical._mapping_confidence, 3),
+        }
+        if _canonical.usage:
+            _can_dict["usage"] = {
+                "prompt_tokens": _canonical.usage.prompt_tokens,
+                "completion_tokens": _canonical.usage.completion_tokens,
+                "total_tokens": _canonical.usage.total_tokens,
+                "reasoning_tokens": _canonical.usage.reasoning_tokens,
+                "cached_tokens": _canonical.usage.cached_tokens,
+                "cache_creation_tokens": _canonical.usage.cache_creation_tokens,
+                "cost_usd": _canonical.usage.cost_usd,
+            }
+        if _canonical.tool_calls:
+            _can_dict["tool_calls"] = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments, "type": tc.type}
+                for tc in _canonical.tool_calls
+            ]
+        if _canonical.citations:
+            _can_dict["citations"] = [
+                {"url": c.url, "title": c.title, "snippet": c.snippet}
+                for c in _canonical.citations
+            ]
+        if _canonical.timing:
+            _can_dict["timing"] = {
+                "total_ms": _canonical.timing.total_ms,
+                "prompt_ms": _canonical.timing.prompt_ms,
+                "completion_ms": _canonical.timing.completion_ms,
+                "queue_ms": _canonical.timing.queue_ms,
+            }
+        if _canonical.overflow:
+            _can_dict["overflow_keys"] = list(_canonical.overflow.keys())[:30]
+        full_metadata["canonical"] = _can_dict
+
     record = build_execution_record(
         call=call, model_response=model_response, attestation_id=params.attestation_id,
         policy_version=params.policy_version,
         policy_result=params.policy_result,
         tenant_id=settings.gateway_tenant_id, gateway_id=settings.gateway_id,
         user=call.metadata.get("user"), session_id=session_id,
-        metadata={
-            **call.metadata, **params.audit_metadata, **tool_meta,
-            "response_policy_version": params.rp_version,
-            "response_policy_result": params.rp_result,
-            "analyzer_decisions": params.rp_decisions,
-            "token_usage": model_response.usage,
-            "budget_remaining": params.budget_remaining,
-            "enforcement_mode": settings.enforcement_mode,
-        },
+        metadata=full_metadata,
         model_id=call.model_id, provider=params.provider,
         latency_ms=params.latency_ms,
         timings=params.timings,
