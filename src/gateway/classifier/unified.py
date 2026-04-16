@@ -23,10 +23,13 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gateway.adapters.base import ModelResponse
 from gateway.adapters.caching import detect_cache_hit
+
+if TYPE_CHECKING:
+    from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -199,10 +202,12 @@ class SchemaIntelligence:
         self,
         onnx_model_path: str | None = None,
         has_mcp_tools: bool = False,
+        verdict_buffer: "VerdictBuffer | None" = None,
     ) -> None:
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
         self._label_map: dict[int, str] = {}
+        self._verdict_buffer = verdict_buffer
 
         # Provider profile cache — learned from observed responses
         self._provider_profiles: dict[str, dict[str, Any]] = {}
@@ -326,17 +331,39 @@ class SchemaIntelligence:
         model_id: str,
     ) -> IntentResult:
         """Classify request intent. Tier 1 deterministic, Tier 2 ONNX ML."""
-        result = self._tier1_deterministic(prompt, metadata, model_id)
-        if result:
-            return result
+        tier1 = self._tier1_deterministic(prompt, metadata, model_id)
+        if tier1 is not None:
+            result = tier1
+        elif self._onnx_session:
+            result = self._tier2_onnx(prompt)
+        else:
+            result = IntentResult(
+                intent=NORMAL, confidence=0.5,
+                tier="deterministic", reason="no_ml_model_default",
+            )
 
-        if self._onnx_session:
-            return self._tier2_onnx(prompt)
+        # Phase 25: record verdict for self-learning (observational only).
+        # Never allowed to break inference — wrap the whole stanza defensively.
+        # Note: model_name="intent" matches IntentClassifier so the distillation
+        # pipeline treats them as one stream (the harvester keys off model_name).
+        if self._verdict_buffer is not None:
+            try:
+                from gateway.util.request_context import request_id_var
+                from gateway.intelligence.types import ModelVerdict
+                rid = request_id_var.get() or None
+                self._verdict_buffer.record(
+                    ModelVerdict.from_inference(
+                        model_name="intent",
+                        input_text=prompt,
+                        prediction=result.intent,
+                        confidence=float(result.confidence),
+                        request_id=rid,
+                    )
+                )
+            except Exception:
+                logger.debug("verdict recording failed", exc_info=True)
 
-        return IntentResult(
-            intent=NORMAL, confidence=0.5,
-            tier="deterministic", reason="no_ml_model_default",
-        )
+        return result
 
     def _tier1_deterministic(
         self, prompt: str, metadata: dict, model_id: str,

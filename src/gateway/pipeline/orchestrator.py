@@ -1807,7 +1807,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
                         and settings.mcp_servers_json)
         _onnx_path = str(Path(__file__).parent.parent / "classifier" / "model.onnx")
-        _si = SchemaIntelligence(onnx_model_path=_onnx_path, has_mcp_tools=_has_mcp)
+        _si = SchemaIntelligence(
+            onnx_model_path=_onnx_path,
+            has_mcp_tools=_has_mcp,
+            verdict_buffer=ctx.verdict_buffer,
+        )
         ctx.schema_intelligence = _si
 
     # Build metadata context for intent classification

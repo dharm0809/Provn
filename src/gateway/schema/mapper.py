@@ -113,6 +113,7 @@ class SchemaMapper:
         # Never allowed to break inference — wrap the whole stanza defensively.
         if self._verdict_buffer is not None:
             try:
+                from gateway.util.request_context import request_id_var
                 from gateway.intelligence.types import ModelVerdict
                 # Serialize raw dict as input_text for input_hash. Use sort_keys
                 # so logically-equal dicts produce a stable hash. Fallback to
@@ -122,13 +123,14 @@ class SchemaMapper:
                 except (TypeError, ValueError):
                     input_text = repr(raw)
                 prediction = "incomplete" if result._mapping_incomplete else "complete"
+                rid = request_id_var.get() or None
                 self._verdict_buffer.record(
                     ModelVerdict.from_inference(
                         model_name="schema_mapper",
                         input_text=input_text,
                         prediction=prediction,
                         confidence=float(result._mapping_confidence or 0.0),
-                        request_id=None,
+                        request_id=rid,
                     )
                 )
             except Exception:
