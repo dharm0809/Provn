@@ -62,14 +62,23 @@ class RetentionSweeper:
         # matches the VerdictFlushWorker pattern for multi-statement writes.
         conn = sqlite3.connect(self._db.path)
         try:
-            conn.execute(
+            cur_v = conn.execute(
                 "DELETE FROM onnx_verdicts WHERE timestamp < ?",
                 (cutoff_iso,),
             )
-            conn.execute(
+            cur_s = conn.execute(
                 "DELETE FROM shadow_comparisons WHERE timestamp < ?",
                 (cutoff_iso,),
             )
             conn.commit()
+            # Log row counts so a catastrophic deletion (e.g. clock-skew
+            # pushing `now` far into the future) shows up in dashboards
+            # well before the tables are empty — defense in depth against
+            # the ISO-8601 lex-order collapse described in the docstring.
+            if cur_v.rowcount or cur_s.rowcount:
+                logger.info(
+                    "verdict retention swept verdicts=%d shadows=%d cutoff=%s",
+                    cur_v.rowcount, cur_s.rowcount, cutoff_iso,
+                )
         finally:
             conn.close()
