@@ -143,13 +143,22 @@ git commit -m "feat(config): add intelligence layer settings for self-learning l
 - Create: `src/gateway/intelligence/db.py`
 - Test: `tests/unit/test_intelligence_db.py`
 
+**Notes on conventions** (these apply to all later SQLite work in the intelligence package too):
+- Connections use `isolation_level=None` (autocommit). The `with self._connect() as conn:` block does NOT rollback on exception — any caller that needs atomic batch writes must issue explicit `BEGIN IMMEDIATE` / `COMMIT`.
+- Introspection queries (anything reading `sqlite_master`) must filter `name NOT LIKE 'sqlite_%'`. SQLite eagerly creates internal bookkeeping tables (e.g., `sqlite_sequence` for AUTOINCREMENT) at DDL time, and they'll leak into consumer code that does equality checks or DDL iteration.
+
 **Step 1: Write the failing test**
 
 ```python
 # tests/unit/test_intelligence_db.py
 from __future__ import annotations
-import tempfile, os, pathlib
+
+import sqlite3
+
+import pytest
+
 from gateway.intelligence.db import IntelligenceDB
+
 
 def test_db_creates_tables(tmp_path):
     db = IntelligenceDB(str(tmp_path / "int.db"))
@@ -159,10 +168,45 @@ def test_db_creates_tables(tmp_path):
     assert "shadow_comparisons" in tables
     assert "training_snapshots" in tables
 
+
 def test_db_is_idempotent(tmp_path):
     p = str(tmp_path / "int.db")
     IntelligenceDB(p).init_schema()
     IntelligenceDB(p).init_schema()  # second call must not raise
+
+
+def test_list_tables_hides_sqlite_internals(tmp_path):
+    # AUTOINCREMENT columns cause SQLite to eagerly create `sqlite_sequence` at
+    # DDL time; callers doing equality comparisons shouldn't see it.
+    db = IntelligenceDB(str(tmp_path / "int.db"))
+    db.init_schema()
+    assert set(db.list_tables()) == {
+        "onnx_verdicts",
+        "shadow_comparisons",
+        "training_snapshots",
+    }
+
+
+def test_unique_constraint_on_training_dataset_hash(tmp_path):
+    db = IntelligenceDB(str(tmp_path / "int.db"))
+    db.init_schema()
+    conn = sqlite3.connect(db.path)
+    try:
+        conn.execute(
+            "INSERT INTO training_snapshots (model_name, dataset_hash, row_ids_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("intent", "abc123", "[1,2,3]", 0.0),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO training_snapshots (model_name, dataset_hash, row_ids_json, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("intent", "abc123", "[4,5]", 1.0),
+            )
+            conn.commit()
+    finally:
+        conn.close()
 ```
 
 **Step 2: Run to verify fail**
@@ -175,8 +219,14 @@ pytest tests/unit/test_intelligence_db.py -v
 **Step 3: Implement `IntelligenceDB`**
 
 ```python
-# src/gateway/intelligence/db.py
+"""SQLite store for the Phase 25 self-learning intelligence layer.
+
+Connections open in autocommit mode (`isolation_level=None`). The `with _connect()`
+block does NOT rollback on exception; callers needing atomic batch writes must issue
+explicit `BEGIN IMMEDIATE` / `COMMIT`.
+"""
 from __future__ import annotations
+
 import sqlite3
 from pathlib import Path
 from typing import List
@@ -220,6 +270,7 @@ CREATE TABLE IF NOT EXISTS training_snapshots (
 );
 """
 
+
 class IntelligenceDB:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -239,7 +290,9 @@ class IntelligenceDB:
     def list_tables(self) -> List[str]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
             ).fetchall()
             return [r[0] for r in rows]
 ```
