@@ -361,6 +361,27 @@ async def _self_test() -> None:
         if parsed.scheme not in ("http", "https"):
             raise RuntimeError(f"Control plane URL invalid scheme: {parsed.scheme}")
 
+    # Self-loop guard: if provider_ollama_url points at the gateway's own port, every
+    # request would be forwarded back to itself via OllamaAdapter (infinite loop).
+    # Detect this at startup and refuse to start rather than generating a 429 flood.
+    # Check both WALACOR_GATEWAY_PORT and the PORT env var (uvicorn uses PORT on some PaaS).
+    if settings.provider_ollama_url:
+        _ollama_parsed = urlparse(settings.provider_ollama_url)
+        _ollama_host = _ollama_parsed.hostname or ""
+        _ollama_port = _ollama_parsed.port or 80
+        _is_local = _ollama_host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+        _gw_ports = {settings.gateway_port}
+        _port_env = os.environ.get("PORT", "")
+        if _port_env.isdigit():
+            _gw_ports.add(int(_port_env))
+        if _is_local and _ollama_port in _gw_ports:
+            raise RuntimeError(
+                f"WALACOR_PROVIDER_OLLAMA_URL ({settings.provider_ollama_url}) points at the "
+                f"gateway's own port ({_ollama_port}). This creates an infinite request loop. "
+                f"Set WALACOR_PROVIDER_OLLAMA_URL to the actual Ollama address "
+                f"(e.g. http://localhost:11434)."
+            )
+
     # WAL write/deliver smoke-test (WAL mode only). Record is dict (no prompt_hash/response_hash).
     if ctx.wal_writer:
         record = {
