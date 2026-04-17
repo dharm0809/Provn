@@ -30,6 +30,7 @@ from gateway.adapters.caching import detect_cache_hit
 
 if TYPE_CHECKING:
     from gateway.intelligence.registry import ModelRegistry
+    from gateway.intelligence.shadow import ShadowRunner
     from gateway.intelligence.verdict_buffer import VerdictBuffer
 
 logger = logging.getLogger(__name__)
@@ -206,11 +207,17 @@ class SchemaIntelligence:
         verdict_buffer: "VerdictBuffer | None" = None,
         registry: "ModelRegistry | None" = None,
         model_name: str | None = None,
+        shadow_runner: "ShadowRunner | None" = None,
     ) -> None:
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
         self._label_map: dict[int, str] = {}
         self._verdict_buffer = verdict_buffer
+        # Phase 25 Task 22: shadow runner — when wired, every classified
+        # intent fires a background candidate inference and records a
+        # `shadow_comparisons` row. Fail-open: runner is None on any
+        # wiring failure and the hook silently no-ops.
+        self._shadow_runner = shadow_runner
 
         # Provider profile cache — learned from observed responses
         self._provider_profiles: dict[str, dict[str, Any]] = {}
@@ -376,7 +383,30 @@ class SchemaIntelligence:
             except Exception:
                 logger.debug("verdict recording failed", exc_info=True)
 
+        # Phase 25 Task 22: shadow candidate inference. Fire-and-forget —
+        # the returned result above is already what the caller gets;
+        # this side-call only populates `shadow_comparisons`.
+        self._fire_shadow(prompt, result)
+
         return result
+
+    def _fire_shadow(self, prompt: str, result: "IntentResult") -> None:
+        """Dispatch a shadow inference on the active candidate, if any."""
+        if self._shadow_runner is None or self._reload_state.registry is None:
+            return
+        try:
+            from gateway.intelligence.shadow import maybe_fire_shadow
+            maybe_fire_shadow(
+                self._shadow_runner,
+                self._reload_state.registry,
+                model_name=self._reload_state.model_name,
+                input_text=prompt,
+                production_prediction=result.intent,
+                production_confidence=float(result.confidence),
+                infer_on_session=_intent_infer_on_session,
+            )
+        except Exception:
+            logger.debug("shadow fire failed (non-fatal)", exc_info=True)
 
     def _tier1_deterministic(
         self, prompt: str, metadata: dict, model_id: str,
@@ -743,6 +773,39 @@ class SchemaIntelligence:
         if self._reload_state.registry is None:
             return
         self.reload()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Shadow inference driver (Phase 25 Task 22)
+# ═══════════════════════════════════════════════════════════════════════════
+# Separate function, not a method, so the `ShadowRunner` never retains a
+# reference to the `SchemaIntelligence` instance — that would defeat the
+# fire-and-forget semantics (closures keep the caller alive across task
+# boundaries).
+
+
+def _intent_infer_on_session(session: Any, input_text: str) -> tuple[str, float]:
+    """Run intent inference against a candidate `InferenceSession`.
+
+    Mirrors the sklearn-pipeline input contract used by the distillation
+    `IntentTrainer` (`"prompt"` string input). The session is assumed to
+    emit both a label and a probability dict — we take the max prob as
+    the confidence. If the shape doesn't match (e.g. a topology-mismatched
+    candidate), an exception bubbles up to `fire_shadow_text` and gets
+    recorded as `candidate_error`.
+    """
+    import numpy as np
+
+    input_name = session.get_inputs()[0].name
+    inp = np.array([[input_text[:1000]]]).reshape(1, 1)
+    outputs = session.run(None, {input_name: inp})
+    label = str(outputs[0][0])
+    confidence = 1.0
+    if len(outputs) > 1:
+        probs = outputs[1][0]
+        if isinstance(probs, dict) and probs:
+            confidence = float(max(probs.values()))
+    return label, confidence
 
 
 # ═══════════════════════════════════════════════════════════════════════════

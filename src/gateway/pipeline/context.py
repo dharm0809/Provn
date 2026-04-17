@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from gateway.intelligence.harvesters import HarvesterRunner
     from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.retention import RetentionSweeper
+    from gateway.intelligence.shadow import ShadowRunner
     from gateway.intelligence.verdict_buffer import VerdictBuffer
     from gateway.mcp.registry import ToolRegistry
     from gateway.pipeline.budget_tracker import BudgetTracker
@@ -106,6 +107,11 @@ class PipelineContext:
         # verdict log. Signals are enqueued fire-and-forget from the
         # orchestrator's audit-finalization path.
         self.harvester_runner: HarvesterRunner | None = None
+        # Phase 25 Task 22: shadow inference runner. When a candidate
+        # model is registered via `ModelRegistry.enable_shadow`, every
+        # production inference fires a parallel candidate run and
+        # records a `shadow_comparisons` row. None disables shadow.
+        self.shadow_runner: ShadowRunner | None = None
 
 
 _ctx = PipelineContext()
