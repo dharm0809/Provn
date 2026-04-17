@@ -2320,6 +2320,43 @@ tr.clickable:hover td { background: var(--bg-hover); }
 }
 .intel-v { color: var(--text-primary); }
 
+/* Verdict-inspector divergence bars */
+.intel-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.intel-bar-row {
+  display: grid;
+  grid-template-columns: 200px 1fr 110px;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.intel-bar-label {
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.intel-bar-track {
+  background: var(--bg-inset);
+  height: 14px;
+  position: relative;
+  border: 1px solid var(--border);
+}
+.intel-bar-fill {
+  background: var(--gold);
+  height: 100%;
+  transition: width 0.25s ease;
+}
+.intel-bar-count {
+  font-size: 11px;
+  text-align: right;
+}
+
 /* Form validation */
 .form-input.invalid,
 .form-select.invalid {

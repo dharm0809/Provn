@@ -592,6 +592,161 @@ function RollbackModal({ model, onClose, onSuccess, onAuth }) {
   );
 }
 
+// ─── Verdict Inspector + Force Retrain ──────────────────────────
+
+const LIMIT_OPTIONS = [50, 100, 250, 500, 1000];
+
+function VerdictsView({ refresh }) {
+  const [model, setModel] = useState(ALLOWED_MODELS[0]);
+  const [divergenceOnly, setDivergenceOnly] = useState(true);
+  const [limit, setLimit] = useState(100);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [retrainStatus, setRetrainStatus] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const d = await api.getIntelligenceVerdicts(model, {
+        divergence_only: divergenceOnly,
+        limit,
+      });
+      setData(d);
+    } catch (e) {
+      if (e.message === 'AUTH') { refresh(); return; }
+      setError(e.message || 'failed to load verdicts');
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [model, divergenceOnly, limit, refresh]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const onRetrain = async () => {
+    setRetrainStatus(`Queueing retrain for ${model}…`);
+    try {
+      const res = await api.forceRetrain(model);
+      const jobId = res?.job_id || '';
+      setRetrainStatus(`Retrain queued for ${model} (job ${jobId.slice(0, 8)}…). New candidate will appear under Candidates tab when ready.`);
+    } catch (e) {
+      if (e.message === 'AUTH') { refresh(); return; }
+      setRetrainStatus(`Retrain failed: ${e.message}`);
+    }
+  };
+
+  const top = data?.top_divergence_types || [];
+  const totalDiv = top.reduce((s, t) => s + (t.count || 0), 0);
+  const rows = data?.rows || [];
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">Verdict Inspector</span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select className="form-select" style={{ width: 150 }} value={model} onChange={e => setModel(e.target.value)}>
+            {ALLOWED_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+            <input
+              type="checkbox"
+              checked={divergenceOnly}
+              onChange={e => setDivergenceOnly(e.target.checked)}
+            />
+            divergent only
+          </label>
+          <select className="form-select" style={{ width: 90 }} value={limit} onChange={e => setLimit(parseInt(e.target.value, 10))}>
+            {LIMIT_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <button className="btn btn-sm" onClick={load} disabled={loading}>
+            {loading ? '…' : 'Refresh'}
+          </button>
+          <button className="btn-primary btn-sm" onClick={onRetrain}>
+            Force Retrain
+          </button>
+        </div>
+      </div>
+
+      {retrainStatus && (
+        <div className="empty-state" style={{ padding: '8px 16px' }}>
+          <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{retrainStatus}</p>
+        </div>
+      )}
+
+      {error && <div className="empty-state"><p style={{ color: 'var(--red)' }}>{error}</p></div>}
+
+      {!error && divergenceOnly && top.length > 0 && (
+        <div style={{ padding: '8px 16px 14px' }}>
+          <div className="form-label" style={{ marginBottom: 8 }}>
+            Top divergence signals ({totalDiv} total)
+          </div>
+          <div className="intel-bars">
+            {top.map(t => {
+              const pct = totalDiv > 0 ? (t.count / totalDiv) * 100 : 0;
+              return (
+                <div key={t.signal} className="intel-bar-row">
+                  <div className="intel-bar-label" title={t.signal}>{t.signal}</div>
+                  <div className="intel-bar-track">
+                    <div className="intel-bar-fill" style={{ width: pct + '%' }} />
+                  </div>
+                  <div className="intel-bar-count mono">
+                    {t.count} <span style={{ color: 'var(--text-muted)' }}>({pct.toFixed(1)}%)</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {loading && <div className="skeleton-block" style={{ height: 180 }} />}
+      {!loading && !error && rows.length === 0 && (
+        <div className="empty-state">
+          <p>No {divergenceOnly ? 'divergent ' : ''}verdicts for {model}{divergenceOnly ? ' yet — harvesters write back-signals when they see disagreement' : ''}.</p>
+        </div>
+      )}
+
+      {!loading && !error && rows.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Time</th>
+              <th>Input Hash</th>
+              <th>Prediction</th>
+              <th>Confidence</th>
+              <th>Divergence Signal</th>
+              <th>Source</th>
+              <th>Request</th>
+            </tr></thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id}>
+                  <td title={formatTime(r.timestamp)}>{timeAgo(r.timestamp)}</td>
+                  <td className="mono" style={{ fontSize: 11 }} title={r.input_hash}>
+                    {truncHash(r.input_hash || '', 12)}
+                  </td>
+                  <td className="mono">{r.prediction || '-'}</td>
+                  <td className="mono">{r.confidence != null ? Number(r.confidence).toFixed(3) : '-'}</td>
+                  <td>
+                    {r.divergence_signal
+                      ? <span className="badge badge-warn">{r.divergence_signal}</span>
+                      : <span style={{ color: 'var(--text-muted)' }}>-</span>}
+                  </td>
+                  <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.divergence_source || '-'}</td>
+                  <td className="mono" style={{ fontSize: 11 }} title={r.request_id}>
+                    {r.request_id ? truncHash(r.request_id, 8) : '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main view ──────────────────────────────────────────────────
 
 export default function Intelligence({ refresh }) {
@@ -614,12 +769,7 @@ export default function Intelligence({ refresh }) {
       {sub === 'production' && <ProductionView refresh={refresh} />}
       {sub === 'candidates' && <CandidatesView refresh={refresh} />}
       {sub === 'history' && <HistoryView refresh={refresh} />}
-      {sub === 'verdicts' && (
-        <Placeholder
-          title="Verdict Inspector"
-          hint="Per-model divergence breakdown, verdict log samples, and force-retrain controls will appear here."
-        />
-      )}
+      {sub === 'verdicts' && <VerdictsView refresh={refresh} />}
     </div>
   );
 }
