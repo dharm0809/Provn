@@ -137,6 +137,35 @@ class DistillationWorker:
         """
         return await self._run_cycle()
 
+    async def retrain_one(self, model_name: str) -> CycleResult:
+        """Train a single model immediately, bypassing the trigger gate.
+
+        Wraps `_train_one` so the Task 28 `/retrain/{model}` endpoint
+        has a single-model variant alongside the all-models
+        `force_cycle`. Returns a CycleResult populated only for the
+        requested model — trained / skipped / failed buckets follow
+        the same semantics as a full cycle so the caller's parser
+        doesn't have to branch.
+        """
+        result = CycleResult()
+        if model_name not in ALLOWED_MODEL_NAMES:
+            # Non-canonical model name — neither trained nor skipped,
+            # just rejected. Surface in `failed` so the dashboard
+            # renders the error consistently.
+            result.failed.append(model_name)
+            return result
+        try:
+            outcome = await self._train_one(model_name)
+            if outcome is None:
+                result.skipped.append(model_name)
+            else:
+                result.trained.append(model_name)
+                result.candidates[model_name] = outcome
+        except Exception:
+            logger.exception("retrain_one(%s) failed", model_name)
+            result.failed.append(model_name)
+        return result
+
     # ── Cycle ──────────────────────────────────────────────────────────
 
     async def _run_cycle(self) -> CycleResult:

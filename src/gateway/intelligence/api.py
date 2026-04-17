@@ -431,6 +431,62 @@ async def rollback_model(request: Request) -> JSONResponse:
     })
 
 
+# ── Task 28: force retrain ──────────────────────────────────────────────
+
+
+_retrain_tasks: dict[str, Any] = {}
+
+
+async def force_retrain(request: Request) -> JSONResponse:
+    """Kick an immediate training pass for one model.
+
+    Returns 202 with a job_id so the dashboard can poll. The actual
+    training runs in a detached `asyncio.Task`; completion shows up on
+    `/v1/control/intelligence/candidates` when the worker writes the
+    new candidate file.
+    """
+    from gateway.intelligence.registry import ALLOWED_MODEL_NAMES
+    import asyncio
+    import uuid
+
+    model = request.path_params.get("model", "")
+    if model not in ALLOWED_MODEL_NAMES:
+        return JSONResponse(
+            {"error": f"unknown model name {model!r}"},
+            status_code=400,
+        )
+
+    ctx = get_pipeline_context()
+    worker = ctx.distillation_worker
+    if worker is None:
+        return _503("distillation worker not initialized")
+
+    job_id = str(uuid.uuid4())
+    task = asyncio.create_task(
+        worker.retrain_one(model),
+        name=f"retrain-{model}-{job_id}",
+    )
+    _retrain_tasks[job_id] = task
+    # Prune completed tasks so the dict doesn't grow without bound.
+    _reap_retrain_tasks()
+
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "model_name": model,
+            "status": "accepted",
+        },
+        status_code=202,
+    )
+
+
+def _reap_retrain_tasks() -> None:
+    """Drop completed retrain tasks from the tracking dict."""
+    done = [k for k, t in _retrain_tasks.items() if t.done()]
+    for k in done:
+        _retrain_tasks.pop(k, None)
+
+
 async def _write_lifecycle_event(ctx, event) -> None:
     """Best-effort emit via the pipeline writer. Fail-open."""
     writer = getattr(ctx, "lifecycle_event_writer", None)

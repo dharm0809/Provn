@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from gateway.intelligence.api import (
+    force_retrain,
     list_candidates,
     list_production_models,
     model_history,
@@ -516,3 +517,99 @@ async def test_rollback_404_when_no_archive(monkeypatch, tmp_path):
     _install_ctx(monkeypatch, ctx)
     resp = await rollback_model(_fake_request(path_params={"model": "intent"}))
     assert resp.status_code == 404
+
+
+# ── /retrain/{model} ──────────────────────────────────────────────────────
+
+class _FakeWorker:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.completion = __import__("asyncio").Event()
+
+    async def retrain_one(self, model_name):
+        self.calls.append(model_name)
+        self.completion.set()
+        # CycleResult-shaped return for realism, though the API only
+        # exposes the job_id.
+        from gateway.intelligence.distillation.worker import CycleResult
+        r = CycleResult()
+        r.trained.append(model_name)
+        return r
+
+
+@pytest.mark.anyio
+async def test_retrain_returns_202_and_kicks_worker(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    worker = _FakeWorker()
+    ctx.distillation_worker = worker
+    _install_ctx(monkeypatch, ctx)
+
+    resp = await force_retrain(
+        _fake_request(path_params={"model": "intent"})
+    )
+    assert resp.status_code == 202
+    body = json.loads(resp.body)
+    assert body["status"] == "accepted"
+    assert body["model_name"] == "intent"
+    assert body["job_id"]  # non-empty UUID
+
+    # The kicked task runs on the same loop — give it one scheduler tick
+    # so the fake worker records the call.
+    import asyncio
+    await asyncio.wait_for(worker.completion.wait(), timeout=1.0)
+    assert worker.calls == ["intent"]
+
+
+@pytest.mark.anyio
+async def test_retrain_503_when_worker_not_wired(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.distillation_worker = None
+    _install_ctx(monkeypatch, ctx)
+    resp = await force_retrain(
+        _fake_request(path_params={"model": "intent"})
+    )
+    assert resp.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_retrain_400_for_unknown_model(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.distillation_worker = _FakeWorker()
+    _install_ctx(monkeypatch, ctx)
+    resp = await force_retrain(
+        _fake_request(path_params={"model": "not_a_real_model"})
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_retrain_tracks_job_and_reaps_completed(monkeypatch, tmp_path):
+    # After the task completes, `_retrain_tasks` should drop its entry
+    # on the next call so the dict doesn't grow forever.
+    from gateway.intelligence import api as intel_api
+
+    ctx = _make_ctx(tmp_path)
+    ctx.distillation_worker = _FakeWorker()
+    _install_ctx(monkeypatch, ctx)
+    intel_api._retrain_tasks.clear()
+
+    import asyncio
+    resp1 = await force_retrain(
+        _fake_request(path_params={"model": "intent"})
+    )
+    job_id1 = json.loads(resp1.body)["job_id"]
+    # Wait for the first task to finish.
+    await asyncio.wait_for(ctx.distillation_worker.completion.wait(), timeout=1.0)
+    # Give the scheduler a tick to mark the task done.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # Second call reaps the first completed job.
+    ctx.distillation_worker.completion.clear()
+    resp2 = await force_retrain(
+        _fake_request(path_params={"model": "intent"})
+    )
+    assert job_id1 not in intel_api._retrain_tasks
+    job_id2 = json.loads(resp2.body)["job_id"]
+    assert job_id2 in intel_api._retrain_tasks
+    await asyncio.wait_for(ctx.distillation_worker.completion.wait(), timeout=1.0)
