@@ -78,6 +78,7 @@ from gateway.intelligence.api import (
     promote_candidate as intel_promote_candidate,
     reject_candidate as intel_reject_candidate,
     rollback_model as intel_rollback_model,
+    force_retrain as intel_force_retrain,
 )
 from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
@@ -1006,6 +1007,58 @@ def _init_lifecycle_writer(settings, ctx) -> None:
         ctx.lifecycle_event_writer = None
 
 
+def _init_distillation_worker(settings, ctx) -> None:
+    """Phase 25 Task 20 + 28: background distillation worker.
+
+    Depends on `ctx.intelligence_db` + `ctx.model_registry`. When
+    either is missing the worker is skipped — the force-retrain
+    endpoint will simply return 503 until the layer is fully wired.
+
+    Trainers are lazy-imported here so the sklearn/skl2onnx cost is
+    deferred until the intelligence layer actually needs them.
+    """
+    if not settings.intelligence_enabled:
+        return
+    if ctx.intelligence_db is None or ctx.model_registry is None:
+        return
+    try:
+        from gateway.intelligence.distillation.dataset import DatasetBuilder
+        from gateway.intelligence.distillation.trainers.intent_trainer import (
+            IntentTrainer,
+        )
+        from gateway.intelligence.distillation.trainers.safety_trainer import (
+            SafetyTrainer,
+        )
+        from gateway.intelligence.distillation.trainers.schema_trainer import (
+            SchemaMapperTrainer,
+        )
+        from gateway.intelligence.distillation.worker import DistillationWorker
+
+        builder = DatasetBuilder(ctx.intelligence_db)
+        trainers = {
+            "intent": IntentTrainer(),
+            "schema_mapper": SchemaMapperTrainer(),
+            "safety": SafetyTrainer(),
+        }
+        worker = DistillationWorker(
+            db=ctx.intelligence_db,
+            builder=builder,
+            trainers=trainers,
+            registry=ctx.model_registry,
+            min_divergences=settings.distillation_min_divergences,
+            walacor_client=ctx.lifecycle_event_writer,
+        )
+        worker.start()
+        ctx.distillation_worker = worker
+        logger.info(
+            "DistillationWorker started (min_divergences=%d)",
+            settings.distillation_min_divergences,
+        )
+    except Exception as e:
+        logger.warning("DistillationWorker init failed (non-fatal): %s", e)
+        ctx.distillation_worker = None
+
+
 def _init_shadow_runner(settings, ctx) -> None:
     """Phase 25 Task 22: wire the shadow-inference runner.
 
@@ -1320,6 +1373,7 @@ async def on_startup() -> None:
         _init_lifecycle_writer(settings, ctx)
         _init_shadow_runner(settings, ctx)
         _init_harvesters(settings, ctx)
+        _init_distillation_worker(settings, ctx)
         _init_content_analyzers(settings, ctx)
         _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard
         if settings.llama_guard_enabled:
@@ -1738,6 +1792,18 @@ async def on_shutdown() -> None:
             errors.append(f"harvester_runner: {e}")
         ctx.harvester_runner = None
 
+    # Phase 25 Task 20+28: distillation worker. stop() injects a
+    # sentinel to wake the loop, then awaits the task with a 2s
+    # ceiling matching the other background workers.
+    if ctx.distillation_worker is not None:
+        try:
+            await asyncio.wait_for(ctx.distillation_worker.stop(), timeout=2.0)
+        except asyncio.TimeoutError:
+            errors.append("distillation_worker: stop timed out")
+        except Exception as e:
+            errors.append(f"distillation_worker: {e}")
+        ctx.distillation_worker = None
+
     ctx.intelligence_db = None
     ctx.verdict_buffer = None
 
@@ -1815,6 +1881,8 @@ def create_app() -> Starlette:
         Route("/v1/control/intelligence/promote/{model}/{version}", intel_promote_candidate, methods=["POST"]),
         Route("/v1/control/intelligence/reject/{model}/{version}", intel_reject_candidate, methods=["POST"]),
         Route("/v1/control/intelligence/rollback/{model}", intel_rollback_model, methods=["POST"]),
+        # Phase 25 Task 28: force retrain
+        Route("/v1/control/intelligence/retrain/{model}", intel_force_retrain, methods=["POST"]),
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),

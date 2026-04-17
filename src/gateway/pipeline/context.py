@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from gateway.content.base import ContentAnalyzer
     from gateway.export.base import AuditExporter
     from gateway.intelligence.db import IntelligenceDB
+    from gateway.intelligence.distillation.worker import DistillationWorker
     from gateway.intelligence.harvesters import HarvesterRunner
     from gateway.intelligence.registry import ModelRegistry
     from gateway.intelligence.retention import RetentionSweeper
@@ -120,6 +121,10 @@ class PipelineContext:
         # Walacor is not wired — callers fall back to writing the event
         # directly or skip emission.
         self.lifecycle_event_writer: LifecycleEventWriter | None = None
+        # Phase 25 Task 20 + 28: background distillation worker. When
+        # set, the Task 28 retrain endpoint calls `retrain_one(model)`
+        # on it to kick an immediate training pass for one model.
+        self.distillation_worker: DistillationWorker | None = None
 
 
 _ctx = PipelineContext()
