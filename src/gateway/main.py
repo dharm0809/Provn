@@ -1008,6 +1008,23 @@ def _init_harvesters(settings, ctx) -> None:
                 logger.warning(
                     "SafetyHarvester init failed (non-fatal): %s", _sh_err,
                 )
+            # Task 16: Intent harvester — also optionally consumes the
+            # teacher LLM (costs $$ at high sample rates, so default is
+            # whatever the operator set in config). `http_client` is the
+            # shared `httpx.AsyncClient` already initialized upstream;
+            # falling back to `None` disables sampling cleanly.
+            try:
+                from gateway.intelligence.harvesters.intent import IntentHarvester
+                harvesters.append(IntentHarvester(
+                    ctx.intelligence_db,
+                    teacher_url=settings.teacher_llm_url,
+                    teacher_sample_rate=settings.teacher_llm_sample_rate,
+                    http_client=ctx.http_client,
+                ))
+            except Exception as _ih_err:
+                logger.warning(
+                    "IntentHarvester init failed (non-fatal): %s", _ih_err,
+                )
 
         runner = HarvesterRunner(harvesters=harvesters, max_queue=1000)
         runner.start()

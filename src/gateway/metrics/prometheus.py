@@ -125,6 +125,17 @@ rate_limit_hits_total = Counter(
     ["model"],
 )
 
+# Phase 25 Task 16: teacher-LLM calls from the intent harvester.
+# Labels the call outcome so operators can reason about teacher cost
+# vs. harvest value: `called` = request made; `failed` = teacher call
+# errored or returned an unparseable label (fail-open, no signal
+# recorded); `skipped` = sample skipped because `random() >= rate`.
+intent_teacher_samples_total = Counter(
+    "walacor_gateway_intent_teacher_samples_total",
+    "Intent harvester teacher-LLM sample attempts by outcome",
+    ["outcome"],
+)
+
 # RED method gap fillers
 inflight_requests = Gauge(
     "walacor_gateway_inflight_requests",
