@@ -211,6 +211,13 @@ class DistillationWorker:
     # ── Walacor + SQLite helpers ───────────────────────────────────────
 
     async def _write_lifecycle(self, event: LifecycleEvent) -> None:
+        """Emit a lifecycle event via whatever writer interface is wired.
+
+        Preferred path (Task 21) is the `LifecycleEventWriter` — it
+        retries with backoff and mirrors to SQLite. Older fakes used in
+        Task 20 tests still work via the `write_lifecycle_event` /
+        `write_record` fallbacks.
+        """
         if self._walacor is None:
             logger.debug(
                 "distillation: no walacor client — skipping %s",
@@ -218,11 +225,11 @@ class DistillationWorker:
             )
             return
         try:
-            # The full retry + SQLite mirror plumbing lands in Task 21.
-            # For Task 20 we call whatever interface is available —
-            # `write_lifecycle_event` is the planned method; fall back
-            # to `write_record` if that's all the stub has.
-            if hasattr(self._walacor, "write_lifecycle_event"):
+            if hasattr(self._walacor, "write_event"):
+                # Task 21 LifecycleEventWriter interface — retry +
+                # mirror are already owned by the writer.
+                await self._walacor.write_event(event)
+            elif hasattr(self._walacor, "write_lifecycle_event"):
                 await self._walacor.write_lifecycle_event(event)
             else:
                 await self._walacor.write_record(event.to_record())
