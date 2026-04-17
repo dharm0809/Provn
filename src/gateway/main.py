@@ -748,32 +748,43 @@ def _init_lineage(settings, ctx) -> None:
     """Phase 18: Lineage dashboard reader.
 
     Prefers WalacorLineageReader (reads from Walacor API) when walacor_client
-    is available. Falls back to SQLite LineageReader for local-only mode.
+    is available. Falls back to SQLite LineageReader for local-only mode
+    when `lineage_local_reader=True` (default).
     """
     if not settings.lineage_enabled:
         return
 
-    # Dashboard reads exclusively from Walacor. The local SQLite WAL remains a
-    # durability sink for the delivery worker (replay on outage), but is never
-    # used as a read source for the dashboard. Lineage requires a Walacor client.
-    if ctx.walacor_client is None:
-        logger.warning(
-            "Lineage dashboard disabled: no Walacor client configured. "
-            "Set WALACOR_SERVER + credentials to enable the dashboard."
+    if ctx.walacor_client is not None:
+        from gateway.lineage.walacor_reader import WalacorLineageReader
+        ctx.lineage_reader = WalacorLineageReader(
+            client=ctx.walacor_client,
+            executions_etid=settings.walacor_executions_etid,
+            attempts_etid=settings.walacor_attempts_etid,
+            tool_events_etid=settings.walacor_tool_events_etid,
+        )
+        logger.info(
+            "Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
+            settings.walacor_executions_etid, settings.walacor_attempts_etid,
+            settings.walacor_tool_events_etid,
         )
         return
 
-    from gateway.lineage.walacor_reader import WalacorLineageReader
-    ctx.lineage_reader = WalacorLineageReader(
-        client=ctx.walacor_client,
-        executions_etid=settings.walacor_executions_etid,
-        attempts_etid=settings.walacor_attempts_etid,
-        tool_events_etid=settings.walacor_tool_events_etid,
-    )
-    logger.info(
-        "Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
-        settings.walacor_executions_etid, settings.walacor_attempts_etid,
-        settings.walacor_tool_events_etid,
+    # No Walacor — try local SQLite reader so the dashboard stays usable.
+    if settings.lineage_local_reader and ctx.wal_writer is not None:
+        from pathlib import Path
+        from gateway.lineage.reader import LineageReader
+        wal_path = str(Path(settings.wal_path) / "wal.db")
+        ctx.lineage_reader = LineageReader(wal_path)
+        logger.info(
+            "Lineage dashboard enabled (local mode): reading from %s. "
+            "Configure Walacor credentials to switch to API-backed lineage.",
+            wal_path,
+        )
+        return
+
+    logger.warning(
+        "Lineage dashboard disabled: no Walacor client and local reader is off. "
+        "Set WALACOR_SERVER + credentials, or set WALACOR_LINEAGE_LOCAL_READER=true."
     )
 
 

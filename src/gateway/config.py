@@ -487,6 +487,16 @@ class Settings(BaseSettings):
         default=True,
         description="Enable /lineage/ dashboard and /v1/lineage/* API endpoints.",
     )
+    lineage_local_reader: bool = Field(
+        default=True,
+        description=(
+            "When no Walacor client is configured, fall back to the SQLite-backed "
+            "`LineageReader` reading directly from the local WAL database. Keeps the "
+            "lineage dashboard functional in local-only / dev / CI deployments. "
+            "Production with a real Walacor backend continues to use "
+            "`WalacorLineageReader`; this flag is ignored in that case."
+        ),
+    )
 
     # Phase 17: OpenTelemetry export
     otel_enabled: bool = Field(
