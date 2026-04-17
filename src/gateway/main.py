@@ -968,6 +968,27 @@ def _init_model_registry(settings, ctx) -> None:
         ctx.model_registry = None
 
 
+def _init_shadow_runner(settings, ctx) -> None:
+    """Phase 25 Task 22: wire the shadow-inference runner.
+
+    Depends on `ctx.intelligence_db` for the `shadow_comparisons`
+    write target. Fail-open: missing DB or init failure leaves
+    `ctx.shadow_runner=None` and every ONNX client's shadow hook
+    silently no-ops.
+    """
+    if not settings.intelligence_enabled:
+        return
+    if ctx.intelligence_db is None:
+        return
+    try:
+        from gateway.intelligence.shadow import ShadowRunner
+        ctx.shadow_runner = ShadowRunner(ctx.intelligence_db)
+        logger.info("Shadow runner initialized")
+    except Exception as e:
+        logger.warning("Shadow runner init failed (non-fatal): %s", e)
+        ctx.shadow_runner = None
+
+
 def _init_harvesters(settings, ctx) -> None:
     """Phase 25 Task 13+: verdict harvester runner with per-model harvesters.
 
@@ -1258,6 +1279,7 @@ async def on_startup() -> None:
         # promoted candidates via the Task 11 reload hook.
         _init_model_registry(settings, ctx)
         _init_intelligence(settings, ctx)
+        _init_shadow_runner(settings, ctx)
         _init_harvesters(settings, ctx)
         _init_content_analyzers(settings, ctx)
         _init_safety_classifier(settings, ctx)  # ONNX — always-on, replaces Llama Guard

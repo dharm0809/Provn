@@ -139,6 +139,62 @@ class ModelRegistry:
         _validate_model_name(model)
         return self._generations[model]
 
+    # ── Shadow-candidate marker (Task 22) ──────────────────────────────
+
+    def _shadow_marker_path(self, model: str) -> Path:
+        # Per-model active-candidate marker lives in candidates/ so it's
+        # colocated with the .onnx files it references. Hidden dotfile
+        # name so the candidate-filename regex never matches it.
+        return self.base / "candidates" / f".{model}.active"
+
+    def enable_shadow(self, model: str, version: str) -> None:
+        """Mark `candidates/{model}-{version}.onnx` as the active shadow candidate.
+
+        Persistent: written as a tiny text file so the marker survives
+        restarts. Task 20's DistillationWorker calls this after writing
+        a candidate; Task 24's gate clears it via `disable_shadow`.
+        """
+        _validate_model_name(model)
+        cand_file = self.base / "candidates" / f"{model}-{version}.onnx"
+        if not cand_file.exists():
+            raise FileNotFoundError(cand_file)
+        self._shadow_marker_path(model).write_text(version, encoding="utf-8")
+
+    def disable_shadow(self, model: str) -> None:
+        """Clear the active-shadow marker for `model`. Idempotent."""
+        _validate_model_name(model)
+        marker = self._shadow_marker_path(model)
+        if marker.exists():
+            marker.unlink()
+
+    def active_candidate(self, model: str) -> Candidate | None:
+        """Return the currently-shadowing candidate for `model`, or None.
+
+        Returns None when no marker exists OR when the marker points at
+        a file that has since been removed (e.g. promoted and swapped
+        out of candidates/). The stale-marker case silently cleans up
+        the marker file so subsequent calls are cheap.
+        """
+        _validate_model_name(model)
+        marker = self._shadow_marker_path(model)
+        if not marker.exists():
+            return None
+        try:
+            version = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not version:
+            return None
+        path = self.base / "candidates" / f"{model}-{version}.onnx"
+        if not path.exists():
+            # Stale marker — clean up so we don't keep reading it.
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            return None
+        return Candidate(model=model, version=version, path=path)
+
     def lock_for(self, model: str) -> asyncio.Lock:
         _validate_model_name(model)
         # Safe under single event loop: the check-then-insert has no `await`

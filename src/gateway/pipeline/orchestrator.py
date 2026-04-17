@@ -1918,6 +1918,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             verdict_buffer=ctx.verdict_buffer,
             registry=ctx.model_registry,
             model_name="intent" if ctx.model_registry is not None else None,
+            # Task 22: shadow runner is wired when the intelligence layer
+            # and a model registry are both active. Nothing else needs
+            # to be true — the runner itself no-ops when no active
+            # candidate is registered.
+            shadow_runner=ctx.shadow_runner,
         )
         ctx.schema_intelligence = _si
 

@@ -322,6 +322,76 @@ async def test_generation_counter_is_per_model(tmp_path):
     assert after["schema_mapper"] == before["schema_mapper"]
 
 
+def test_active_candidate_returns_none_when_no_marker(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    assert r.active_candidate("intent") is None
+
+
+def test_enable_shadow_then_active_candidate(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "intent-v2.onnx").write_bytes(b"v2")
+
+    r.enable_shadow("intent", "v2")
+    cand = r.active_candidate("intent")
+    assert cand is not None
+    assert cand.model == "intent"
+    assert cand.version == "v2"
+    assert cand.path == tmp_path / "candidates" / "intent-v2.onnx"
+
+
+def test_enable_shadow_rejects_missing_candidate_file(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    with pytest.raises(FileNotFoundError):
+        r.enable_shadow("intent", "v99")
+
+
+def test_disable_shadow_is_idempotent(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "intent-v2.onnx").write_bytes(b"v2")
+    r.enable_shadow("intent", "v2")
+    r.disable_shadow("intent")
+    assert r.active_candidate("intent") is None
+    r.disable_shadow("intent")  # second call must not raise
+
+
+def test_active_candidate_cleans_up_stale_marker(tmp_path):
+    # Marker points at a file that was removed (e.g. promoted). Stale
+    # marker must return None AND self-clean so it stops being read.
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    cand_path = tmp_path / "candidates" / "intent-v2.onnx"
+    cand_path.write_bytes(b"v2")
+    r.enable_shadow("intent", "v2")
+    cand_path.unlink()
+
+    assert r.active_candidate("intent") is None
+    assert not r._shadow_marker_path("intent").exists()
+
+
+def test_shadow_marker_hidden_from_list_candidates(tmp_path):
+    # `.intent.active` lives in candidates/ but the listing must ignore
+    # it (non-.onnx suffix).
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    (tmp_path / "candidates" / "intent-v2.onnx").write_bytes(b"v2")
+    r.enable_shadow("intent", "v2")
+
+    cands = r.list_candidates()
+    assert len(cands) == 1
+    assert cands[0].version == "v2"
+
+
+def test_enable_shadow_rejects_unknown_model(tmp_path):
+    r = ModelRegistry(base_path=str(tmp_path))
+    r.ensure_structure()
+    with pytest.raises(ValueError, match="unknown model name"):
+        r.enable_shadow("../../etc/passwd", "v1")
+
+
 @pytest.mark.anyio
 async def test_promote_is_serialized_per_model(tmp_path):
     # Two concurrent promotes of the same model must serialize — no race on
