@@ -28,6 +28,7 @@ import asyncio
 import hashlib
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -51,6 +52,11 @@ class ShadowRunner:
         # safe to share across asyncio tasks on the same loop (ORT
         # serializes internally).
         self._sessions: dict[tuple[str, str], Any] = {}
+        # Callers invoke `get_session` inside `asyncio.to_thread`, so two
+        # concurrent shadow tasks can both miss the cache and both
+        # construct an `InferenceSession` for the same key. The loser's
+        # session leaks in ORT's arena. Serialize the check-then-set.
+        self._sessions_lock = threading.Lock()
 
     def get_session(self, model: str, candidate: Candidate) -> Any:
         """Return the cached `InferenceSession` for `candidate`, loading once.
@@ -65,11 +71,15 @@ class ShadowRunner:
         if cached is not None:
             return cached
         from onnxruntime import InferenceSession  # lazy — optional dep.
-        session = InferenceSession(
-            str(candidate.path), providers=["CPUExecutionProvider"],
-        )
-        self._sessions[key] = session
-        return session
+        with self._sessions_lock:
+            cached = self._sessions.get(key)
+            if cached is not None:
+                return cached
+            session = InferenceSession(
+                str(candidate.path), providers=["CPUExecutionProvider"],
+            )
+            self._sessions[key] = session
+            return session
 
     async def record(
         self,

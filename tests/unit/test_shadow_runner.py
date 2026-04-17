@@ -101,6 +101,58 @@ def test_get_session_rejects_unknown_model(tmp_path, fake_onnxruntime):
         runner.get_session("not_real", cand)
 
 
+def test_get_session_concurrent_load_constructs_once(tmp_path, monkeypatch):
+    """Regression for C1: two threads missing the cache must not both
+    construct an InferenceSession — the loser would leak in ORT's arena.
+
+    The session constructor sleeps briefly to widen the race window; with
+    the guarding lock in place only one thread ever reaches the sleep.
+    Without the lock, N threads race past the first `get` check and all
+    construct, bumping `load_count` past 1.
+    """
+    import sys
+    import threading
+    import time
+    import types
+
+    load_count = 0
+    load_count_lock = threading.Lock()
+
+    fake = types.ModuleType("onnxruntime")
+
+    class _SlowSession:
+        def __init__(self, path, providers=None):
+            nonlocal load_count
+            with load_count_lock:
+                load_count += 1
+            time.sleep(0.05)  # 50ms — plenty of time for concurrent misses
+            self.path = str(path)
+
+    fake.InferenceSession = _SlowSession
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+
+    db = _make_db(tmp_path)
+    runner = ShadowRunner(db)
+    cand = _make_candidate(tmp_path, "intent", "v1")
+
+    start = threading.Event()
+    sessions: list = []
+
+    def _load() -> None:
+        start.wait(timeout=5.0)
+        sessions.append(runner.get_session("intent", cand))
+
+    threads = [threading.Thread(target=_load) for _ in range(8)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert load_count == 1, f"expected 1 construction, got {load_count}"
+    assert len({id(s) for s in sessions}) == 1, "all threads must get the same session"
+
+
 # ── record row ─────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio

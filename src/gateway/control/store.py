@@ -151,15 +151,52 @@ class ControlPlaneStore:
         return [dict(row) for row in cur.fetchall()]
 
     def upsert_attestation(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Idempotent attestation write.
+
+        Two unique constraints exist: `attestation_id` (primary key) AND
+        `(tenant_id, provider, model_id)`. A naive `INSERT … ON CONFLICT
+        (tenant_id, provider, model_id)` blows up with
+        `IntegrityError: UNIQUE constraint failed: attestations.attestation_id`
+        when a caller passes an explicit `attestation_id` that already
+        exists on a row with a different natural key (e.g. Phase 25
+        re-registration of `self-attested:<model>`).
+
+        Resolution: if the caller supplied `attestation_id` and a row
+        with that id already exists, UPDATE in place so the explicit
+        ID is preserved. Otherwise use the natural-key ON CONFLICT path.
+        """
         conn = self._ensure_conn()
         now = self._now()
-        attestation_id = data.get("attestation_id") or self._new_id()
+        explicit_id = data.get("attestation_id")
+        attestation_id = explicit_id or self._new_id()
         tenant_id = data.get("tenant_id", "")
         model_id = data.get("model_id", "")
         provider = data.get("provider", "ollama")
         status = data.get("status", "active")
         verification_level = data.get("verification_level", "admin_attested")
         notes = data.get("notes", "")
+
+        if explicit_id:
+            existing = conn.execute(
+                "SELECT 1 FROM attestations WHERE attestation_id = ?",
+                (attestation_id,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE attestations SET
+                           model_id = ?, provider = ?, status = ?,
+                           verification_level = ?, tenant_id = ?,
+                           notes = ?, updated_at = ?
+                       WHERE attestation_id = ?""",
+                    (model_id, provider, status, verification_level,
+                     tenant_id, notes, now, attestation_id),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM attestations WHERE attestation_id = ?",
+                    (attestation_id,),
+                ).fetchone()
+                return dict(row) if row else {"attestation_id": attestation_id}
 
         conn.execute(
             """INSERT INTO attestations

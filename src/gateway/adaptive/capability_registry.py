@@ -69,6 +69,14 @@ class CapabilityRegistry:
         latencies = cap.observed_latencies[-19:] + (latency_seconds,)
         self._cache[model_id] = cap._replace(observed_latencies=latencies)
 
+    # Per-model-type timeout multipliers applied both before and after
+    # the P95-based adaptive calculation. Kept in one place so the
+    # cold-start path and the adaptive path stay in sync.
+    _TYPE_MULTIPLIER: dict[str, float] = {
+        "reasoning": 2.0,   # thinking models need more time
+        "embedding": 0.5,   # embeddings finish fast; fail sooner
+    }
+
     def get_timeout(self, model_id: str, default: float = 120.0) -> float:
         """Adaptive timeout: P95 of observed latencies * 2.5, with floor and ceiling.
 
@@ -77,13 +85,16 @@ class CapabilityRegistry:
         - Fast model (3B, 2s avg) → ~10s timeout
         - Slow model (14B CPU, 40s avg) → ~120s timeout
         - Reasoning model: 2x multiplier on top
+        - Embedding model: 0.5x multiplier (these calls should be fast)
         """
         cap = self._cache.get(model_id)
         if not cap or len(cap.observed_latencies) < 3:
-            # Not enough data — use generous default for cold start
-            if cap and cap.model_type == "reasoning":
-                return default * 2.0
-            return default
+            # Not enough data — use generous default for cold start,
+            # scaled by model-type multiplier so embedding models fail
+            # fast on a hung endpoint instead of tying up a request
+            # slot for the full 2-minute default.
+            mult = self._TYPE_MULTIPLIER.get(cap.model_type, 1.0) if cap else 1.0
+            return default * mult
 
         latencies = sorted(cap.observed_latencies)
         p95_idx = max(0, int(len(latencies) * 0.95) - 1)
@@ -92,9 +103,13 @@ class CapabilityRegistry:
         # Timeout = P95 * 2.5 (headroom for variance)
         adaptive = p95 * 2.5
 
-        # Model type multiplier
+        # Model type multiplier — reasoning gets 1.5x here (less than
+        # the cold-start 2x since we now have real latency data), and
+        # embedding keeps the 0.5x floor.
         if cap.model_type == "reasoning":
             adaptive *= 1.5
+        elif cap.model_type == "embedding":
+            adaptive *= 0.5
 
         # Floor: never below 10s, ceiling: never above 300s
         return max(10.0, min(300.0, adaptive))

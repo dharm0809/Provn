@@ -37,6 +37,34 @@ class SessionChainTracker:
         self._ttl = ttl_seconds
         self._sessions: OrderedDict[str, SessionState] = OrderedDict()
         self._lock = asyncio.Lock()
+        # Per-session locks ensure that a full (next_chain_values →
+        # compute hash → write → update) transaction runs atomically
+        # per session. Without this, two concurrent requests for the
+        # same session can both read the same `last_record_hash` (since
+        # the first one hasn't called `update()` yet), producing two
+        # records whose `previous_record_hash` points at the same prior
+        # hash — breaking Merkle-chain linkage.
+        #
+        # The in-process lock is ONLY correct when the gateway runs on
+        # a single worker. Multi-replica deployments must configure
+        # sticky-session affinity at the LB OR switch to the Redis
+        # tracker, which scopes the lock across replicas.
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def session_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session lock for serializing chain writes.
+
+        Callers (the orchestrator) hold this lock across
+        `next_chain_values` + record write + `update` so the critical
+        section is atomic per session. Creation is idempotent —
+        `dict.setdefault` on a bare dict is safe under single-loop
+        asyncio because the check-and-insert contains no `await`.
+        """
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     async def next_chain_values(self, session_id: str) -> tuple[int, str]:
         """
@@ -146,6 +174,24 @@ class RedisSessionChainTracker:
     def __init__(self, redis_client, ttl: int) -> None:
         self._r = redis_client
         self._ttl = ttl
+        # Per-session asyncio.Lock that only serializes within the
+        # current worker. Cross-replica serialization still requires
+        # sticky-session affinity at the LB — documented below.
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def session_lock(self, session_id: str) -> asyncio.Lock:
+        """Return a per-session lock serializing chain writes within
+        this worker. Multi-replica deployments MUST pair this with
+        sticky-session affinity at the LB — otherwise a concurrent
+        request for the same session hitting a different replica will
+        still read stale `prev_hash` from Redis while this replica is
+        mid-transaction.
+        """
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     def _key(self, session_id: str) -> str:
         return f"gateway:session:{session_id}"

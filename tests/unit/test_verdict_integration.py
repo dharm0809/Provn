@@ -181,11 +181,15 @@ def _stub_safety_classifier(verdict_buffer: VerdictBuffer | None):
     # construct via `__new__` must seed it too (no registry = no-op).
     clf._reload_state = ReloadState()
 
-    # Mock ONNX session: returns label index 0 ("safe") with probability dict.
+    # Mock ONNX session output shape mirrors sklearn-pipeline-to-ONNX:
+    # outputs[0] is a rank-1 array of predicted label indices, and
+    # outputs[1] is a rank-1 array of per-sample probability dicts.
+    # The classifier does `int(outputs[0][0])` and `outputs[1][0]`
+    # expects a dict, so the mock must use a single level of nesting.
     mock_session = MagicMock()
     mock_session.run.return_value = (
-        [[0]],
-        [[{0: 0.95, 1: 0.01, 2: 0.01, 3: 0.01, 4: 0.005, 5: 0.005, 6: 0.005, 7: 0.005}]],
+        [0],
+        [{0: 0.95, 1: 0.01, 2: 0.01, 3: 0.01, 4: 0.005, 5: 0.005, 6: 0.005, 7: 0.005}],
     )
     clf._session = mock_session
 

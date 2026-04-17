@@ -105,7 +105,10 @@ class DistillationWorker:
                 await asyncio.sleep(self._poll_interval_s)
                 if not self._running:
                     return
-                if self._should_trigger():
+                # `_should_trigger` opens SQLite and runs a COUNT(*) on
+                # `onnx_verdicts` — that scan must not run on the event
+                # loop thread (would stall every in-flight request).
+                if await asyncio.to_thread(self._should_trigger):
                     await self._run_cycle()
             except Exception:
                 # Hot path contract: background worker never propagates.

@@ -67,15 +67,23 @@ class IntelligenceResult:
 
 
 # ── Prompt templates ─────────────────────────────────────────────────────────
+#
+# IMPORTANT: these strings are consumed by `str.format(...)`, which
+# treats `{...}` as a placeholder. Literal braces from the example JSON
+# body MUST be doubled (`{{` / `}}`) or `.format()` raises
+# `KeyError: '"topics"'` when it tries to resolve `{"topics"}` as a
+# format field name. Silent breakage of the intelligence worker: every
+# job failed before this fix because three of these four templates
+# used single braces.
 
 _CLASSIFY_PROMPT = """Classify this user prompt into exactly one category.
 Categories: normal, web_search, code_generation, reasoning, creative_writing, analysis, system_task
-Respond ONLY with JSON: {"category": "...", "confidence": 0.0-1.0}
+Respond ONLY with JSON: {{"category": "...", "confidence": 0.0-1.0}}
 
 User prompt: {prompt}"""
 
 _TOPICS_PROMPT = """Extract 2-3 key topics from this conversation.
-Respond ONLY with JSON: {"topics": ["topic1", "topic2"]}
+Respond ONLY with JSON: {{"topics": ["topic1", "topic2"]}}
 
 User: {prompt}
 Assistant: {response}"""
@@ -86,7 +94,7 @@ _COMPLIANCE_PROMPT = """Does this conversation contain any of these sensitive ca
 - legal_counsel: legal advice, contract interpretation
 - pii_discussion: discussion of personal data handling
 
-Respond ONLY with JSON: {"flags": ["category1"] or [] if none}
+Respond ONLY with JSON: {{"flags": ["category1"] or [] if none}}
 
 User: {prompt}
 Assistant: {response}"""
@@ -190,7 +198,7 @@ class IntelligenceWorker:
                     await self._results_callback(result)
             except Exception as e:
                 self._errors += 1
-                logger.warning("Intelligence worker error: %s", e)
+                logger.warning("Intelligence worker error: %s", e, exc_info=True)
 
         logger.info("Intelligence worker stopped (processed=%d, errors=%d)", self._processed, self._errors)
 
