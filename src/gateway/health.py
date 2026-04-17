@@ -117,7 +117,79 @@ async def health_response(request: Request) -> JSONResponse:
             for name, r in ctx.startup_probe_results.items()
         }
 
+    # Phase 25 Task 36: intelligence-layer status. Only emitted when the
+    # intelligence DB is initialized so disabled deployments don't see
+    # noise. All queries wrapped in try/except — a stale schema or
+    # missing table must NOT take /health down.
+    if ctx.intelligence_db is not None:
+        intel = _build_intelligence_status(ctx)
+        if intel is not None:
+            payload["intelligence"] = intel
+
     return JSONResponse(payload)
+
+
+def _build_intelligence_status(ctx) -> dict | None:
+    """Compose the `intelligence` block of /health.
+
+    Returns None if the database can't be queried at all (so the
+    health endpoint still returns 200 with the rest of the payload).
+    Individual missing pieces become `null` in the response — a
+    distinction the dashboard can use to differentiate "no data yet"
+    from "feature unavailable".
+    """
+    import sqlite3
+    db = ctx.intelligence_db
+    out: dict = {"db_path": str(db.path)}
+    try:
+        conn = sqlite3.connect(f"file:{db.path}?mode=ro", uri=True)
+        try:
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM onnx_verdicts").fetchone()
+                out["verdict_log_rows"] = int(row[0]) if row else 0
+            except sqlite3.OperationalError:
+                out["verdict_log_rows"] = None
+            try:
+                row = conn.execute(
+                    "SELECT MAX(created_at) FROM training_snapshots"
+                ).fetchone()
+                out["last_training_at"] = row[0] if row and row[0] else None
+            except sqlite3.OperationalError:
+                out["last_training_at"] = None
+            try:
+                row = conn.execute(
+                    "SELECT MAX(written_at) FROM lifecycle_events_mirror "
+                    "WHERE event_type = 'model_promoted'"
+                ).fetchone()
+                out["last_promotion_at"] = row[0] if row and row[0] else None
+            except sqlite3.OperationalError:
+                out["last_promotion_at"] = None
+        finally:
+            conn.close()
+    except Exception:
+        # SQLite open failed entirely — return what we have (just the
+        # path) so operators still see "intelligence wired but not
+        # readable right now".
+        return out
+
+    # Active candidates per model from the registry, not the DB.
+    if ctx.model_registry is not None:
+        try:
+            cands_by_model: dict[str, int] = {}
+            for cand in ctx.model_registry.list_candidates():
+                cands_by_model[cand.model] = cands_by_model.get(cand.model, 0) + 1
+            active = {}
+            for model_name, total in cands_by_model.items():
+                act = ctx.model_registry.active_candidate(model_name)
+                active[model_name] = {
+                    "candidate_count": total,
+                    "active_shadow_version": act.version if act else None,
+                }
+            out["candidates_by_model"] = active
+        except Exception:
+            out["candidates_by_model"] = None
+
+    return out
 
 
 async def metrics_response(request: Request) -> Response:
