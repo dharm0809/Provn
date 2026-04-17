@@ -133,21 +133,33 @@ class SafetyHarvester(Harvester):
             # Agreement post-normalization. Nothing to learn here.
             return
 
+        # The analyzed text is the MODEL RESPONSE (SafetyClassifier and
+        # LlamaGuard both analyze the response, not the prompt). Pull it
+        # from context if the orchestrator populated it.
+        training_text = ""
+        if isinstance(signal.context, dict):
+            resp = signal.context.get("response")
+            if isinstance(resp, str):
+                training_text = resp
         await asyncio.to_thread(
-            self._update_divergence, signal.request_id, teacher_label,
+            self._update_divergence, signal.request_id, teacher_label, training_text,
         )
 
-    def _update_divergence(self, request_id: str, teacher_label: str) -> None:
+    def _update_divergence(
+        self, request_id: str, teacher_label: str, training_text: str,
+    ) -> None:
+        text_to_write = training_text if training_text else None
         conn = sqlite3.connect(self._db.path)
         try:
             conn.execute(
                 """
                 UPDATE onnx_verdicts
                 SET divergence_signal = ?,
-                    divergence_source = 'llama_guard_disagreement'
+                    divergence_source = 'llama_guard_disagreement',
+                    training_text = COALESCE(?, training_text)
                 WHERE model_name = 'safety' AND request_id = ?
                 """,
-                (teacher_label, request_id),
+                (teacher_label, text_to_write, request_id),
             )
             conn.commit()
         except Exception:

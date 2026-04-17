@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS onnx_verdicts (
     request_id TEXT,
     timestamp TEXT NOT NULL,
     divergence_signal TEXT,
-    divergence_source TEXT
+    divergence_source TEXT,
+    training_text TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_verdicts_model_time ON onnx_verdicts(model_name, timestamp);
 CREATE INDEX IF NOT EXISTS idx_verdicts_divergence ON onnx_verdicts(divergence_signal, model_name) WHERE divergence_signal IS NOT NULL;
@@ -69,6 +70,16 @@ class IntelligenceDB:
     def init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # Phase 25 Task 17: migrate pre-existing DBs to the post-Task-17
+            # layout. `ALTER TABLE ... ADD COLUMN` is the most compatible
+            # migration path (no data movement). Wrap in try/except so a
+            # second startup, where the column already exists, is a no-op.
+            try:
+                conn.execute("ALTER TABLE onnx_verdicts ADD COLUMN training_text TEXT")
+            except sqlite3.OperationalError:
+                # Column already present — expected on every run after the
+                # first, not an error.
+                pass
 
     def list_tables(self) -> List[str]:
         # Filter `sqlite_%` so SQLite's internal bookkeeping tables — created
