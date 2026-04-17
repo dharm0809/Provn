@@ -1,6 +1,12 @@
 ## Project
 Walacor Gateway — ASGI audit/governance proxy for LLM providers. Source: `src/gateway/`.
 
+## Thinking effort
+- Executing steps from an existing plan: don't think, just implement
+- Debugging failures or unexpected behavior: think hard
+- Designing new systems or choosing between approaches: ultrathink
+- If you're unsure which applies, ask me before starting
+
 ## Key Architectural Facts
 - Gateway does NOT compute SHA3-512 hashes of prompt/response text — it sends full text; Walacor backend hashes on ingest
 - Session chain `record_hash` IS computed by the gateway (metadata fields only: execution_id, policy_version, policy_result, previous_record_hash, sequence_number, timestamp)
