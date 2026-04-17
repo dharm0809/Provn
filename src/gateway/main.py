@@ -987,9 +987,10 @@ def _init_harvesters(settings, ctx) -> None:
 
         harvesters: list = []
 
-        # Task 14: SchemaMapper harvester — needs the intelligence DB for
-        # the divergence back-write UPDATE. Skip when the DB failed to
-        # init (the runner still accepts signals; they're just discarded).
+        # Tasks 14-15: per-model harvesters — each needs the intelligence
+        # DB for the divergence back-write UPDATE. Skip individual ones
+        # on import/init failure so a partial registration still produces
+        # a working runner for the remaining harvesters.
         if ctx.intelligence_db is not None:
             try:
                 from gateway.intelligence.harvesters.schema_mapper import (
@@ -999,6 +1000,13 @@ def _init_harvesters(settings, ctx) -> None:
             except Exception as _sm_err:
                 logger.warning(
                     "SchemaMapperHarvester init failed (non-fatal): %s", _sm_err,
+                )
+            try:
+                from gateway.intelligence.harvesters.safety import SafetyHarvester
+                harvesters.append(SafetyHarvester(ctx.intelligence_db))
+            except Exception as _sh_err:
+                logger.warning(
+                    "SafetyHarvester init failed (non-fatal): %s", _sh_err,
                 )
 
         runner = HarvesterRunner(harvesters=harvesters, max_queue=1000)
