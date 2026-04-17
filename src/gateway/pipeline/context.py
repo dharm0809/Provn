@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from gateway.intelligence.retention import RetentionSweeper
     from gateway.intelligence.shadow import ShadowRunner
     from gateway.intelligence.verdict_buffer import VerdictBuffer
+    from gateway.intelligence.walacor_writer import LifecycleEventWriter
     from gateway.mcp.registry import ToolRegistry
     from gateway.pipeline.budget_tracker import BudgetTracker
     from gateway.pipeline.session_chain import SessionChainTracker
@@ -112,6 +113,13 @@ class PipelineContext:
         # production inference fires a parallel candidate run and
         # records a `shadow_comparisons` row. None disables shadow.
         self.shadow_runner: ShadowRunner | None = None
+        # Phase 25 Task 21+27: lifecycle event writer. Wraps Walacor
+        # with retry + SQLite mirror for all lifecycle event emissions
+        # (candidate_created, shadow_validation_complete, model_promoted,
+        # model_rejected, training_dataset_fingerprint). `None` when
+        # Walacor is not wired — callers fall back to writing the event
+        # directly or skip emission.
+        self.lifecycle_event_writer: LifecycleEventWriter | None = None
 
 
 _ctx = PipelineContext()

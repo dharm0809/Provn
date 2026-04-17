@@ -75,6 +75,9 @@ from gateway.intelligence.api import (
     list_production_models as intel_list_production_models,
     list_candidates as intel_list_candidates,
     model_history as intel_model_history,
+    promote_candidate as intel_promote_candidate,
+    reject_candidate as intel_reject_candidate,
+    rollback_model as intel_rollback_model,
 )
 from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
@@ -973,6 +976,35 @@ def _init_model_registry(settings, ctx) -> None:
         ctx.model_registry = None
 
 
+def _init_lifecycle_writer(settings, ctx) -> None:
+    """Phase 25 Task 21+27: wire the Walacor lifecycle-event writer.
+
+    Shared across DistillationWorker, shadow-gate auto-promote, and the
+    control-plane promote/reject/rollback endpoints. When Walacor is not
+    wired (`ctx.walacor_client is None`) or intelligence is disabled,
+    the writer is left as None and callers fall back to their local
+    side effects — the candidate file and mirror row still land locally.
+    """
+    if not settings.intelligence_enabled:
+        return
+    if ctx.walacor_client is None or ctx.intelligence_db is None:
+        return
+    try:
+        from gateway.intelligence.walacor_writer import LifecycleEventWriter
+        ctx.lifecycle_event_writer = LifecycleEventWriter(
+            ctx.intelligence_db,
+            ctx.walacor_client,
+            etid=settings.walacor_lifecycle_events_etid,
+        )
+        logger.info(
+            "Lifecycle event writer initialized (etid=%d)",
+            settings.walacor_lifecycle_events_etid,
+        )
+    except Exception as e:
+        logger.warning("Lifecycle writer init failed (non-fatal): %s", e)
+        ctx.lifecycle_event_writer = None
+
+
 def _init_shadow_runner(settings, ctx) -> None:
     """Phase 25 Task 22: wire the shadow-inference runner.
 
@@ -1284,6 +1316,7 @@ async def on_startup() -> None:
         # promoted candidates via the Task 11 reload hook.
         _init_model_registry(settings, ctx)
         _init_intelligence(settings, ctx)
+        _init_lifecycle_writer(settings, ctx)
         _init_shadow_runner(settings, ctx)
         _init_harvesters(settings, ctx)
         _init_content_analyzers(settings, ctx)
@@ -1777,6 +1810,10 @@ def create_app() -> Starlette:
         Route("/v1/control/intelligence/models", intel_list_production_models, methods=["GET"]),
         Route("/v1/control/intelligence/candidates", intel_list_candidates, methods=["GET"]),
         Route("/v1/control/intelligence/history/{model}", intel_model_history, methods=["GET"]),
+        # Phase 25 Task 27: intelligence actions
+        Route("/v1/control/intelligence/promote/{model}/{version}", intel_promote_candidate, methods=["POST"]),
+        Route("/v1/control/intelligence/reject/{model}/{version}", intel_reject_candidate, methods=["POST"]),
+        Route("/v1/control/intelligence/rollback/{model}", intel_rollback_model, methods=["POST"]),
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),

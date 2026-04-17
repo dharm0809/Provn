@@ -217,6 +217,235 @@ def _latest_shadow_complete_events(db) -> dict[tuple[str, str], dict[str, Any]]:
     return out
 
 
+# ── Task 27: promote / reject / rollback ──────────────────────────────────
+
+
+def _caller_identity(request: Request) -> str:
+    """Best-effort approver id from the request.
+
+    Priority: `request.state.caller_identity.user_id` (set by jwt_auth
+    or header-identity middleware) → `X-User-Id` header → "anonymous".
+    """
+    ident = getattr(request.state, "caller_identity", None)
+    if ident is not None:
+        uid = getattr(ident, "user_id", None)
+        if isinstance(uid, str) and uid:
+            return uid
+    hdr = request.headers.get("X-User-Id") if request.headers else None
+    if isinstance(hdr, str) and hdr.strip():
+        return hdr.strip()
+    return "anonymous"
+
+
+async def promote_candidate(request: Request) -> JSONResponse:
+    """Promote a candidate to production.
+
+    Idempotency: if the most recent production promotion event for
+    `model` already references `version`, return 409. Otherwise call
+    `registry.promote(model, version)`, archive the previous
+    production, clear the shadow marker, and emit a `model_promoted`
+    lifecycle event with the caller's identity as approver.
+    """
+    from gateway.intelligence.events import build_promotion_event
+
+    model = request.path_params.get("model", "")
+    version = request.path_params.get("version", "")
+    ctx = get_pipeline_context()
+    registry = ctx.model_registry
+    db = ctx.intelligence_db
+    if registry is None:
+        return _503("model registry not initialized")
+
+    candidate_file = registry.base / "candidates" / f"{model}-{version}.onnx"
+    if not candidate_file.exists():
+        return JSONResponse(
+            {"error": f"candidate {model}-{version} not found"},
+            status_code=404,
+        )
+
+    # Idempotency: look at `lifecycle_events_mirror` for a prior
+    # promotion of this exact version. Only check when the DB is
+    # available — without it, we can't tell, so fall through.
+    if db is not None:
+        last = _last_promotion_per_model(db).get(model)
+        if last and last.get("candidate_version") == version:
+            return JSONResponse(
+                {
+                    "error": f"{model} version {version} already promoted",
+                    "promoted_at": last.get("timestamp"),
+                },
+                status_code=409,
+            )
+
+    try:
+        await registry.promote(model, version)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": f"candidate {model}-{version} not found"},
+            status_code=404,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    registry.disable_shadow(model)
+
+    approver = _caller_identity(request)
+    event = build_promotion_event(
+        model_name=model,
+        candidate_version=version,
+        dataset_hash="",  # filled in by caller when known
+        shadow_metrics={},  # manual promotion doesn't re-run the gate
+        approver=approver,
+    )
+    await _write_lifecycle_event(ctx, event)
+
+    return JSONResponse({
+        "promoted": True,
+        "model_name": model,
+        "version": version,
+        "approver": approver,
+    })
+
+
+async def reject_candidate(request: Request) -> JSONResponse:
+    """Reject a candidate — move its `.onnx` to `archive/failed/`.
+
+    Clears any shadow marker pointing at this version, emits a
+    `model_rejected` event with stage="manual" and the caller-provided
+    reason (from `?reason=` or JSON body).
+    """
+    from gateway.intelligence.events import build_model_rejected
+
+    model = request.path_params.get("model", "")
+    version = request.path_params.get("version", "")
+    ctx = get_pipeline_context()
+    registry = ctx.model_registry
+    if registry is None:
+        return _503("model registry not initialized")
+
+    candidate_file = registry.base / "candidates" / f"{model}-{version}.onnx"
+    if not candidate_file.exists():
+        return JSONResponse(
+            {"error": f"candidate {model}-{version} not found"},
+            status_code=404,
+        )
+
+    reason = (request.query_params.get("reason") or "").strip() or "manual_rejection"
+
+    # Move to archive/failed — keeps the file around for later review
+    # without leaving it in the candidates list.
+    failed_dir = registry.base / "archive" / "failed"
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    dest = failed_dir / candidate_file.name
+    try:
+        import os
+        os.rename(candidate_file, dest)
+    except OSError as e:
+        return JSONResponse(
+            {"error": f"failed to move candidate to archive/failed: {e}"},
+            status_code=500,
+        )
+
+    # Clear the shadow marker if it points at this version.
+    active = registry.active_candidate(model)
+    if active is None or active.version == version:
+        # `active_candidate` returns None after we moved the file — the
+        # stale-marker cleanup in the registry handles the common case,
+        # but disable_shadow is still the explicit intent here.
+        registry.disable_shadow(model)
+
+    event = build_model_rejected(
+        model_name=model,
+        candidate_version=version,
+        reason=reason,
+        stage="manual",
+    )
+    await _write_lifecycle_event(ctx, event)
+
+    return JSONResponse({
+        "rejected": True,
+        "model_name": model,
+        "version": version,
+        "reason": reason,
+        "archived_to": str(dest),
+    })
+
+
+async def rollback_model(request: Request) -> JSONResponse:
+    """Rollback `model` to the most recently archived production file.
+
+    Archive files live at `archive/{model}-archived-<ISO>.onnx` (Task
+    10 naming). We pick the lexicographically-latest — ISO-8601
+    timestamps sort correctly — and call `registry.rollback`.
+    """
+    from gateway.intelligence.events import build_promotion_event
+
+    model = request.path_params.get("model", "")
+    ctx = get_pipeline_context()
+    registry = ctx.model_registry
+    if registry is None:
+        return _503("model registry not initialized")
+
+    archive_dir = registry.base / "archive"
+    if not archive_dir.is_dir():
+        return JSONResponse(
+            {"error": f"no archive directory found"}, status_code=404,
+        )
+    matches = sorted(
+        p for p in archive_dir.iterdir()
+        if p.is_file()
+        and p.suffix == ".onnx"
+        and p.name.startswith(f"{model}-")
+    )
+    if not matches:
+        return JSONResponse(
+            {"error": f"no archived versions for {model}"},
+            status_code=404,
+        )
+    target = matches[-1]
+
+    try:
+        await registry.rollback(model, target.name)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": f"archive file {target.name} vanished"},
+            status_code=404,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    approver = _caller_identity(request)
+    event = build_promotion_event(
+        model_name=model,
+        candidate_version=f"rollback:{target.name}",
+        dataset_hash="",
+        shadow_metrics={"source": "rollback"},
+        approver=approver,
+    )
+    await _write_lifecycle_event(ctx, event)
+
+    return JSONResponse({
+        "rolled_back": True,
+        "model_name": model,
+        "restored_from": target.name,
+        "approver": approver,
+    })
+
+
+async def _write_lifecycle_event(ctx, event) -> None:
+    """Best-effort emit via the pipeline writer. Fail-open."""
+    writer = getattr(ctx, "lifecycle_event_writer", None)
+    if writer is None:
+        logger.debug("no lifecycle writer; skipping %s", event.event_type.value)
+        return
+    try:
+        await writer.write_event(event)
+    except Exception:
+        logger.warning(
+            "lifecycle write failed (event=%s)",
+            event.event_type.value, exc_info=True,
+        )
+
+
 def _query_history(db, model_name: str, limit: int) -> list[dict[str, Any]]:
     """Return lifecycle events whose payload `model_name` equals `model_name`."""
     sql = """
