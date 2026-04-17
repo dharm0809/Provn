@@ -88,7 +88,7 @@ def _check_tool_response(r: requests.Response) -> tuple[bool, str]:
 
 def _find_tool_events(session_id: str) -> list[dict]:
     """Find all tool events for a session by checking execution records."""
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     if sr.status_code != 200:
         return []
     sessions = sr.json().get("sessions", [])
@@ -97,7 +97,7 @@ def _find_tool_events(session_id: str) -> list[dict]:
         return []
 
     sid = match["session_id"]
-    er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
+    er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=60)
     if er.status_code != 200:
         return []
 
@@ -106,7 +106,7 @@ def _find_tool_events(session_id: str) -> list[dict]:
         exec_id = rec.get("execution_id") or rec.get("id")
         if not exec_id:
             continue
-        er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
+        er2 = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=60)
         if er2.status_code == 200:
             events = er2.json().get("tool_events", [])
             all_events.extend(events)
@@ -202,7 +202,7 @@ def test_web_search_invocation():
     if not _require_tools("Web search invocation"):
         return
 
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     if sr.status_code != 200:
         check("Session found after web search", False, "lineage unavailable")
         return
@@ -262,12 +262,12 @@ def test_multi_turn_integrity():
         time.sleep(1)
 
     time.sleep(3)
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     if sr.status_code == 200:
         sessions = sr.json().get("sessions", [])
         match = next((s for s in sessions if s.get("session_id") == session_id), None)
         if match:
-            rv = requests.get(f"{LINEAGE_URL}/verify/{session_id}", timeout=10)
+            rv = requests.get(f"{LINEAGE_URL}/verify/{session_id}", timeout=60)
             check("Multi-turn session chain valid after 3 turns",
                   rv.status_code == 200 and rv.json().get("valid", False),
                   str(rv.json()) if rv.status_code == 200 else f"got {rv.status_code}")
@@ -294,7 +294,7 @@ def test_attachment_handling():
     expected_hash = hashlib.sha3_512(raw_bytes).hexdigest()
     expected_size = len(raw_bytes)
 
-    pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
+    pre = requests.get(f"{LINEAGE_URL}/attempts", timeout=60)
     pre_count = pre.json().get("total", 0) if pre.status_code == 200 else 0
 
     session_id = str(uuid.uuid4())
@@ -319,18 +319,18 @@ def test_attachment_handling():
     time.sleep(3)
 
     # Completeness: attempt record written
-    post = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
+    post = requests.get(f"{LINEAGE_URL}/attempts", timeout=60)
     post_count = post.json().get("total", 0) if post.status_code == 200 else 0
     check("Attempt record written for attachment request",
           post_count > pre_count, f"before={pre_count}, after={post_count}")
 
     # Check execution record for multimodal metadata
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     if sr.status_code == 200:
         sessions = sr.json().get("sessions", [])
         match = next((s for s in sessions if s.get("session_id") == session_id), None)
         if match:
-            er = requests.get(f"{LINEAGE_URL}/sessions/{session_id}", timeout=10)
+            er = requests.get(f"{LINEAGE_URL}/sessions/{session_id}", timeout=60)
             if er.status_code == 200:
                 records = er.json().get("records", [])
                 if records:

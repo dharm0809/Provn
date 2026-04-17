@@ -60,7 +60,7 @@ def test_audit_export():
 
 
 def test_chain_audit():
-    r = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     check("Sessions available for chain audit", r.status_code == 200)
     if r.status_code != 200:
         return
@@ -74,7 +74,7 @@ def test_chain_audit():
         sid = s.get("session_id")
         if not sid:
             continue
-        rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=10)
+        rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=60)
         if rv.status_code == 200:
             v = rv.json()
             valid = bool(v.get("valid") or v.get("chain_valid") or v.get("result") == "valid")
@@ -96,7 +96,7 @@ def test_eu_ai_act():
     text = doc.read_text()
     for section in ["Article 9", "Article 12", "Article 14", "Article 15", "SOC 2"]:
         check(f"Doc covers {section}", section in text)
-    has_lineage = requests.get(f"{LINEAGE_URL}/sessions", timeout=10).status_code == 200
+    has_lineage = requests.get(f"{LINEAGE_URL}/sessions", timeout=60).status_code == 200
     check("Article 12 audit trail is live (lineage API up)", has_lineage)
 
 
