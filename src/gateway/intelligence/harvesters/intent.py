@@ -115,17 +115,19 @@ class IntentHarvester(Harvester):
         if immediate is not None:
             await asyncio.to_thread(
                 _write_divergence, self._db.path, signal.request_id,
-                immediate, "immediate_action_mismatch",
+                immediate, "immediate_action_mismatch", prompt,
             )
 
         # 2. Deferred: check prior turn in this session against current prompt.
         if session_id:
             deferred = self._check_next_turn_contradiction(str(session_id), prompt)
             if deferred is not None:
-                prior_rid, teacher_label = deferred
+                prior_rid, prior_prompt, teacher_label = deferred
+                # Back-write uses the PRIOR turn's prompt as training_text
+                # (the prior row is what's being relabeled, not the current).
                 await asyncio.to_thread(
                     _write_divergence, self._db.path, prior_rid,
-                    teacher_label, "next_turn_contradiction",
+                    teacher_label, "next_turn_contradiction", prior_prompt,
                 )
             # Store the current verdict as the new pending for this session.
             self._remember_pending(str(session_id), signal.request_id, signal.prediction, prompt)
@@ -141,9 +143,9 @@ class IntentHarvester(Harvester):
 
     def _check_next_turn_contradiction(
         self, session_id: str, current_prompt: str,
-    ) -> tuple[str, str] | None:
-        """Return (prior_request_id, corrected_label) when the new turn
-        contradicts the prior classification; None otherwise.
+    ) -> tuple[str, str, str] | None:
+        """Return (prior_request_id, prior_prompt, corrected_label) when the
+        new turn contradicts the prior classification; None otherwise.
         """
         prior = self._pending.get(session_id)
         if prior is None:
@@ -151,7 +153,7 @@ class IntentHarvester(Harvester):
         # Only flag when the NEW prompt carries an explicit action cue
         # AND the prior label didn't already match it.
         if _NEXT_TURN_WEB_SEARCH.search(current_prompt) and prior.intent != "web_search":
-            return prior.request_id, "web_search"
+            return prior.request_id, prior.prompt, "web_search"
         return None
 
     def _remember_pending(
@@ -198,7 +200,7 @@ class IntentHarvester(Harvester):
             return
         await asyncio.to_thread(
             _write_divergence, self._db.path, signal.request_id,
-            label, "teacher_llm",
+            label, "teacher_llm", prompt,
         )
 
     async def _call_teacher(self, prompt: str) -> str | None:
@@ -269,22 +271,31 @@ def _check_immediate(prediction: str, payload: Any) -> str | None:
 
 def _write_divergence(
     db_path: str, request_id: str, label: str, source: str,
+    training_text: str = "",
 ) -> None:
-    """Back-write a divergence label onto the latest intent row for `request_id`."""
+    """Back-write a divergence label onto the latest intent row for `request_id`.
+
+    `training_text` — when non-empty — is stored on the verdict row so the
+    Task 17 dataset builder can train on the actual prompt. Stored only on
+    rows that have a divergence signal (i.e. training candidates); normal
+    verdicts remain text-free.
+    """
+    text_to_write = training_text if training_text else None
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             """
             UPDATE onnx_verdicts
             SET divergence_signal = ?,
-                divergence_source = ?
+                divergence_source = ?,
+                training_text = COALESCE(?, training_text)
             WHERE id = (
                 SELECT id FROM onnx_verdicts
                 WHERE request_id = ? AND model_name = 'intent'
                 ORDER BY timestamp DESC LIMIT 1
             )
             """,
-            (label, source, request_id),
+            (label, source, text_to_write, request_id),
         )
         conn.commit()
     except Exception:

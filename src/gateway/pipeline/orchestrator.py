@@ -1328,7 +1328,16 @@ def _emit_harvester_signals(record: dict, session_id: str | None) -> None:
     rid = request_id_var.get() or None
     meta = record.get("metadata") or {}
     prompt = record.get("prompt_text") or ""
-    common_context = {"session_id": session_id, "prompt": prompt}
+    # Task 17: response_content travels in context so text-based harvesters
+    # (safety, intent teacher) can store it as training_text on the
+    # verdict row. Absent / empty responses are still passed — the
+    # receiving harvester decides whether to store them.
+    response = record.get("response_content") or ""
+    common_context = {
+        "session_id": session_id,
+        "prompt": prompt,
+        "response": response,
+    }
 
     # Intent — `_intent` is populated in `classify_intent`'s post-process
     # path (orchestrator wiring above SchemaIntelligence). When the request
