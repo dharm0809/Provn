@@ -241,8 +241,12 @@ async def gateway_bundle(tmp_path):
     # Ensure caches are fresh after env mutation.
     import sys
     # Drop any prior gateway.* imports so create_app re-reads settings.
+    # Exclude gateway.metrics.* — Prometheus counters are process-wide
+    # singletons registered at import time; clearing them causes a
+    # ValueError("Duplicated timeseries") when re-imported after other
+    # test files have already pulled them in transitively.
     for mod in list(sys.modules.keys()):
-        if mod.startswith("gateway.") or mod == "gateway":
+        if (mod.startswith("gateway.") or mod == "gateway") and not mod.startswith("gateway.metrics"):
             sys.modules.pop(mod, None)
 
     from gateway.config import get_settings
