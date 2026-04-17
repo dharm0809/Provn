@@ -128,7 +128,8 @@ function CandidatesView({ refresh }) {
   const [candidates, setCandidates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(null);
+  const [promoteTarget, setPromoteTarget] = useState(null);
+  const [rejectTarget, setRejectTarget] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -144,37 +145,6 @@ function CandidatesView({ refresh }) {
   }, [refresh]);
 
   useEffect(() => { load(); }, [load]);
-
-  // Task 32 will replace these window.confirm calls with rich modals
-  // (metrics preview + approver identity confirmation).
-  const onPromote = async (c) => {
-    if (!window.confirm(`Promote ${c.model_name} ${c.version}?\n\nThis will replace the current production model. The previous version will be archived.`)) return;
-    setBusy(`promote:${c.model_name}:${c.version}`);
-    try {
-      await api.promoteCandidate(c.model_name, c.version);
-      await load();
-    } catch (e) {
-      if (e.message === 'AUTH') { refresh(); return; }
-      window.alert(`Promote failed: ${e.message}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onReject = async (c) => {
-    const reason = window.prompt(`Reject ${c.model_name} ${c.version}? Optional reason:`, '');
-    if (reason === null) return;
-    setBusy(`reject:${c.model_name}:${c.version}`);
-    try {
-      await api.rejectCandidate(c.model_name, c.version, reason || '');
-      await load();
-    } catch (e) {
-      if (e.message === 'AUTH') { refresh(); return; }
-      window.alert(`Reject failed: ${e.message}`);
-    } finally {
-      setBusy(null);
-    }
-  };
 
   if (loading) return <div className="skeleton-block" style={{ height: 180 }} />;
 
@@ -206,8 +176,6 @@ function CandidatesView({ refresh }) {
               {candidates.map(c => {
                 const m = c.shadow_validation?.metrics || {};
                 const key = `${c.model_name}:${c.version}`;
-                const promoteBusy = busy === `promote:${c.model_name}:${c.version}`;
-                const rejectBusy = busy === `reject:${c.model_name}:${c.version}`;
                 return (
                   <tr key={key}>
                     <td className="id">{c.model_name}</td>
@@ -226,13 +194,11 @@ function CandidatesView({ refresh }) {
                     <td className="mono">{m.mcnemar_p_value != null ? Number(m.mcnemar_p_value).toFixed(3) : '-'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                        <button className="btn-primary btn-sm" disabled={promoteBusy || rejectBusy}
-                          onClick={() => onPromote(c)}>
-                          {promoteBusy ? '…' : 'Promote'}
+                        <button className="btn-primary btn-sm" onClick={() => setPromoteTarget(c)}>
+                          Promote
                         </button>
-                        <button className="btn-danger btn-sm" disabled={promoteBusy || rejectBusy}
-                          onClick={() => onReject(c)}>
-                          {rejectBusy ? '…' : 'Reject'}
+                        <button className="btn-danger btn-sm" onClick={() => setRejectTarget(c)}>
+                          Reject
                         </button>
                       </div>
                     </td>
@@ -243,6 +209,169 @@ function CandidatesView({ refresh }) {
           </table>
         </div>
       )}
+      {promoteTarget && (
+        <PromoteModal
+          candidate={promoteTarget}
+          onClose={() => setPromoteTarget(null)}
+          onSuccess={async () => { setPromoteTarget(null); await load(); }}
+          onAuth={refresh}
+        />
+      )}
+      {rejectTarget && (
+        <RejectModal
+          candidate={rejectTarget}
+          onClose={() => setRejectTarget(null)}
+          onSuccess={async () => { setRejectTarget(null); await load(); }}
+          onAuth={refresh}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Promote / Reject Modals ────────────────────────────────────
+
+function MetricsTable({ metrics, shadow }) {
+  const m = metrics || {};
+  const rows = [
+    ['Sample count', m.sample_count ?? '-'],
+    ['Labeled samples', m.labeled_count ?? '-'],
+    ['Candidate accuracy', fmtPct(m.candidate_accuracy)],
+    ['Production accuracy', fmtPct(m.production_accuracy)],
+    ['Δ accuracy', fmtDelta(m.candidate_accuracy, m.production_accuracy)],
+    ['Disagreement rate', fmtPct(m.disagreement_rate)],
+    ['Candidate error rate', fmtPct(m.candidate_error_rate)],
+    ['McNemar p-value', m.mcnemar_p_value != null ? Number(m.mcnemar_p_value).toFixed(4) : '-'],
+  ];
+  return (
+    <div className="modal-metrics">
+      <div className="modal-metrics-head">
+        <span>Shadow validation</span>
+        <GateBadge shadow={shadow} />
+      </div>
+      <div className="modal-metrics-grid">
+        {rows.map(([label, value]) => (
+          <div key={label} className="modal-metrics-row">
+            <span className="modal-metrics-label">{label}</span>
+            <span className="modal-metrics-value mono">{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PromoteModal({ candidate, onClose, onSuccess, onAuth }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const c = candidate;
+  const m = c.shadow_validation?.metrics || {};
+  const gateFailed = c.shadow_validation?.passed === false;
+  const noShadow = !c.shadow_validation?.completed;
+
+  const submit = async () => {
+    setBusy(true); setError('');
+    try {
+      await api.promoteCandidate(c.model_name, c.version);
+      await onSuccess();
+    } catch (e) {
+      if (e.message === 'AUTH') { onAuth(); return; }
+      setError(e.message || 'promote failed');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="confirm-overlay" onClick={busy ? undefined : onClose}>
+      <div className="confirm-dialog confirm-dialog-wide" onClick={e => e.stopPropagation()}>
+        <h3>Promote Candidate</h3>
+        <div className="confirm-item">
+          {c.model_name} <span style={{ color: 'var(--text-muted)' }}>·</span>{' '}
+          <span className="mono" style={{ fontSize: 12 }}>{c.version}</span>
+        </div>
+        <p>
+          This will replace the current production model. The previous version will be archived
+          and a `model_promoted` event will be written to the audit chain.
+        </p>
+
+        <MetricsTable metrics={m} shadow={c.shadow_validation} />
+
+        {(gateFailed || noShadow) && (
+          <div className="modal-warn">
+            {noShadow
+              ? '⚠ This candidate has not completed shadow validation. Promote at your own risk.'
+              : '⚠ This candidate FAILED its automated promotion gate. Manual override only.'}
+          </div>
+        )}
+
+        <div className="modal-approver">
+          Approver identity is taken from your authenticated session
+          (X-User-Id / JWT subject) and recorded on the audit event.
+        </div>
+
+        {error && <div className="modal-error">{error}</div>}
+
+        <div className="confirm-actions">
+          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn-primary" onClick={submit} disabled={busy}>
+            {busy ? 'Promoting…' : 'Confirm Promote'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RejectModal({ candidate, onClose, onSuccess, onAuth }) {
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const c = candidate;
+
+  const submit = async () => {
+    setBusy(true); setError('');
+    try {
+      await api.rejectCandidate(c.model_name, c.version, reason.trim());
+      await onSuccess();
+    } catch (e) {
+      if (e.message === 'AUTH') { onAuth(); return; }
+      setError(e.message || 'reject failed');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="confirm-overlay" onClick={busy ? undefined : onClose}>
+      <div className="confirm-dialog" onClick={e => e.stopPropagation()}>
+        <h3>Reject Candidate</h3>
+        <div className="confirm-item">
+          {c.model_name} <span style={{ color: 'var(--text-muted)' }}>·</span>{' '}
+          <span className="mono" style={{ fontSize: 12 }}>{c.version}</span>
+        </div>
+        <p>
+          Moves this candidate's `.onnx` to <span className="mono">archive/failed/</span> and
+          emits a `model_rejected` event. Production is unaffected.
+        </p>
+        <div className="form-group" style={{ marginTop: 12 }}>
+          <label className="form-label">Reason (optional — defaults to "manual_rejection")</label>
+          <input
+            className="form-input"
+            placeholder="e.g. accuracy regression on web_search class"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            autoFocus
+            disabled={busy}
+            onKeyDown={e => e.key === 'Enter' && !busy && submit()}
+          />
+        </div>
+        {error && <div className="modal-error">{error}</div>}
+        <div className="confirm-actions">
+          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn-danger" onClick={submit} disabled={busy}>
+            {busy ? 'Rejecting…' : 'Confirm Reject'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -2206,6 +2206,63 @@ tr.clickable:hover td { background: var(--bg-hover); }
   word-break: break-all;
 }
 
+/* Wide variant for promotion modal — needs room for the metrics grid. */
+.confirm-dialog.confirm-dialog-wide {
+  max-width: 560px;
+}
+
+.modal-metrics {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  padding: 12px 14px;
+  margin: 0 0 14px 0;
+}
+.modal-metrics-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.modal-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 18px;
+}
+.modal-metrics-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.modal-metrics-label { color: var(--text-muted); }
+.modal-metrics-value { color: var(--text-primary); }
+
+.modal-warn {
+  border-left: 3px solid var(--gold);
+  background: rgba(212, 175, 55, 0.08);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+}
+.modal-approver {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 0 0 14px 0;
+}
+.modal-error {
+  border-left: 3px solid var(--red);
+  background: rgba(239, 68, 68, 0.08);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--red);
+  margin: 0 0 12px 0;
+}
+
 /* Form validation */
 .form-input.invalid,
 .form-select.invalid {
