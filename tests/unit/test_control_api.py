@@ -58,6 +58,15 @@ def _make_ctx(store, attestation_cache=None, policy_cache=None, budget_tracker=N
     ctx.content_analyzers = []
     ctx.session_chain = None
     ctx.http_client = None
+    # Intelligence-layer slots are truthy on a bare MagicMock (each
+    # attribute access auto-creates a child Mock), which makes the
+    # control_status endpoint try to serialize their get_stats() output
+    # and fail. Set them explicitly to None so the falsy-guard in
+    # control_status skips them.
+    ctx.anomaly_detector = None
+    ctx.consistency_tracker = None
+    ctx.field_registry = None
+    ctx.intelligence_worker = None
     return ctx
 
 
