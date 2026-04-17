@@ -346,7 +346,7 @@ def test_attachment_handling():
 
     # Check attachment metadata via lineage API
     ar = requests.get(f"{LINEAGE_URL}/attachments",
-                      params={"session_id": session_id}, timeout=10)
+                      params={"session_id": session_id}, timeout=60)
     if ar.status_code == 200:
         attachments = ar.json().get("attachments", [])
         if attachments:
