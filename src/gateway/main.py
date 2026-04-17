@@ -71,6 +71,11 @@ from gateway.control.sync_api import (
     sync_attestation_proofs,
     sync_policies,
 )
+from gateway.intelligence.api import (
+    list_production_models as intel_list_production_models,
+    list_candidates as intel_list_candidates,
+    model_history as intel_model_history,
+)
 from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
 from gateway.openwebui.status_api import openwebui_status
@@ -1768,6 +1773,10 @@ def create_app() -> Starlette:
         Route("/v1/control/keys/{key_hash}/tools", control_get_key_tools, methods=["GET"]),
         Route("/v1/control/keys/{key_hash}/tools", control_set_key_tools, methods=["PUT"]),
         Route("/v1/control/keys/{key_hash}/tools/{tool_name:path}", control_remove_key_tool, methods=["DELETE"]),
+        # Phase 25 Task 26: intelligence read endpoints
+        Route("/v1/control/intelligence/models", intel_list_production_models, methods=["GET"]),
+        Route("/v1/control/intelligence/candidates", intel_list_candidates, methods=["GET"]),
+        Route("/v1/control/intelligence/history/{model}", intel_model_history, methods=["GET"]),
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),
