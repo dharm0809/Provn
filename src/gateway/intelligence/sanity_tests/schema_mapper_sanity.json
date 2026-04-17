@@ -1,0 +1,21 @@
+{
+  "model_name": "schema_mapper",
+  "notes": "Seed fixtures — schema_mapper sanity uses feature-dict inputs matching the distillation SchemaMapperTrainer's DictVectorizer input. Grow to 50/class before production gating.",
+  "examples": [
+    {"input": {"len": 400, "word_count": 65, "has_role": 1, "depth": 1}, "label": "content"},
+    {"input": {"len": 620, "word_count": 110, "has_role": 1, "depth": 1}, "label": "content"},
+    {"input": {"len": 280, "word_count": 45, "has_role": 1, "depth": 2}, "label": "content"},
+
+    {"input": {"len": 12, "word_count": 2, "is_int": 1, "magnitude": 2}, "label": "prompt_tokens"},
+    {"input": {"len": 14, "word_count": 2, "is_int": 1, "magnitude": 3}, "label": "prompt_tokens"},
+    {"input": {"len": 10, "word_count": 2, "is_int": 1, "magnitude": 2}, "label": "prompt_tokens"},
+
+    {"input": {"len": 12, "word_count": 2, "is_int": 1, "magnitude": 3}, "label": "completion_tokens"},
+    {"input": {"len": 14, "word_count": 2, "is_int": 1, "magnitude": 3}, "label": "completion_tokens"},
+    {"input": {"len": 10, "word_count": 2, "is_int": 1, "magnitude": 2}, "label": "completion_tokens"},
+
+    {"input": {"len": 4, "word_count": 1, "has_role": 0, "depth": 0}, "label": "finish_reason"},
+    {"input": {"len": 3, "word_count": 1, "has_role": 0, "depth": 0}, "label": "finish_reason"},
+    {"input": {"len": 5, "word_count": 1, "has_role": 0, "depth": 0}, "label": "finish_reason"}
+  ]
+}
