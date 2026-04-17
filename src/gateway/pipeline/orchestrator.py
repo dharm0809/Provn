@@ -519,6 +519,29 @@ _is_tool_unsupported_error = is_tool_unsupported_error
 
 # ── Session chain + record write helpers ─────────────────────────────────────
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _session_chain_lock(ctx, session_id: str | None):
+    """Serialize the (reserve-seq → write-record → update-tracker) span
+    per session so concurrent same-session requests can never read a
+    stale `last_record_hash` and produce a broken Merkle chain.
+
+    No-ops when session tracking is disabled or session_id is missing.
+    Works for both in-memory and Redis trackers — each exposes
+    `session_lock(session_id)` returning an `asyncio.Lock`. In the
+    Redis case the lock only serializes within THIS worker; multi-
+    replica deployments still need sticky-session LB affinity.
+    """
+    tracker = getattr(ctx, "session_chain", None) if ctx else None
+    if session_id and tracker is not None and hasattr(tracker, "session_lock"):
+        async with tracker.session_lock(session_id):
+            yield
+    else:
+        yield
+
+
 async def _apply_session_chain(record, session_id: str | None, ctx, settings) -> str | None:
     """Compute and attach session chain fields to record. Returns record_hash or None.
 
@@ -716,14 +739,19 @@ async def _after_stream_record(
         )
         _exec_id = record.get("execution_id", "unknown")
 
-        record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
-        if ctx.storage:
-            result = await ctx.storage.write_execution(record)
-            if result.succeeded:
-                execution_id_var.set(record["execution_id"])
-        await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
-        if session_id and ctx.session_chain and record_hash_val is not None:
-            await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
+        # Serialize the full chain critical section per session so
+        # concurrent same-session requests can't race and break the
+        # Merkle linkage. The `_session_chain_lock` no-ops when
+        # session tracking is off.
+        async with _session_chain_lock(ctx, session_id):
+            record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
+            if ctx.storage:
+                result = await ctx.storage.write_execution(record)
+                if result.succeeded:
+                    execution_id_var.set(record["execution_id"])
+            await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
+            if session_id and ctx.session_chain and record_hash_val is not None:
+                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
         # Phase 23: populate governance_meta for SSE event injection
         if governance_meta is not None:
             governance_meta["execution_id"] = record.get("execution_id")
@@ -1511,81 +1539,87 @@ async def _build_and_write_record(
         except Exception:
             logger.debug("Cost computation failed (non-fatal)", exc_info=True)
 
-    t_chain = time.perf_counter()
-    record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
-    if params.timings is not None:
-        params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
+    # Serialize chain reserve → record write → tracker update per
+    # session so concurrent same-session requests can't race. The
+    # consistency/anomaly/overflow steps run inside the lock too
+    # because they only mutate `record["metadata"]` (fast, local),
+    # never another session's state.
+    async with _session_chain_lock(ctx, session_id):
+        t_chain = time.perf_counter()
+        record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
+        if params.timings is not None:
+            params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
 
-    # ── Consistency check (inline, < 1ms) ───────────────────────────
-    _consistency_tracker = getattr(ctx, "consistency_tracker", None)
-    if _consistency_tracker:
-        try:
-            _con_result = _consistency_tracker.check(
-                prompt=record.get("prompt_text", ""),
-                response=record.get("response_content", ""),
-                model_id=record.get("model_id", ""),
-                execution_id=record.get("execution_id", ""),
-                session_id=session_id or "",
-                user=record.get("user", ""),
-            )
-            if _con_result:
-                meta = record.get("metadata") or {}
-                meta["consistency_check"] = {
-                    "compared_with": _con_result.execution_id_a[:12],
-                    "prompt_similarity": _con_result.prompt_similarity,
-                    "response_similarity": _con_result.response_similarity,
-                    "consistent": _con_result.consistent,
-                }
-                if not _con_result.consistent:
-                    meta.setdefault("anomalies", []).append("consistency_flag")
-                record["metadata"] = meta
-        except Exception as _ct_err:
-            logger.debug("Consistency check failed (non-fatal): %s", _ct_err)
-
-    # ── Anomaly detection (inline, < 2ms) ────────────────────────────
-    _anomaly_detector = getattr(ctx, "anomaly_detector", None)
-    if _anomaly_detector:
-        try:
-            _anomaly_report = _anomaly_detector.detect(record)
-            if _anomaly_report.to_list():
-                meta = record.get("metadata") or {}
-                meta["anomalies"] = _anomaly_report.to_list()
-                record["metadata"] = meta
-        except Exception as _ad_err:
-            logger.debug("Anomaly detection failed (non-fatal): %s", _ad_err)
-
-    # ── Self-healing overflow (capture unknown response fields) ──────
-    _schema_mapper = getattr(ctx, "schema_mapper", None)
-    _field_registry = getattr(ctx, "field_registry", None)
-    if _schema_mapper and _field_registry:
-        try:
-            _canonical = getattr(request.state, "_canonical_response", None)
-            if _canonical and _canonical.overflow:
-                from gateway.schema.overflow import build_overflow_envelope
-                _overflow_env = build_overflow_envelope(
-                    _canonical.overflow,
-                    provider=record.get("provider", "unknown"),
-                    registry=_field_registry,
+        # ── Consistency check (inline, < 1ms) ───────────────────────────
+        _consistency_tracker = getattr(ctx, "consistency_tracker", None)
+        if _consistency_tracker:
+            try:
+                _con_result = _consistency_tracker.check(
+                    prompt=record.get("prompt_text", ""),
+                    response=record.get("response_content", ""),
+                    model_id=record.get("model_id", ""),
+                    execution_id=record.get("execution_id", ""),
+                    session_id=session_id or "",
+                    user=record.get("user", ""),
                 )
-                if _overflow_env:
+                if _con_result:
                     meta = record.get("metadata") or {}
-                    meta["_overflow"] = _overflow_env
+                    meta["consistency_check"] = {
+                        "compared_with": _con_result.execution_id_a[:12],
+                        "prompt_similarity": _con_result.prompt_similarity,
+                        "response_similarity": _con_result.response_similarity,
+                        "consistent": _con_result.consistent,
+                    }
+                    if not _con_result.consistent:
+                        meta.setdefault("anomalies", []).append("consistency_flag")
                     record["metadata"] = meta
-        except Exception as _of_err:
-            logger.debug("Overflow capture failed (non-fatal): %s", _of_err)
+            except Exception as _ct_err:
+                logger.debug("Consistency check failed (non-fatal): %s", _ct_err)
 
-    await _store_execution(record, request, ctx)
-    # Expose governance metadata for response headers (Phase 23)
-    request.state.walacor_chain_seq = record.get("sequence_number")
-    await _write_tool_events(params.tool_interactions, record["execution_id"], call, params.tool_strategy, ctx, settings)
-    if session_id and ctx.session_chain and record_hash_val is not None:
-        try:
-            await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
-        except Exception:
-            logger.error(
-                "Session chain update failed — chain state may be stale: session_id=%s seq_num=%d",
-                session_id, record["sequence_number"], exc_info=True,
-            )
+        # ── Anomaly detection (inline, < 2ms) ────────────────────────────
+        _anomaly_detector = getattr(ctx, "anomaly_detector", None)
+        if _anomaly_detector:
+            try:
+                _anomaly_report = _anomaly_detector.detect(record)
+                if _anomaly_report.to_list():
+                    meta = record.get("metadata") or {}
+                    meta["anomalies"] = _anomaly_report.to_list()
+                    record["metadata"] = meta
+            except Exception as _ad_err:
+                logger.debug("Anomaly detection failed (non-fatal): %s", _ad_err)
+
+        # ── Self-healing overflow (capture unknown response fields) ──────
+        _schema_mapper = getattr(ctx, "schema_mapper", None)
+        _field_registry = getattr(ctx, "field_registry", None)
+        if _schema_mapper and _field_registry:
+            try:
+                _canonical = getattr(request.state, "_canonical_response", None)
+                if _canonical and _canonical.overflow:
+                    from gateway.schema.overflow import build_overflow_envelope
+                    _overflow_env = build_overflow_envelope(
+                        _canonical.overflow,
+                        provider=record.get("provider", "unknown"),
+                        registry=_field_registry,
+                    )
+                    if _overflow_env:
+                        meta = record.get("metadata") or {}
+                        meta["_overflow"] = _overflow_env
+                        record["metadata"] = meta
+            except Exception as _of_err:
+                logger.debug("Overflow capture failed (non-fatal): %s", _of_err)
+
+        await _store_execution(record, request, ctx)
+        # Expose governance metadata for response headers (Phase 23)
+        request.state.walacor_chain_seq = record.get("sequence_number")
+        await _write_tool_events(params.tool_interactions, record["execution_id"], call, params.tool_strategy, ctx, settings)
+        if session_id and ctx.session_chain and record_hash_val is not None:
+            try:
+                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
+            except Exception:
+                logger.error(
+                    "Session chain update failed — chain state may be stale: session_id=%s seq_num=%d",
+                    session_id, record["sequence_number"], exc_info=True,
+                )
 
     # Phase 17: OTel GenAI span (fail-open; emitted after write so execution_id is set)
     if ctx.tracer is not None:
@@ -1732,17 +1766,19 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # fall back to multi-source adaptive classifier.
     _meta_rt = call.metadata.get("request_type")
     _rc = get_pipeline_context().request_classifier
+    # `body_dict` must be bound in every branch — downstream code (lines
+    # below) reads it to pull OpenWebUI chat_id / message_id out of the
+    # body's `metadata` object. Start from the cached-parsed-body on
+    # request.state so we don't re-parse unless necessary.
+    body_dict = getattr(request.state, "_parsed_body", None)
+    if body_dict is None:
+        try:
+            body_dict = json.loads(call.raw_body) if call.raw_body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body_dict = {}
     if _meta_rt:
         extra["request_type"] = _meta_rt
     elif _rc:
-        # Use cached parsed body from request.state if available (set by _peek_model_id),
-        # otherwise parse once and cache for future use.
-        body_dict = getattr(request.state, "_parsed_body", None)
-        if body_dict is None:
-            try:
-                body_dict = json.loads(call.raw_body) if call.raw_body else {}
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                body_dict = {}
         extra["request_type"] = _rc.classify(
             call.prompt_text or "", dict(request.headers), body_dict)
     else:

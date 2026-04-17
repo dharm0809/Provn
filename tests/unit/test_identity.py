@@ -56,19 +56,33 @@ class TestResolveIdentityFromHeaders:
         assert identity.roles == []
 
     def test_missing_user_id(self):
+        """No X-User-Id: falls back to anonymous identity so every
+        request still has an audit trail (Phase 21: NEVER returns None).
+        Team header still surfaces in the returned identity."""
         request = _make_request({"x-team-id": "eng"})
         identity = resolve_identity_from_headers(request)
-        assert identity is None
+        assert identity is not None
+        assert identity.user_id.startswith("anonymous")
+        assert identity.source == "anonymous"
+        assert identity.team == "eng"
 
     def test_empty_headers(self):
+        """No headers at all: anonymous fallback, team=None."""
         request = _make_request({})
         identity = resolve_identity_from_headers(request)
-        assert identity is None
+        assert identity is not None
+        assert identity.user_id.startswith("anonymous")
+        assert identity.source == "anonymous"
+        assert identity.team is None
 
     def test_whitespace_user_id(self):
+        """Whitespace-only X-User-Id is treated as missing → anonymous
+        fallback, never surfaced as a real identity."""
         request = _make_request({"x-user-id": "  "})
         identity = resolve_identity_from_headers(request)
-        assert identity is None
+        assert identity is not None
+        assert identity.user_id.startswith("anonymous")
+        assert identity.source == "anonymous"
 
     def test_openwebui_user_name_fallback(self):
         request = _make_request({"x-openwebui-user-name": "alice"})

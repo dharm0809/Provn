@@ -398,15 +398,76 @@ async def test_promote_uses_caller_identity_state_over_header(monkeypatch, tmp_p
 async def test_promote_invalid_model_name_returns_400(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path)
     _install_ctx(monkeypatch, ctx)
-    # Simulate the candidate file at a path that matches the regex but
-    # uses a non-canonical model name — registry.promote will raise
-    # ValueError on the path_traversal guard.
+    # Non-canonical model name: rejected up-front (400) before any
+    # filesystem lookup. Important because the handler acquires a
+    # per-model lock — without validation an attacker could seed
+    # `_promote_locks` with arbitrary strings.
     resp = await promote_candidate(
         _fake_request(path_params={"model": "../../etc/passwd", "version": "v1"})
     )
-    # 404 first because the file literally doesn't exist — the deeper
-    # ValueError path is exercised by Task 11/22 registry tests.
-    assert resp.status_code == 404
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_promote_concurrent_same_version_yields_one_success_and_409(monkeypatch, tmp_path):
+    """Regression for C2: two concurrent POST /promote for the same
+    (model, version) must produce exactly one 200 and one 409 — never a
+    404 leaked from the loser's FileNotFoundError.
+
+    Uses the real LifecycleEventWriter so the mirror table is populated
+    the way it is in production; that's what the idempotency check
+    reads.
+    """
+    import asyncio as _aio
+    from gateway.intelligence import api as intel_api
+    from gateway.intelligence.walacor_writer import LifecycleEventWriter
+
+    class _NoopWalacor:
+        async def write_record(self, record, *, etid=None):
+            return {"id": "wr-1"}
+
+    ctx = _make_ctx(tmp_path)
+    ctx.lifecycle_event_writer = LifecycleEventWriter(
+        ctx.intelligence_db, _NoopWalacor(), etid=9000024,
+    )
+    _install_ctx(monkeypatch, ctx)
+    # Use a fresh lock map so state from prior tests can't interfere.
+    monkeypatch.setattr(intel_api, "_promote_locks", {}, raising=True)
+
+    reg = ctx.model_registry
+    (reg.base / "candidates" / "intent-v9.onnx").write_bytes(b"v9")
+
+    req_a = _fake_request(
+        path_params={"model": "intent", "version": "v9"},
+        headers={"X-User-Id": "alice"},
+    )
+    req_b = _fake_request(
+        path_params={"model": "intent", "version": "v9"},
+        headers={"X-User-Id": "bob"},
+    )
+
+    results = await _aio.gather(
+        promote_candidate(req_a),
+        promote_candidate(req_b),
+    )
+
+    statuses = sorted(r.status_code for r in results)
+    assert statuses == [200, 409], (
+        f"expected [200, 409] from concurrent same-version promote, "
+        f"got {statuses}"
+    )
+    # Exactly one mirror row for this (model, version).
+    conn = sqlite3.connect(ctx.intelligence_db.path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM lifecycle_events_mirror "
+            "WHERE event_type = 'model_promoted'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1, f"expected 1 mirror row, got {len(rows)}"
+    # Production file carries the candidate bytes.
+    assert (reg.base / "production" / "intent.onnx").read_bytes() == b"v9"
 
 
 # ── /reject/{model}/{version} ──────────────────────────────────────────────
@@ -751,3 +812,90 @@ async def test_retrain_tracks_job_and_reaps_completed(monkeypatch, tmp_path):
     job_id2 = json.loads(resp2.body)["job_id"]
     assert job_id2 in intel_api._retrain_tasks
     await asyncio.wait_for(ctx.distillation_worker.completion.wait(), timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_retrain_serializes_concurrent_requests_for_same_model(monkeypatch, tmp_path):
+    """Regression for I2: 10 concurrent POST /retrain/intent must not
+    run 10 trainer invocations in parallel — they'd race on the
+    candidate filename (ISO-second granularity collision) and thrash
+    the trainer. Per-model asyncio.Lock serializes them."""
+    import asyncio
+    from gateway.intelligence import api as intel_api
+
+    in_flight = 0
+    max_in_flight = 0
+    in_flight_lock = asyncio.Lock()
+
+    class _SlowWorker:
+        async def retrain_one(self, model_name):
+            nonlocal in_flight, max_in_flight
+            async with in_flight_lock:
+                in_flight += 1
+                if in_flight > max_in_flight:
+                    max_in_flight = in_flight
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                async with in_flight_lock:
+                    in_flight -= 1
+
+    ctx = _make_ctx(tmp_path)
+    ctx.distillation_worker = _SlowWorker()
+    _install_ctx(monkeypatch, ctx)
+    intel_api._retrain_tasks.clear()
+    # Reset per-model locks so state from prior tests can't taint.
+    monkeypatch.setattr(intel_api, "_retrain_model_locks", {}, raising=True)
+
+    # Fire 10 concurrent retrain requests for the same model.
+    responses = await asyncio.gather(*[
+        force_retrain(_fake_request(path_params={"model": "intent"}))
+        for _ in range(10)
+    ])
+    for r in responses:
+        assert r.status_code == 202
+
+    # Drain all queued work.
+    tasks = list(intel_api._retrain_tasks.values())
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert max_in_flight == 1, (
+        f"expected serialized retrains (max=1), got max_in_flight={max_in_flight}"
+    )
+
+
+@pytest.mark.anyio
+async def test_retrain_returns_429_when_queue_full(monkeypatch, tmp_path):
+    """Regression for I2: cap on tracked retrain jobs prevents
+    unbounded dict growth under abuse / bug-loop."""
+    import asyncio
+    from gateway.intelligence import api as intel_api
+
+    never_finishes = asyncio.Event()
+
+    class _StuckWorker:
+        async def retrain_one(self, model_name):
+            await never_finishes.wait()
+
+    ctx = _make_ctx(tmp_path)
+    ctx.distillation_worker = _StuckWorker()
+    _install_ctx(monkeypatch, ctx)
+    intel_api._retrain_tasks.clear()
+    monkeypatch.setattr(intel_api, "_retrain_model_locks", {}, raising=True)
+    # Tighten cap so the test doesn't spawn 100 real tasks.
+    monkeypatch.setattr(intel_api, "_RETRAIN_MAX_INFLIGHT", 3, raising=True)
+
+    r1 = await force_retrain(_fake_request(path_params={"model": "intent"}))
+    r2 = await force_retrain(_fake_request(path_params={"model": "intent"}))
+    r3 = await force_retrain(_fake_request(path_params={"model": "intent"}))
+    r4 = await force_retrain(_fake_request(path_params={"model": "intent"}))
+
+    assert r1.status_code == 202
+    assert r2.status_code == 202
+    assert r3.status_code == 202
+    assert r4.status_code == 429, f"expected 429, got {r4.status_code}"
+
+    # Unblock the stuck workers so the test teardown is clean.
+    never_finishes.set()
+    tasks = list(intel_api._retrain_tasks.values())
+    await asyncio.gather(*tasks, return_exceptions=True)

@@ -138,7 +138,7 @@ def test_content_block_confidence_formatting():
 
 def test_build_policy_block_response_from_results():
     """Test the helper that builds structured response from policy eval results."""
-    from gateway.pipeline.policy_evaluator import _build_policy_block_response
+    from gateway.pipeline.policy_evaluator import _extract_policy_block
 
     # Simulate a PolicyEvalResult-like object
     class FakeResult:
@@ -155,18 +155,19 @@ def test_build_policy_block_response_from_results():
             "actual": "revoked",
         }),
     ]
-    body = _build_policy_block_response(results, version=5)
+    body, reason = _extract_policy_block(results, version=5)
     assert body["error"] == "Blocked by policy"
     assert "require-active" in body["reason"]
     assert body["governance_decision"]["policy_version"] == 5
     assert body["governance_decision"]["blocking_rule_field"] == "status"
     assert body["governance_decision"]["expected_value"] == "active"
     assert body["governance_decision"]["actual_value"] == "revoked"
+    assert "require-active" in reason
 
 
 def test_build_policy_block_response_skips_passing():
     """Passing policy results should be skipped; first failing result used."""
-    from gateway.pipeline.policy_evaluator import _build_policy_block_response
+    from gateway.pipeline.policy_evaluator import _extract_policy_block
 
     class FakeResult:
         def __init__(self, policy_id, policy_name, result, details):
@@ -183,21 +184,22 @@ def test_build_policy_block_response_skips_passing():
             "actual": "revoked",
         }),
     ]
-    body = _build_policy_block_response(results, version=2)
+    body, _reason = _extract_policy_block(results, version=2)
     assert body["governance_decision"]["policy_name"] == "block-revoked"
 
 
 def test_build_policy_block_response_fallback():
     """When no results have details, fallback body is returned."""
-    from gateway.pipeline.policy_evaluator import _build_policy_block_response
+    from gateway.pipeline.policy_evaluator import _extract_policy_block
 
-    body = _build_policy_block_response([], version=1)
+    body, reason = _extract_policy_block([], version=1)
     assert body == {"error": "Blocked by policy"}
+    assert reason is None
 
 
 def test_build_policy_block_response_verification_level():
     """Test handling of verification level failure details."""
-    from gateway.pipeline.policy_evaluator import _build_policy_block_response
+    from gateway.pipeline.policy_evaluator import _extract_policy_block
 
     class FakeResult:
         def __init__(self, policy_id, policy_name, result, details):
@@ -213,7 +215,7 @@ def test_build_policy_block_response_verification_level():
             "actual": "self_reported",
         }),
     ]
-    body = _build_policy_block_response(results, version=3)
+    body, _reason = _extract_policy_block(results, version=3)
     assert body["governance_decision"]["blocking_rule_field"] == "minimum_verification_level"
     assert body["governance_decision"]["expected_value"] == "tee_measured"
     assert body["governance_decision"]["actual_value"] == "self_reported"

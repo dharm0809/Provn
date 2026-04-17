@@ -374,11 +374,20 @@ def test_list_sessions_sort_by_record_count(wal_db):
 
 
 def _insert_recent_attempts(conn, count: int = 5):
-    """Insert gateway_attempts with current timestamps so datetime('now', ...) filters work."""
+    """Insert gateway_attempts with current timestamps so datetime('now', ...) filters work.
+
+    `_metrics_timeline_labels` for the 1h range floors `end` to the
+    current minute (second=0, microsecond=0) and labels the window as
+    [now-1h, end). Rows landing in the current (partial) minute fall
+    outside that window because their timestamp carries real seconds
+    that sort >= end's string. Shift all inserts by +1 minute so the
+    row at i=0 is the most-recent FULL minute and all rows are visible
+    to the query.
+    """
     from datetime import datetime, timezone, timedelta
     now = datetime.now(timezone.utc)
     for i in range(count):
-        ts = (now - timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        ts = (now - timedelta(minutes=i + 1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         disp = "forwarded" if i < 3 else "denied_auth"
         conn.execute(
             """INSERT INTO gateway_attempts
@@ -438,26 +447,47 @@ def test_get_metrics_history_empty(wal_db):
 # ---------------------------------------------------------------------------
 
 def _insert_recent_execution_records(conn, count: int = 4):
-    """Insert wal_records with token + latency fields and current timestamps."""
+    """Insert wal_records with token + latency fields and current timestamps.
+
+    `get_token_latency_history` queries the extracted hot columns
+    (timestamp, prompt_tokens, completion_tokens, total_tokens,
+    latency_ms, event_type) directly, mirroring the production WAL
+    schema. Populate them explicitly — the JSON blob is kept for
+    audit-trail fidelity but the aggregation reads columns.
+
+    Same +1 minute shift as `_insert_recent_attempts`: the 1h window
+    ends at the current floored minute, so rows inserted at that minute
+    or later fall outside.
+    """
     from datetime import datetime, timezone, timedelta
     now = datetime.now(timezone.utc)
     for i in range(count):
         eid = f"exec-tl-{i}"
-        ts = (now - timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        ts = (now - timedelta(minutes=i + 1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        prompt_tokens = 100 + i * 10
+        completion_tokens = 50 + i * 5
+        total_tokens = 150 + i * 15
+        latency_ms = 200.0 + i * 50
         record = {
             "execution_id": eid,
             "session_id": "session-tl",
             "model_attestation_id": "test-model",
             "model_id": "qwen3:4b",
             "timestamp": ts,
-            "prompt_tokens": 100 + i * 10,
-            "completion_tokens": 50 + i * 5,
-            "total_tokens": 150 + i * 15,
-            "latency_ms": 200.0 + i * 50,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "latency_ms": latency_ms,
         }
         conn.execute(
-            "INSERT INTO wal_records (execution_id, record_json, created_at) VALUES (?, ?, ?)",
-            (eid, json.dumps(record), ts),
+            """INSERT INTO wal_records
+               (execution_id, record_json, created_at, event_type, session_id,
+                timestamp, model_id, provider, prompt_tokens, completion_tokens,
+                total_tokens, latency_ms)
+               VALUES (?, ?, ?, 'execution', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (eid, json.dumps(record), ts, "session-tl", ts,
+             "qwen3:4b", "ollama", prompt_tokens, completion_tokens,
+             total_tokens, latency_ms),
         )
     conn.commit()
 

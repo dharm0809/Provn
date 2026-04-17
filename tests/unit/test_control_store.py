@@ -89,6 +89,51 @@ def test_upsert_attestation_updates_on_conflict(store: ControlPlaneStore):
     assert len(store.list_attestations()) == 1
 
 
+def test_upsert_attestation_idempotent_on_explicit_id(store: ControlPlaneStore):
+    """Regression: caller-supplied `attestation_id` that already exists
+    must trigger an UPDATE of the matching row, NOT raise
+    IntegrityError. Before the fix, the ON CONFLICT clause only matched
+    `(tenant_id, provider, model_id)` — a collision on the PK
+    `attestation_id` blew up with UNIQUE constraint failure.
+    """
+    r1 = store.upsert_attestation({
+        "attestation_id": "self-attested:my-model",
+        "model_id": "my-model", "provider": "ollama", "tenant_id": "t1",
+        "status": "active", "notes": "v1",
+    })
+    assert r1["attestation_id"] == "self-attested:my-model"
+
+    # Same explicit id, same natural key — must update in place.
+    r2 = store.upsert_attestation({
+        "attestation_id": "self-attested:my-model",
+        "model_id": "my-model", "provider": "ollama", "tenant_id": "t1",
+        "status": "revoked", "notes": "v2",
+    })
+    assert r2["attestation_id"] == "self-attested:my-model"
+    assert r2["status"] == "revoked"
+    assert r2["notes"] == "v2"
+    assert len(store.list_attestations()) == 1
+
+
+def test_upsert_attestation_idempotent_across_tenant_change(store: ControlPlaneStore):
+    """Caller-supplied attestation_id that collides with an existing
+    row — even if the caller passes a different tenant_id — updates
+    the existing row rather than raising. This matches how Phase 25
+    self-attestation re-registers models across retries."""
+    r1 = store.upsert_attestation({
+        "attestation_id": "self-attested:shared-model",
+        "model_id": "shared-model", "provider": "ollama", "tenant_id": "t1",
+    })
+    r2 = store.upsert_attestation({
+        "attestation_id": "self-attested:shared-model",
+        "model_id": "shared-model", "provider": "ollama", "tenant_id": "t2",
+    })
+    assert r1["attestation_id"] == r2["attestation_id"]
+    # Row was updated (new tenant_id) — NOT a second row.
+    assert len(store.list_attestations()) == 1
+    assert r2["tenant_id"] == "t2"
+
+
 def test_list_attestations_filters_by_tenant(store: ControlPlaneStore):
     store.upsert_attestation({"model_id": "m1", "provider": "ollama", "tenant_id": "t1"})
     store.upsert_attestation({"model_id": "m2", "provider": "ollama", "tenant_id": "t2"})

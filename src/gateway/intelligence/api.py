@@ -18,6 +18,7 @@ share error handling.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -29,6 +30,26 @@ from starlette.responses import JSONResponse
 from gateway.pipeline.context import get_pipeline_context
 
 logger = logging.getLogger(__name__)
+
+
+# Per-model serialization for promote_candidate. The registry already
+# serializes the physical rename via `lock_for(model)`, but the HTTP
+# handler reads the mirror table *before* the rename and writes the
+# lifecycle event *after*. Without an outer lock two concurrent callers
+# for the same (model, version) both pass the empty-mirror check, both
+# enter the registry, and the loser raises FileNotFoundError (the winner
+# already renamed the candidate) instead of getting a clean 409. Holding
+# a per-model asyncio.Lock across the full check→promote→mirror-write
+# sequence eliminates the race.
+_promote_locks: dict[str, asyncio.Lock] = {}
+
+
+def _promote_lock(model: str) -> asyncio.Lock:
+    lock = _promote_locks.get(model)
+    if lock is None:
+        lock = asyncio.Lock()
+        _promote_locks[model] = lock
+    return lock
 
 
 # ── Dependency helpers ─────────────────────────────────────────────────────
@@ -256,59 +277,75 @@ async def promote_candidate(request: Request) -> JSONResponse:
     if registry is None:
         return _503("model registry not initialized")
 
-    candidate_file = registry.base / "candidates" / f"{model}-{version}.onnx"
-    if not candidate_file.exists():
-        return JSONResponse(
-            {"error": f"candidate {model}-{version} not found"},
-            status_code=404,
-        )
-
-    # Idempotency: look at `lifecycle_events_mirror` for a prior
-    # promotion of this exact version. Only check when the DB is
-    # available — without it, we can't tell, so fall through.
-    if db is not None:
-        last = _last_promotion_per_model(db).get(model)
-        if last and last.get("candidate_version") == version:
+    # Validate model up-front so lock creation can't be abused to seed
+    # entries in `_promote_locks` for junk names.
+    try:
+        from gateway.intelligence.registry import ALLOWED_MODEL_NAMES
+        if model not in ALLOWED_MODEL_NAMES:
             return JSONResponse(
-                {
-                    "error": f"{model} version {version} already promoted",
-                    "promoted_at": last.get("timestamp"),
-                },
-                status_code=409,
+                {"error": f"unknown model name {model!r}"},
+                status_code=400,
+            )
+    except Exception:
+        return JSONResponse({"error": "registry unavailable"}, status_code=503)
+
+    async with _promote_lock(model):
+        candidate_file = registry.base / "candidates" / f"{model}-{version}.onnx"
+
+        # Idempotency check runs inside the lock so a concurrent promoter
+        # that already wrote the mirror is observable here.
+        if db is not None:
+            last = _last_promotion_per_model(db).get(model)
+            if last and last.get("candidate_version") == version:
+                return JSONResponse(
+                    {
+                        "error": f"{model} version {version} already promoted",
+                        "promoted_at": last.get("timestamp"),
+                    },
+                    status_code=409,
+                )
+
+        if not candidate_file.exists():
+            return JSONResponse(
+                {"error": f"candidate {model}-{version} not found"},
+                status_code=404,
             )
 
-    try:
-        await registry.promote(model, version)
-    except FileNotFoundError:
-        return JSONResponse(
-            {"error": f"candidate {model}-{version} not found"},
-            status_code=404,
+        try:
+            await registry.promote(model, version)
+        except FileNotFoundError:
+            # Should not happen — we hold `_promote_lock(model)` and
+            # re-checked the candidate existed above. If it does, treat
+            # as 404 rather than leaking the exception.
+            return JSONResponse(
+                {"error": f"candidate {model}-{version} not found"},
+                status_code=404,
+            )
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        registry.disable_shadow(model)
+
+        approver = _caller_identity(request)
+        event = build_promotion_event(
+            model_name=model,
+            candidate_version=version,
+            dataset_hash="",  # filled in by caller when known
+            shadow_metrics={},  # manual promotion doesn't re-run the gate
+            approver=approver,
         )
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    registry.disable_shadow(model)
+        await _write_lifecycle_event(ctx, event)
+        try:
+            from gateway.metrics.prometheus import model_promoted_total
+            model_promoted_total.labels(model=model).inc()
+        except Exception:
+            pass
 
-    approver = _caller_identity(request)
-    event = build_promotion_event(
-        model_name=model,
-        candidate_version=version,
-        dataset_hash="",  # filled in by caller when known
-        shadow_metrics={},  # manual promotion doesn't re-run the gate
-        approver=approver,
-    )
-    await _write_lifecycle_event(ctx, event)
-    try:
-        from gateway.metrics.prometheus import model_promoted_total
-        model_promoted_total.labels(model=model).inc()
-    except Exception:
-        pass
-
-    return JSONResponse({
-        "promoted": True,
-        "model_name": model,
-        "version": version,
-        "approver": approver,
-    })
+        return JSONResponse({
+            "promoted": True,
+            "model_name": model,
+            "version": version,
+            "approver": approver,
+        })
 
 
 async def reject_candidate(request: Request) -> JSONResponse:
@@ -450,6 +487,27 @@ async def rollback_model(request: Request) -> JSONResponse:
 
 
 _retrain_tasks: dict[str, Any] = {}
+_retrain_model_locks: dict[str, asyncio.Lock] = {}
+# Cap on concurrently-tracked retrain jobs. A real operator triggers
+# retrains at human pace; anything beyond this is either a bug loop or
+# an abuse pattern and we'd rather 429 than hold refs to unbounded tasks.
+_RETRAIN_MAX_INFLIGHT = 100
+
+
+def _retrain_model_lock(model: str) -> asyncio.Lock:
+    lock = _retrain_model_locks.get(model)
+    if lock is None:
+        lock = asyncio.Lock()
+        _retrain_model_locks[model] = lock
+    return lock
+
+
+async def _run_retrain_serialized(worker, model: str) -> None:
+    """Serialize retrains per model so concurrent /retrain/{m} calls
+    don't race on candidate filename timestamps and don't thrash the
+    trainer."""
+    async with _retrain_model_lock(model):
+        await worker.retrain_one(model)
 
 
 async def force_retrain(request: Request) -> JSONResponse:
@@ -461,7 +519,6 @@ async def force_retrain(request: Request) -> JSONResponse:
     new candidate file.
     """
     from gateway.intelligence.registry import ALLOWED_MODEL_NAMES
-    import asyncio
     import uuid
 
     model = request.path_params.get("model", "")
@@ -476,14 +533,22 @@ async def force_retrain(request: Request) -> JSONResponse:
     if worker is None:
         return _503("distillation worker not initialized")
 
+    # Reap BEFORE the cap check so completed jobs free up slots.
+    _reap_retrain_tasks()
+    if len(_retrain_tasks) >= _RETRAIN_MAX_INFLIGHT:
+        return JSONResponse(
+            {
+                "error": f"retrain queue full ({_RETRAIN_MAX_INFLIGHT} in flight)",
+            },
+            status_code=429,
+        )
+
     job_id = str(uuid.uuid4())
     task = asyncio.create_task(
-        worker.retrain_one(model),
+        _run_retrain_serialized(worker, model),
         name=f"retrain-{model}-{job_id}",
     )
     _retrain_tasks[job_id] = task
-    # Prune completed tasks so the dict doesn't grow without bound.
-    _reap_retrain_tasks()
 
     return JSONResponse(
         {

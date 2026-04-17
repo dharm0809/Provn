@@ -325,3 +325,54 @@ async def test_should_trigger_counts_all_divergent_rows(tmp_path):
     # 6 rows across two models — at threshold.
     _insert_divergent(db, model="safety", n=3, labels=["violence", "safe", "violence"])
     assert worker._should_trigger() is True
+
+
+@pytest.mark.anyio
+async def test_run_loop_does_not_block_event_loop_on_should_trigger(tmp_path, monkeypatch):
+    """Regression for C3: `_should_trigger` opens SQLite and runs
+    COUNT(*); it must execute on a worker thread so the event loop
+    stays responsive while the scan is in flight."""
+    import asyncio
+    import threading
+
+    db, _, _, _, worker = _make_everything(tmp_path, min_divergences=1)
+
+    sleep_started = asyncio.Event()
+    in_loop_thread_id = threading.get_ident()
+    seen_thread_ids: list[int] = []
+
+    def slow_trigger() -> bool:
+        seen_thread_ids.append(threading.get_ident())
+        sleep_started.set()
+        # Block for long enough that a synchronous call would stall
+        # the event loop for the full duration.
+        import time as _t
+        _t.sleep(0.2)
+        return False
+
+    monkeypatch.setattr(worker, "_should_trigger", slow_trigger, raising=True)
+    monkeypatch.setattr(worker, "_poll_interval_s", 0.01, raising=True)
+
+    worker.start()
+    try:
+        # While `run()` is off in a thread running slow_trigger, the
+        # event loop must still be able to schedule this sleep.
+        await asyncio.wait_for(sleep_started.wait(), timeout=1.0)
+        start = asyncio.get_event_loop().time()
+        await asyncio.sleep(0.01)
+        elapsed = asyncio.get_event_loop().time() - start
+        # Without to_thread, elapsed would be close to 0.2s (blocked on
+        # the sync sleep). With to_thread, it's ~0.01s.
+        assert elapsed < 0.1, (
+            f"event loop stalled during _should_trigger "
+            f"(elapsed={elapsed:.3f}s — expected <0.1s)"
+        )
+    finally:
+        await worker.stop()
+
+    # And confirm the trigger did run on a DIFFERENT thread than the
+    # event loop itself.
+    assert seen_thread_ids, "slow_trigger never ran"
+    assert seen_thread_ids[0] != in_loop_thread_id, (
+        "_should_trigger ran on the event loop thread"
+    )
