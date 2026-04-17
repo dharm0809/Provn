@@ -1,0 +1,41 @@
+{
+  "model_name": "intent",
+  "notes": "Seed fixtures — grow to 50/class before production gating.",
+  "examples": [
+    {"input": "what is the capital of france", "label": "normal"},
+    {"input": "tell me a joke about cats", "label": "normal"},
+    {"input": "how does a thermostat work", "label": "normal"},
+    {"input": "explain photosynthesis simply", "label": "normal"},
+    {"input": "what are the planets in the solar system", "label": "normal"},
+
+    {"input": "search for the latest news about space exploration", "label": "web_search"},
+    {"input": "find online reviews of the new iphone", "label": "web_search"},
+    {"input": "look up the current weather in tokyo", "label": "web_search"},
+    {"input": "search online for tutorials on python asyncio", "label": "web_search"},
+    {"input": "google it for me: who won the game last night", "label": "web_search"},
+
+    {"input": "based on the attached document, summarize the key findings", "label": "rag"},
+    {"input": "using the provided context, answer the question below", "label": "rag"},
+    {"input": "given the document references, explain the methodology", "label": "rag"},
+    {"input": "refer to the uploaded file and extract the dates", "label": "rag"},
+    {"input": "from the knowledge base, what does the policy say about returns", "label": "rag"},
+
+    {"input": "call the database lookup tool to check account balance", "label": "mcp_tools"},
+    {"input": "invoke the calendar tool to schedule a meeting", "label": "mcp_tools"},
+    {"input": "run the sql query tool on the users table", "label": "mcp_tools"},
+    {"input": "use the file system tool to list the contents of /tmp", "label": "mcp_tools"},
+    {"input": "execute the calculator tool for this expression", "label": "mcp_tools"},
+
+    {"input": "think step by step about this math problem", "label": "reasoning"},
+    {"input": "reason through the logical puzzle carefully", "label": "reasoning"},
+    {"input": "solve this by working through each step", "label": "reasoning"},
+    {"input": "analyze deeply and explain your chain of thought", "label": "reasoning"},
+    {"input": "work out the proof rigorously", "label": "reasoning"},
+
+    {"input": "### Task: Generate a short title for the conversation above", "label": "system_task"},
+    {"input": "### Task: Summarize the user's query into tags", "label": "system_task"},
+    {"input": "### Task: Produce autocomplete suggestions", "label": "system_task"},
+    {"input": "### Task: Detect the primary language of the text", "label": "system_task"},
+    {"input": "### Task: Rewrite the prompt for the next iteration", "label": "system_task"}
+  ]
+}
