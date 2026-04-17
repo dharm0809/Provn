@@ -125,6 +125,49 @@ rate_limit_hits_total = Counter(
     ["model"],
 )
 
+# Phase 25 Task 35: intelligence-layer observability.
+# `verdict_buffer_size` is intentionally label-less because the buffer
+# is a single shared deque across models — a per-model breakdown would
+# require either separate buffers or scanning the deque on every Gauge
+# read, neither of which is worth the engineering for an observability
+# metric. `verdict_buffer_dropped_total` IS labeled by model because
+# each drop event happens against a specific verdict and per-model
+# drop pressure is the actionable signal.
+verdict_buffer_dropped_total = Counter(
+    "walacor_gateway_verdict_buffer_dropped_total",
+    "Verdicts dropped from the in-memory buffer due to overflow",
+    ["model"],
+)
+verdict_buffer_size = Gauge(
+    "walacor_gateway_verdict_buffer_size",
+    "Current verdict-buffer occupancy (shared across all models)",
+)
+intelligence_db_write_failures_total = Counter(
+    "walacor_gateway_intelligence_db_write_failures_total",
+    "SQLite write failures from the verdict-flush worker",
+)
+candidate_rejected_total = Counter(
+    "walacor_gateway_candidate_rejected_total",
+    "Candidate ONNX models rejected by reason",
+    ["model", "reason"],
+)
+model_promoted_total = Counter(
+    "walacor_gateway_model_promoted_total",
+    "Candidate ONNX models promoted to production",
+    ["model"],
+)
+shadow_inference_errors_total = Counter(
+    "walacor_gateway_shadow_inference_errors_total",
+    "Shadow-inference errors (recorded as candidate_error rows)",
+    ["model"],
+)
+distillation_run_duration_seconds = Histogram(
+    "walacor_gateway_distillation_run_duration_seconds",
+    "Time spent training a single distillation candidate",
+    ["model"],
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0),
+)
+
 # Phase 25 Task 16: teacher-LLM calls from the intent harvester.
 # Labels the call outcome so operators can reason about teacher cost
 # vs. harvest value: `called` = request made; `failed` = teacher call

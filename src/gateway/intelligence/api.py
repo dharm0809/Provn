@@ -297,6 +297,11 @@ async def promote_candidate(request: Request) -> JSONResponse:
         approver=approver,
     )
     await _write_lifecycle_event(ctx, event)
+    try:
+        from gateway.metrics.prometheus import model_promoted_total
+        model_promoted_total.labels(model=model).inc()
+    except Exception:
+        pass
 
     return JSONResponse({
         "promoted": True,
@@ -360,6 +365,11 @@ async def reject_candidate(request: Request) -> JSONResponse:
         stage="manual",
     )
     await _write_lifecycle_event(ctx, event)
+    try:
+        from gateway.metrics.prometheus import candidate_rejected_total
+        candidate_rejected_total.labels(model=model, reason=reason).inc()
+    except Exception:
+        pass
 
     return JSONResponse({
         "rejected": True,
@@ -422,6 +432,11 @@ async def rollback_model(request: Request) -> JSONResponse:
         approver=approver,
     )
     await _write_lifecycle_event(ctx, event)
+    try:
+        from gateway.metrics.prometheus import model_promoted_total
+        model_promoted_total.labels(model=model).inc()
+    except Exception:
+        pass
 
     return JSONResponse({
         "rolled_back": True,

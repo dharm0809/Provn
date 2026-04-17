@@ -157,6 +157,11 @@ async def process_candidate(
                 approver=approver,
             )
             await _write_lifecycle(walacor_writer, promotion_event)
+            try:
+                from gateway.metrics.prometheus import model_promoted_total
+                model_promoted_total.labels(model=metrics.model_name).inc()
+            except Exception:
+                pass
             logger.info(
                 "auto-promoted %s candidate %s (approver=%s)",
                 metrics.model_name, metrics.candidate_version, approver,
@@ -180,6 +185,24 @@ async def process_candidate(
             passed=gate.passed,
         )
         await _write_lifecycle(walacor_writer, shadow_complete_event)
+        # Gate-failure counts as an auto-rejection signal for ops
+        # dashboards even though the candidate file stays in
+        # candidates/ awaiting human review. We use the first failing
+        # gate reason as the label so e.g. "accuracy_delta" vs
+        # "mcnemar" buckets distinct.
+        if not gate.passed:
+            try:
+                from gateway.metrics.prometheus import candidate_rejected_total
+                first = gate.reasons[0] if gate.reasons else "gate_failed"
+                # Bucket by short reason key, not the full sentence,
+                # to keep cardinality bounded.
+                reason_key = first.split()[0][:40]
+                candidate_rejected_total.labels(
+                    model=metrics.model_name,
+                    reason=f"gate:{reason_key}",
+                ).inc()
+            except Exception:
+                pass
 
     return GateResult(
         passed=gate.passed,

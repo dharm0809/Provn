@@ -39,9 +39,22 @@ class VerdictBuffer:
         if len(self._buf) >= self._max:
             # Drop oldest to keep newest — newest verdicts are most useful for
             # distillation since they reflect current traffic patterns.
-            self._buf.popleft()
+            dropped = self._buf.popleft()
             self._dropped += 1
+            try:
+                from gateway.metrics.prometheus import verdict_buffer_dropped_total
+                verdict_buffer_dropped_total.labels(model=dropped.model_name).inc()
+            except Exception:
+                # Metric emission must never break the hot path. Same
+                # discipline as elsewhere — log nothing here, the drop
+                # counter is already kept on the buffer itself.
+                pass
         self._buf.append(verdict)
+        try:
+            from gateway.metrics.prometheus import verdict_buffer_size
+            verdict_buffer_size.set(len(self._buf))
+        except Exception:
+            pass
 
     def drain(self, max_batch: int = 500) -> list[ModelVerdict]:
         out: list[ModelVerdict] = []
