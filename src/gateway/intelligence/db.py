@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS training_snapshots (
     row_ids_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS lifecycle_events_mirror (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    walacor_record_id TEXT,
+    write_status TEXT NOT NULL,
+    error_reason TEXT,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    written_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_mirror_type_time
+    ON lifecycle_events_mirror(event_type, written_at);
 """
 
 

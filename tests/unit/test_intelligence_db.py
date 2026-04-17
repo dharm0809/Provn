@@ -32,6 +32,7 @@ def test_list_tables_hides_sqlite_internals(tmp_path):
         "onnx_verdicts",
         "shadow_comparisons",
         "training_snapshots",
+        "lifecycle_events_mirror",
     }
 
 
