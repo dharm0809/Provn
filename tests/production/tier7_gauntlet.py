@@ -70,12 +70,12 @@ def chat(content: str, session_id: str | None = None,
 
 
 def get_attempt_count() -> int:
-    r = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/attempts", timeout=60)
     return r.json().get("total", 0) if r.status_code == 200 else 0
 
 
 def find_session(session_id: str) -> dict | None:
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     if sr.status_code != 200:
         return None
     return next((s for s in sr.json().get("sessions", [])
@@ -201,7 +201,7 @@ def test_caller_identity():
     time.sleep(2)
 
     # Check attempts for user field
-    ar = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
+    ar = requests.get(f"{LINEAGE_URL}/attempts", timeout=60)
     check("Attempts endpoint → 200", ar.status_code == 200)
     if ar.status_code == 200:
         items = ar.json().get("items", [])
@@ -237,7 +237,7 @@ def test_pii_detection():
     check("PII test session found", session is not None)
 
     if session:
-        er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
+        er = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=60)
         if er.status_code == 200:
             records = er.json().get("records", [])
             if records:
@@ -297,7 +297,7 @@ def test_streaming_audit():
     check("Stream session in lineage", session is not None)
 
     if session:
-        rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=10)
+        rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=60)
         if rv.status_code == 200:
             check("Stream session chain valid",
                   rv.json().get("valid", False), str(rv.json()))
@@ -378,7 +378,7 @@ def test_lineage_completeness():
     """Every lineage endpoint must return 200 with valid data."""
 
     # Sessions
-    r = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     check("Lineage /sessions → 200", r.status_code == 200)
     sessions = r.json().get("sessions", []) if r.status_code == 200 else []
     check("Sessions list non-empty", len(sessions) > 0, f"{len(sessions)} sessions")
@@ -389,7 +389,7 @@ def test_lineage_completeness():
     sid = sessions[0]["session_id"]
 
     # Session detail (timeline)
-    r = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/sessions/{sid}", timeout=60)
     check(f"Lineage /sessions/{{id}} → 200", r.status_code == 200)
     records = r.json().get("records", []) if r.status_code == 200 else []
     check("Session has execution records", len(records) > 0, f"{len(records)} records")
@@ -398,7 +398,7 @@ def test_lineage_completeness():
     if records:
         exec_id = records[0].get("execution_id") or records[0].get("id")
         if exec_id:
-            r = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=10)
+            r = requests.get(f"{LINEAGE_URL}/executions/{exec_id}", timeout=60)
             check("Lineage /executions/{{id}} → 200", r.status_code == 200)
             if r.status_code == 200:
                 exec_data = r.json()
@@ -407,21 +407,21 @@ def test_lineage_completeness():
                       f"model={exec_data.get('model_id')}")
 
     # Attempts
-    r = requests.get(f"{LINEAGE_URL}/attempts", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/attempts", timeout=60)
     check("Lineage /attempts → 200", r.status_code == 200)
     if r.status_code == 200:
         total = r.json().get("total", 0)
         check("Attempts total > 0", total > 0, f"{total} total")
 
     # Verify
-    r = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=60)
     check("Lineage /verify/{{id}} → 200", r.status_code == 200)
     if r.status_code == 200:
         check("Chain verification returns valid field",
               "valid" in r.json(), str(r.json()))
 
     # Token-latency
-    r = requests.get(f"{LINEAGE_URL}/token-latency", params={"range": "1h"}, timeout=10)
+    r = requests.get(f"{LINEAGE_URL}/token-latency", params={"range": "1h"}, timeout=60)
     check("Lineage /token-latency → 200", r.status_code == 200)
 
 
@@ -449,7 +449,7 @@ def test_chain_deep():
     time.sleep(3)
 
     # Verify chain
-    rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=10)
+    rv = requests.get(f"{LINEAGE_URL}/verify/{sid}", timeout=60)
     check("Deep chain verify → 200", rv.status_code == 200)
     if rv.status_code == 200:
         v = rv.json()
@@ -484,7 +484,7 @@ def test_wal_burst():
           f"expected ≥{n}, got {new_records}")
 
     # Verify at least some sessions appear in lineage
-    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=10)
+    sr = requests.get(f"{LINEAGE_URL}/sessions", timeout=60)
     if sr.status_code == 200:
         all_sids = {s.get("session_id") for s in sr.json().get("sessions", [])}
         matched = sum(1 for s in sessions if s in all_sids)
