@@ -218,6 +218,11 @@ async def fire_shadow_text(
         # The shadow path must never surface errors to the caller.
         # Record the candidate failure for Task 23's error-rate metric.
         logger.debug("shadow inference failed (recording as candidate_error)", exc_info=True)
+        try:
+            from gateway.metrics.prometheus import shadow_inference_errors_total
+            shadow_inference_errors_total.labels(model=model).inc()
+        except Exception:
+            pass
         await runner.record(
             model=model,
             candidate_version=candidate.version,

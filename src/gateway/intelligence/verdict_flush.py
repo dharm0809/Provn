@@ -49,12 +49,27 @@ class VerdictFlushWorker:
                 batch = self._buf.drain(max_batch=self._batch)
                 if batch:
                     await asyncio.to_thread(self._write_batch, batch)
+                    self._update_size_gauge()
             except Exception:
                 # Hot path is sacred: log + continue, never re-raise.
                 # asyncio.CancelledError inherits from BaseException (Py 3.8+),
                 # so `except Exception` does NOT swallow cancellation —
                 # `stop()` followed by `await task` still shuts down cleanly.
                 logger.exception("verdict flush iteration failed")
+                try:
+                    from gateway.metrics.prometheus import (
+                        intelligence_db_write_failures_total,
+                    )
+                    intelligence_db_write_failures_total.inc()
+                except Exception:
+                    pass
+
+    def _update_size_gauge(self) -> None:
+        try:
+            from gateway.metrics.prometheus import verdict_buffer_size
+            verdict_buffer_size.set(self._buf.size)
+        except Exception:
+            pass
 
     def stop(self) -> None:
         self._running = False

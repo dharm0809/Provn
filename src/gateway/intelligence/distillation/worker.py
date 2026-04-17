@@ -203,12 +203,26 @@ class DistillationWorker:
             )
             return None
 
+        # Time the actual training work — dataset build above is a
+        # cheap SQL query, the heavy compute is trainer.train + ONNX
+        # export. We only count cycles that actually trained, hence
+        # the timer starts AFTER the early-return path.
+        import time
+        train_start = time.perf_counter()
+
         version = _make_version()
         candidates_dir = self._registry.base / "candidates"
         candidate_path = await asyncio.to_thread(
             trainer.train, dataset.X, dataset.y, version, candidates_dir,
         )
         content_hash = await asyncio.to_thread(_hash_file, candidate_path)
+        try:
+            from gateway.metrics.prometheus import distillation_run_duration_seconds
+            distillation_run_duration_seconds.labels(model=model_name).observe(
+                time.perf_counter() - train_start,
+            )
+        except Exception:
+            pass
 
         fp_event = build_training_fingerprint(
             model_name=model_name,
