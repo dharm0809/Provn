@@ -2263,6 +2263,63 @@ tr.clickable:hover td { background: var(--bg-hover); }
   margin: 0 0 12px 0;
 }
 
+/* Intelligence promotion-history timeline */
+.intel-timeline {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 16px 14px;
+}
+.intel-timeline-item {
+  border-left: 2px solid var(--border);
+  padding: 10px 14px;
+  margin-left: 6px;
+  position: relative;
+}
+.intel-timeline-item + .intel-timeline-item {
+  border-top: 1px dashed var(--border);
+}
+.intel-timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: 14px;
+  width: 8px;
+  height: 8px;
+  background: var(--gold);
+  border-radius: 50%;
+}
+.intel-timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.intel-timeline-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.intel-timeline-spacer { flex: 1; }
+.intel-timeline-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 4px 16px;
+  font-size: 12px;
+}
+.intel-kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.intel-k {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-width: 56px;
+}
+.intel-v { color: var(--text-primary); }
+
 /* Form validation */
 .form-input.invalid,
 .form-select.invalid {
