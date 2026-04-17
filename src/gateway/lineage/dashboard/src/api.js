@@ -178,6 +178,61 @@ export async function deleteBudget(id) {
   return controlFetch(`${CTRL_API}/budgets/${id}`, { method: 'DELETE' });
 }
 
+// ─── Intelligence API (Phase 25) ───────────────────────────────
+
+const INTEL_API = `${CTRL_API}/intelligence`;
+
+export async function getIntelligenceModels() {
+  return fetchControlJSON(`${INTEL_API}/models`);
+}
+
+export async function getIntelligenceCandidates() {
+  return fetchControlJSON(`${INTEL_API}/candidates`);
+}
+
+export async function getIntelligenceHistory(model, limit = 50) {
+  const sp = new URLSearchParams({ limit: String(limit) });
+  return fetchControlJSON(`${INTEL_API}/history/${encodeURIComponent(model)}?${sp.toString()}`);
+}
+
+export async function promoteCandidate(model, version) {
+  return controlFetch(
+    `${INTEL_API}/promote/${encodeURIComponent(model)}/${encodeURIComponent(version)}`,
+    { method: 'POST' },
+  );
+}
+
+export async function rejectCandidate(model, version, reason) {
+  const sp = new URLSearchParams();
+  if (reason) sp.set('reason', reason);
+  const qs = sp.toString();
+  return controlFetch(
+    `${INTEL_API}/reject/${encodeURIComponent(model)}/${encodeURIComponent(version)}${qs ? '?' + qs : ''}`,
+    { method: 'POST' },
+  );
+}
+
+export async function rollbackModel(model) {
+  return controlFetch(
+    `${INTEL_API}/rollback/${encodeURIComponent(model)}`,
+    { method: 'POST' },
+  );
+}
+
+export async function forceRetrain(model) {
+  return controlFetch(
+    `${INTEL_API}/retrain/${encodeURIComponent(model)}`,
+    { method: 'POST' },
+  );
+}
+
+export async function getIntelligenceVerdicts(model, opts = {}) {
+  const sp = new URLSearchParams({ model });
+  if (opts.divergence_only) sp.set('divergence_only', 'true');
+  if (opts.limit != null) sp.set('limit', String(opts.limit));
+  return fetchControlJSON(`${INTEL_API}/verdicts?${sp.toString()}`);
+}
+
 // ─── Prometheus Metrics Parser ──────────────────────────────────
 
 export function parsePrometheusMetrics(text) {
