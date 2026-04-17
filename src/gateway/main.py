@@ -172,7 +172,7 @@ async def body_size_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-_ip_limiter = IPRateLimiter()
+_ip_limiter = IPRateLimiter()  # configured at startup via _configure_ip_limiter()
 
 
 async def api_key_middleware(request: Request, call_next):
@@ -1422,6 +1422,7 @@ async def on_startup() -> None:
         _init_alert_bus(settings, ctx)
         _init_budget_tracker(settings, ctx)
         _init_session_chain(settings, ctx)
+        _ip_limiter._rpm = settings.ip_rate_limit_rpm
         if settings.rate_limit_enabled:
             _init_rate_limiter(settings, ctx)
         else:

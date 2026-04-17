@@ -192,6 +192,7 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = Field(default=True, description="Enable request rate limiting")
     rate_limit_rpm: int = Field(default=120, description="Requests per minute limit")
     rate_limit_per_model: bool = Field(default=True, description="Rate limit per user+model (vs per user only)")
+    ip_rate_limit_rpm: int = Field(default=300, description="Per-IP pre-auth rate limit (requests per minute)")
 
     # Phase 26: Alerting
     webhook_urls: str = Field(default="", description="Comma-separated webhook URLs for alerts")
