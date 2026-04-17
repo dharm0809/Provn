@@ -20,6 +20,7 @@ from gateway.intelligence.api import (
     force_retrain,
     list_candidates,
     list_production_models,
+    list_verdicts,
     model_history,
     promote_candidate,
     reject_candidate,
@@ -580,6 +581,143 @@ async def test_retrain_400_for_unknown_model(monkeypatch, tmp_path):
         _fake_request(path_params={"model": "not_a_real_model"})
     )
     assert resp.status_code == 400
+
+
+# ── /verdicts ──────────────────────────────────────────────────────────────
+
+def _insert_verdict(
+    db: IntelligenceDB,
+    *,
+    model: str,
+    prediction: str,
+    divergence: str | None = None,
+    input_hash: str = "h" * 64,
+    request_id: str = "r1",
+) -> None:
+    conn = sqlite3.connect(db.path)
+    try:
+        conn.execute(
+            "INSERT INTO onnx_verdicts "
+            "(model_name, input_hash, input_features_json, prediction, "
+            "confidence, request_id, timestamp, divergence_signal, "
+            "divergence_source, training_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                model, input_hash, "{}", prediction, 0.9, request_id,
+                datetime.now(timezone.utc).isoformat(),
+                divergence,
+                "test" if divergence else None,
+                None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.anyio
+async def test_verdicts_400_for_unknown_model(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    resp = await list_verdicts(_fake_request(query={"model": "banana"}))
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_verdicts_400_when_model_missing(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    resp = await list_verdicts(_fake_request(query={}))
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_verdicts_503_without_db(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path, with_db=False)
+    _install_ctx(monkeypatch, ctx)
+    resp = await list_verdicts(_fake_request(query={"model": "intent"}))
+    assert resp.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_verdicts_returns_rows_newest_first(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    for i in range(3):
+        _insert_verdict(
+            ctx.intelligence_db, model="intent",
+            prediction=f"p{i}", input_hash=f"h{i}",
+        )
+    resp = await list_verdicts(_fake_request(query={"model": "intent"}))
+    body = json.loads(resp.body)
+    # Most recently inserted row is first.
+    assert body["rows"][0]["prediction"] == "p2"
+    assert body["rows"][-1]["prediction"] == "p0"
+    assert body["divergence_only"] is False
+    # Without divergence_only, the top_divergence_types list is empty.
+    assert body["top_divergence_types"] == []
+
+
+@pytest.mark.anyio
+async def test_verdicts_divergence_only_filters_and_aggregates(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    db = ctx.intelligence_db
+    # 5 web_search divergences, 2 normal, 1 no-divergence.
+    for i in range(5):
+        _insert_verdict(
+            db, model="intent", prediction="normal",
+            divergence="web_search", input_hash=f"ws{i}",
+        )
+    for i in range(2):
+        _insert_verdict(
+            db, model="intent", prediction="web_search",
+            divergence="normal", input_hash=f"n{i}",
+        )
+    _insert_verdict(db, model="intent", prediction="rag", input_hash="plain")
+
+    resp = await list_verdicts(_fake_request(
+        query={"model": "intent", "divergence_only": "true"},
+    ))
+    body = json.loads(resp.body)
+    # Only divergent rows surface.
+    assert len(body["rows"]) == 7
+    assert all(r["divergence_signal"] is not None for r in body["rows"])
+    # Top types sorted by count desc.
+    top = body["top_divergence_types"]
+    assert [t["signal"] for t in top] == ["web_search", "normal"]
+    assert top[0]["count"] == 5
+    assert top[1]["count"] == 2
+
+
+@pytest.mark.anyio
+async def test_verdicts_filter_by_model(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    db = ctx.intelligence_db
+    _insert_verdict(db, model="intent", prediction="normal")
+    _insert_verdict(db, model="safety", prediction="safe")
+    resp = await list_verdicts(_fake_request(query={"model": "safety"}))
+    body = json.loads(resp.body)
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["model_name"] == "safety"
+
+
+@pytest.mark.anyio
+async def test_verdicts_limit_clamped(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    db = ctx.intelligence_db
+    for i in range(10):
+        _insert_verdict(db, model="intent", prediction=f"p{i}", input_hash=f"h{i}")
+    # Limit below 1 → clamped to 1.
+    resp1 = await list_verdicts(_fake_request(query={"model": "intent", "limit": "0"}))
+    assert len(json.loads(resp1.body)["rows"]) == 1
+    # Massive limit → clamped to 1000 (no crash).
+    resp2 = await list_verdicts(_fake_request(
+        query={"model": "intent", "limit": "99999"},
+    ))
+    assert len(json.loads(resp2.body)["rows"]) == 10
 
 
 @pytest.mark.anyio

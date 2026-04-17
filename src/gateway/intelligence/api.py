@@ -487,6 +487,97 @@ def _reap_retrain_tasks() -> None:
         _retrain_tasks.pop(k, None)
 
 
+# ── Task 29: verdict log inspector ────────────────────────────────────────
+
+
+async def list_verdicts(request: Request) -> JSONResponse:
+    """Inspect the verdict log.
+
+    Query params:
+      `model` — required; one of the canonical model names.
+      `divergence_only` — "true"/"1"/"yes" to restrict to rows whose
+          harvesters back-wrote a `divergence_signal`.
+      `limit` — max rows to return (default 100, clamped to [1, 1000]).
+
+    Response:
+      `top_divergence_types` — list of {signal, count} pairs, sorted
+          by count desc. Only populated when `divergence_only=true`
+          (otherwise the counts would be dominated by rows with
+          no signal at all).
+      `rows` — raw verdict rows, newest-first.
+    """
+    from gateway.intelligence.registry import ALLOWED_MODEL_NAMES
+
+    model = (request.query_params.get("model") or "").strip()
+    if model not in ALLOWED_MODEL_NAMES:
+        return JSONResponse(
+            {"error": f"model must be one of {sorted(ALLOWED_MODEL_NAMES)}"},
+            status_code=400,
+        )
+
+    divergence_only = _truthy(request.query_params.get("divergence_only"))
+    try:
+        limit = max(1, min(1000, int(request.query_params.get("limit", "100"))))
+    except ValueError:
+        limit = 100
+
+    db = _require_db()
+    if db is None:
+        return _503("intelligence db not initialized")
+
+    top_types, rows = _query_verdicts(db, model, divergence_only, limit)
+    return JSONResponse({
+        "model_name": model,
+        "divergence_only": divergence_only,
+        "limit": limit,
+        "top_divergence_types": top_types,
+        "rows": rows,
+    })
+
+
+def _truthy(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _query_verdicts(
+    db, model: str, divergence_only: bool, limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (top_divergence_types, rows) for the inspector response."""
+    where_clauses = ["model_name = ?"]
+    params: list[Any] = [model]
+    if divergence_only:
+        where_clauses.append("divergence_signal IS NOT NULL")
+    where_sql = " AND ".join(where_clauses)
+
+    conn = sqlite3.connect(db.path)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = [
+            dict(r) for r in conn.execute(
+                f"SELECT id, model_name, input_hash, prediction, confidence, "
+                f"request_id, timestamp, divergence_signal, divergence_source "
+                f"FROM onnx_verdicts WHERE {where_sql} "
+                f"ORDER BY timestamp DESC, id DESC LIMIT ?",
+                params + [limit],
+            )
+        ]
+        # Top divergence types — only meaningful when divergence_only=True;
+        # otherwise every type's count would be dominated by `NULL` rows.
+        top_types: list[dict[str, Any]] = []
+        if divergence_only:
+            for signal, count in conn.execute(
+                "SELECT divergence_signal, COUNT(*) FROM onnx_verdicts "
+                "WHERE model_name = ? AND divergence_signal IS NOT NULL "
+                "GROUP BY divergence_signal "
+                "ORDER BY COUNT(*) DESC, divergence_signal ASC",
+                (model,),
+            ):
+                top_types.append({"signal": signal, "count": int(count)})
+    finally:
+        conn.close()
+    return top_types, rows
+
+
 async def _write_lifecycle_event(ctx, event) -> None:
     """Best-effort emit via the pipeline writer. Fail-open."""
     writer = getattr(ctx, "lifecycle_event_writer", None)

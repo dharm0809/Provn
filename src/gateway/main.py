@@ -79,6 +79,7 @@ from gateway.intelligence.api import (
     reject_candidate as intel_reject_candidate,
     rollback_model as intel_rollback_model,
     force_retrain as intel_force_retrain,
+    list_verdicts as intel_list_verdicts,
 )
 from gateway.models_api import list_models
 from gateway.compliance.api import compliance_export
@@ -1883,6 +1884,8 @@ def create_app() -> Starlette:
         Route("/v1/control/intelligence/rollback/{model}", intel_rollback_model, methods=["POST"]),
         # Phase 25 Task 28: force retrain
         Route("/v1/control/intelligence/retrain/{model}", intel_force_retrain, methods=["POST"]),
+        # Phase 25 Task 29: verdict log inspector
+        Route("/v1/control/intelligence/verdicts", intel_list_verdicts, methods=["GET"]),
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),
         Route("/v1/policies", sync_policies, methods=["GET"]),
