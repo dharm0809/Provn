@@ -120,24 +120,29 @@ def preflight_tool_check() -> bool:
     global _TOOLS_WORK, _TOOL_SESSION
 
     # ── Step 1: Direct Ollama (verify model supports tools) ──────────
-    print("  [DIAG] Step 1: Testing tool calls directly against Ollama...")
-    try:
-        r = requests.post(_OLLAMA_URL, json={
-            "model": TOOL_MODEL,
-            "messages": [{"role": "user", "content": "Search for: test"}],
-            "tools": [_TOOL_DEF],
-            "stream": False,
-        }, timeout=120)
-        ollama_tools, detail = _check_tool_response(r)
-        if ollama_tools:
-            print(f"  [DIAG]   Ollama: PASS — {detail}")
-        else:
-            print(f"  [DIAG]   Ollama: model did NOT call tools — {detail}")
-            print(f"  [DIAG]   {TOOL_MODEL} does not support tools. Try llama3.1:8b")
+    # Cloud-routed models (gpt-*, claude-*) are not in Ollama — skip direct test
+    _is_cloud_model = TOOL_MODEL.startswith(("gpt-", "claude-", "o1-", "o3-", "o4-"))
+    if _is_cloud_model:
+        print(f"  [DIAG] Step 1: Cloud model ({TOOL_MODEL}) — skipping Ollama direct test")
+    else:
+        print("  [DIAG] Step 1: Testing tool calls directly against Ollama...")
+        try:
+            r = requests.post(_OLLAMA_URL, json={
+                "model": TOOL_MODEL,
+                "messages": [{"role": "user", "content": "Search for: test"}],
+                "tools": [_TOOL_DEF],
+                "stream": False,
+            }, timeout=120)
+            ollama_tools, detail = _check_tool_response(r)
+            if ollama_tools:
+                print(f"  [DIAG]   Ollama: PASS — {detail}")
+            else:
+                print(f"  [DIAG]   Ollama: model did NOT call tools — {detail}")
+                print(f"  [DIAG]   {TOOL_MODEL} does not support tools. Try llama3.1:8b")
+                return False
+        except requests.ConnectionError:
+            print(f"  [DIAG]   Cannot reach Ollama at {_OLLAMA_URL}")
             return False
-    except requests.ConnectionError:
-        print(f"  [DIAG]   Cannot reach Ollama at {_OLLAMA_URL}")
-        return False
 
     # ── Step 2: ONE tool call through gateway (explicit tools in body) ─
     print("  [DIAG] Step 2: Making one tool call through the gateway...")
@@ -177,9 +182,12 @@ def preflight_tool_check() -> bool:
     return _TOOLS_WORK
 
 
+_KNOWN_NO_TOOLS = {"qwen3:1.7b", "gemma3:1b"}
+
+
 def _require_tools(name: str) -> bool:
-    if TOOL_MODEL == "qwen3:1.7b":
-        skip(name, "qwen3:1.7b doesn't support tools — upgrade to qwen3:4b")
+    if TOOL_MODEL in _KNOWN_NO_TOOLS:
+        skip(name, f"{TOOL_MODEL} doesn't support tools — upgrade to qwen3:4b or a cloud model")
         return False
     if not _TOOLS_WORK:
         skip(name, f"{TOOL_MODEL}: tools not working (see pre-flight)")
