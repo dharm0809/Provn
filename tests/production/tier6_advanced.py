@@ -14,6 +14,7 @@ Also enable web search if not already set in .env:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -424,6 +425,12 @@ def test_web_search_sources():
 
     for te in events:
         sources = te.get("sources") or []
+        # sources may be JSON-encoded string in WAL (known type coercion)
+        if isinstance(sources, str):
+            try:
+                sources = json.loads(sources)
+            except Exception:
+                sources = []
         if sources:
             check("Web search sources captured in tool event",
                   len(sources) > 0, f"{len(sources)} sources")
