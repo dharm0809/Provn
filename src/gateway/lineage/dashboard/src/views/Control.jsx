@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import * as api from '../api';
 import { formatNumber, formatTime, formatUptime } from '../utils';
+import Intelligence from './Intelligence';
 
 function SortArrow({ col, sortCol, sortDir }) {
   return (
@@ -836,14 +837,18 @@ export default function Control({ navigate, params = {}, health }) {
 
   if (!authed) return <AuthGate onAuth={() => setAuthed(true)} />;
 
-  const subTabs = ['models', 'governance', 'status'];
+  const subTabs = ['models', 'governance', 'intelligence', 'status'];
+  const subLabel = (t) => {
+    if (t === 'governance') return 'Policies & Budgets';
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  };
 
   return (
     <div className="fade-child">
       <div className="control-subnav">
         {subTabs.map(t => (
           <button key={t} className={`control-subtab${sub === t ? ' active' : ''}`} onClick={() => setSub(t)}>
-            {t === 'governance' ? 'Policies & Budgets' : t.charAt(0).toUpperCase() + t.slice(1)}
+            {subLabel(t)}
           </button>
         ))}
       </div>
@@ -854,6 +859,7 @@ export default function Control({ navigate, params = {}, health }) {
           <BudgetsView refresh={refresh} health={health} />
         </div>
       )}
+      {sub === 'intelligence' && <Intelligence refresh={refresh} />}
       {sub === 'status' && <StatusView refresh={refresh} health={health} />}
     </div>
   );
