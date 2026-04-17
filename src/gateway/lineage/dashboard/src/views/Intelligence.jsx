@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
-import { formatNumber, formatTime, timeAgo } from '../utils';
+import { formatNumber, formatTime, timeAgo, truncHash } from '../utils';
+
+const ALLOWED_MODELS = ['intent', 'schema_mapper', 'safety'];
 
 const SUB_TABS = [
   { key: 'production', label: 'Production' },
@@ -376,6 +378,220 @@ function RejectModal({ candidate, onClose, onSuccess, onAuth }) {
   );
 }
 
+// ─── Promotion History ──────────────────────────────────────────
+
+function eventBadge(eventType, payload) {
+  switch (eventType) {
+    case 'model_promoted': {
+      const isRollback = String(payload?.candidate_version || '').startsWith('rollback:');
+      return <span className="badge badge-pass">{isRollback ? 'rolled back' : 'promoted'}</span>;
+    }
+    case 'model_rejected':
+      return <span className="badge badge-fail">rejected</span>;
+    case 'candidate_created':
+      return <span className="badge badge-muted">candidate</span>;
+    case 'training_dataset_fingerprint':
+      return <span className="badge badge-muted">dataset</span>;
+    case 'shadow_validation_complete': {
+      const passed = payload?.passed === true;
+      return <span className={`badge ${passed ? 'badge-pass' : 'badge-fail'}`}>
+        shadow {passed ? 'passed' : 'failed'}
+      </span>;
+    }
+    default:
+      return <span className="badge badge-muted">{eventType}</span>;
+  }
+}
+
+function HistoryView({ refresh }) {
+  const [model, setModel] = useState(ALLOWED_MODELS[0]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const data = await api.getIntelligenceHistory(model, 50);
+      setEvents(data.events || []);
+    } catch (e) {
+      if (e.message === 'AUTH') { refresh(); return; }
+      setError(e.message || 'failed to load history');
+    } finally {
+      setLoading(false);
+    }
+  }, [model, refresh]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">Promotion History</span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <select
+            className="form-select"
+            style={{ width: 180 }}
+            value={model}
+            onChange={e => setModel(e.target.value)}
+          >
+            {ALLOWED_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <button className="btn btn-sm" onClick={load} disabled={loading}>
+            {loading ? '…' : 'Refresh'}
+          </button>
+          <button className="btn-danger btn-sm" onClick={() => setRollbackOpen(true)}>
+            Rollback…
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="empty-state"><p style={{ color: 'var(--red)' }}>{error}</p></div>}
+      {loading && <div className="skeleton-block" style={{ height: 180 }} />}
+      {!loading && !error && events.length === 0 && (
+        <div className="empty-state"><p>No lifecycle events recorded for {model} yet.</p></div>
+      )}
+
+      {!loading && !error && events.length > 0 && (
+        <div className="intel-timeline">
+          {events.map((ev, i) => {
+            const p = ev.payload || {};
+            const datasetHash = p.dataset_hash;
+            const cv = p.candidate_version;
+            const sm = p.shadow_metrics || {};
+            const wrote = ev.write_status === 'written';
+            return (
+              <div key={i} className="intel-timeline-item">
+                <div className="intel-timeline-head">
+                  {eventBadge(ev.event_type, p)}
+                  <span className="intel-timeline-time" title={formatTime(ev.timestamp)}>
+                    {timeAgo(ev.timestamp)}
+                  </span>
+                  <span className="intel-timeline-spacer" />
+                  <span
+                    className={`badge ${wrote ? 'badge-pass' : 'badge-fail'}`}
+                    style={{ fontSize: 10 }}
+                    title={ev.error_reason || ''}
+                  >
+                    {wrote ? 'on chain' : 'write failed'}
+                  </span>
+                  {ev.attempts > 1 && (
+                    <span className="badge badge-muted" style={{ fontSize: 10 }}>
+                      {ev.attempts} attempts
+                    </span>
+                  )}
+                </div>
+                <div className="intel-timeline-body">
+                  {cv && (
+                    <div className="intel-kv">
+                      <span className="intel-k">version</span>
+                      <span className="intel-v mono">{cv}</span>
+                    </div>
+                  )}
+                  {p.approver && (
+                    <div className="intel-kv">
+                      <span className="intel-k">approver</span>
+                      <span className="intel-v">
+                        <span className="badge badge-muted">{p.approver}</span>
+                      </span>
+                    </div>
+                  )}
+                  {datasetHash && (
+                    <div className="intel-kv">
+                      <span className="intel-k">dataset</span>
+                      <span className="intel-v mono" title={datasetHash}>
+                        {truncHash(datasetHash, 16)}
+                      </span>
+                    </div>
+                  )}
+                  {p.reason && (
+                    <div className="intel-kv">
+                      <span className="intel-k">reason</span>
+                      <span className="intel-v">{p.reason}</span>
+                    </div>
+                  )}
+                  {sm.sample_count != null && (
+                    <div className="intel-kv">
+                      <span className="intel-k">shadow</span>
+                      <span className="intel-v mono">
+                        n={sm.sample_count}
+                        {sm.candidate_accuracy != null && sm.production_accuracy != null && (
+                          <> · Δ {fmtDelta(sm.candidate_accuracy, sm.production_accuracy)}</>
+                        )}
+                      </span>
+                    </div>
+                  )}
+                  {ev.walacor_record_id && (
+                    <div className="intel-kv">
+                      <span className="intel-k">chain id</span>
+                      <span className="intel-v mono" title={ev.walacor_record_id}>
+                        {truncHash(ev.walacor_record_id, 12)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {rollbackOpen && (
+        <RollbackModal
+          model={model}
+          onClose={() => setRollbackOpen(false)}
+          onSuccess={async () => { setRollbackOpen(false); await load(); }}
+          onAuth={refresh}
+        />
+      )}
+    </div>
+  );
+}
+
+function RollbackModal({ model, onClose, onSuccess, onAuth }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    setBusy(true); setError('');
+    try {
+      const res = await api.rollbackModel(model);
+      await onSuccess(res);
+    } catch (e) {
+      if (e.message === 'AUTH') { onAuth(); return; }
+      setError(e.message || 'rollback failed');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="confirm-overlay" onClick={busy ? undefined : onClose}>
+      <div className="confirm-dialog" onClick={e => e.stopPropagation()}>
+        <h3>Rollback {model}</h3>
+        <div className="confirm-item">{model}</div>
+        <p>
+          Restores the most recently archived production version. The current production
+          file is replaced and a `model_promoted` event is written with
+          <span className="mono"> candidate_version=rollback:&lt;archive&gt;</span>.
+          This is destructive and not reversible without another rollback or promotion.
+        </p>
+        <div className="modal-warn">
+          ⚠ Rollback restores whatever archive sorts last by ISO-8601 filename. If the
+          previous version was bad too, you may need a manual promote.
+        </div>
+        {error && <div className="modal-error">{error}</div>}
+        <div className="confirm-actions">
+          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn-danger" onClick={submit} disabled={busy}>
+            {busy ? 'Rolling back…' : 'Confirm Rollback'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main view ──────────────────────────────────────────────────
 
 export default function Intelligence({ refresh }) {
@@ -397,12 +613,7 @@ export default function Intelligence({ refresh }) {
 
       {sub === 'production' && <ProductionView refresh={refresh} />}
       {sub === 'candidates' && <CandidatesView refresh={refresh} />}
-      {sub === 'history' && (
-        <Placeholder
-          title="Promotion History"
-          hint="Past promotions, rejections, and rollback controls will appear here."
-        />
-      )}
+      {sub === 'history' && <HistoryView refresh={refresh} />}
       {sub === 'verdicts' && (
         <Placeholder
           title="Verdict Inspector"
