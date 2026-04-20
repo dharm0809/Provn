@@ -1,4 +1,4 @@
-"""Phase 13: Merkle chain for session conversation integrity (G5)."""
+"""Phase 13: ID-pointer chain for session conversation integrity (G5)."""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ class SessionState:
 
 class SessionChainTracker:
     """
-    Thread-safe in-memory Merkle chain tracker.
-    Maintains (sequence_number, previous_record_hash) for each active session.
+    Thread-safe in-memory ID-pointer chain tracker.
+    Maintains (sequence_number, previous_record_id) for each active session.
     Sessions are evicted after ttl_seconds of inactivity or when over max_sessions.
     """
 
@@ -52,7 +52,7 @@ class SessionChainTracker:
         # same session can both read the same `last_record_hash` (since
         # the first one hasn't called `update()` yet), producing two
         # records whose `previous_record_hash` points at the same prior
-        # hash — breaking Merkle-chain linkage.
+        # id — breaking ID-pointer chain linkage.
         #
         # The in-process lock is ONLY correct when the gateway runs on
         # a single worker. Multi-replica deployments must configure
@@ -235,11 +235,11 @@ class RedisSessionChainTracker:
         Uses HINCRBY to atomically increment the sequence counter so concurrent
         requests to the same session get distinct values. The hash is read in
         the same pipeline. A sequence gap from a failed request is acceptable;
-        duplicate sequence numbers corrupt the Merkle chain.
+        duplicate sequence numbers corrupt the ID-pointer chain.
 
         Raises on Redis error — callers must catch and skip chain fields rather
         than forging (0, GENESIS_HASH) for an established session, which would
-        silently corrupt the Merkle chain.
+        silently corrupt the ID-pointer chain.
         """
         key = self._key(session_id)
         async with self._r.pipeline(transaction=True) as pipe:
@@ -308,10 +308,8 @@ def compute_record_hash(
     sequence_number: int,
     timestamp: str,
 ) -> str:
-    """
-    Compute SHA3-512 hash over canonical record fields for chain integrity.
-    Prompt/response are not hashed here — Walcor backend hashes them.
-    """
+    """Deprecated: gateway no longer computes record hashes (Walacor does on ingest).
+    Kept temporarily; callers have been removed. Will be deleted in a follow-up."""
     canonical = "|".join([
         execution_id,
         str(policy_version),
