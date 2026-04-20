@@ -575,16 +575,21 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
     # New ID-pointer chain fields (additive alongside legacy hash chain)
     record["previous_record_id"] = chain_vals.previous_record_id
 
-    # Phase 26: Ed25519 record signing (fail-open)
-    if record_hash_val:
-        try:
-            from gateway.crypto.signing import sign_hash
+    # Ed25519 signing over canonical ID string (fail-open)
+    try:
+        from gateway.crypto.signing import sign_canonical
 
-            signature = sign_hash(record_hash_val)
-            if signature:
-                record["record_signature"] = signature
-        except Exception:
-            pass  # fail-open: never block record writing
+        signature = sign_canonical(
+            record_id=record.get("record_id"),
+            previous_record_id=record.get("previous_record_id"),
+            sequence_number=seq_num,
+            execution_id=record["execution_id"],
+            timestamp=record["timestamp"],
+        )
+        if signature:
+            record["record_signature"] = signature
+    except Exception:
+        pass  # fail-open: never block record writing
 
     return record_hash_val
 
