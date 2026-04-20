@@ -2079,7 +2079,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # Strip high-risk PII from the prompt before it reaches the LLM.
     # The mapping is stored in call.metadata["_pii_mapping"] and used post-
     # response to restore original values (so the user sees their data back).
-    # Streaming restoration is deferred (TODO: streaming restore support).
+    # PII sanitization only runs on non-streaming requests; streaming restore is not yet supported.
     if settings.pii_sanitization_enabled and call.prompt_text and not call.is_streaming:
         _sanitizer = _get_pii_sanitizer(settings)
         _san_result = _sanitizer.sanitize(call.prompt_text)

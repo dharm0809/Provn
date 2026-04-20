@@ -8,7 +8,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from gateway.core import compute_sha3_512_string
 
 logger = logging.getLogger(__name__)
 
@@ -298,24 +297,3 @@ def make_session_chain_tracker(redis_client, settings):
         max_sessions=settings.session_chain_max_sessions,
         ttl_seconds=settings.session_chain_ttl,
     )
-
-
-def compute_record_hash(
-    execution_id: str,
-    policy_version: int,
-    policy_result: str,
-    previous_record_hash: str,
-    sequence_number: int,
-    timestamp: str,
-) -> str:
-    """Deprecated: gateway no longer computes record hashes (Walacor does on ingest).
-    Kept temporarily; callers have been removed. Will be deleted in a follow-up."""
-    canonical = "|".join([
-        execution_id,
-        str(policy_version),
-        policy_result,
-        previous_record_hash,
-        str(sequence_number),
-        timestamp,
-    ])
-    return compute_sha3_512_string(canonical)
