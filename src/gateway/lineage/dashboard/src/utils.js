@@ -34,29 +34,41 @@ export function formatNumber(n) {
 }
 
 export function displayModel(m) {
-  if (!m) return '';
-  m = m.replace(/^self-attested:/, '');
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(m)) {
-    return m.substring(0, 8) + '…';
+  if (m == null || m === '') return '';
+  let s = String(m);
+  s = s.replace(/^self-attested:/, '');
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)) {
+    return s.substring(0, 8) + '…';
   }
-  return m;
+  return s;
+}
+
+/** Session timeline: API must return a list; coerce single object / bad shapes. */
+export function normalizeTimelineRecords(raw) {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'object') return [raw];
+  return [];
 }
 
 export function formatSessionId(id) {
-  if (!id) return '-';
-  if (/^[0-9a-f]{8}-/.test(id)) return id.substring(0, 13) + '…';
-  if (id.length > 28) return id.substring(0, 28) + '…';
-  return id;
+  if (id == null || id === '') return '-';
+  const s = String(id);
+  if (/^[0-9a-f]{8}-/.test(s)) return s.substring(0, 13) + '…';
+  if (s.length > 28) return s.substring(0, 28) + '…';
+  return s;
 }
 
 export function truncId(id, len = 16) {
-  if (!id) return '-';
-  return id.length > len ? id.substring(0, len) + '…' : id;
+  if (id == null || id === '') return '-';
+  const s = String(id);
+  return s.length > len ? s.substring(0, len) + '…' : s;
 }
 
 export function truncHash(h, len = 16) {
-  if (!h) return '-';
-  return h.substring(0, len) + '…';
+  if (h == null || h === '') return '-';
+  const s = String(h);
+  return s.length > len ? s.substring(0, len) + '…' : s;
 }
 
 export function getTokenCount(record) {
@@ -195,16 +207,17 @@ export function dispositionDetailedHelp(disposition, statusCode) {
 }
 
 export function policyBadgeClass(result) {
-  if (!result) return 'badge-muted';
-  if (result === 'pass') return 'badge-pass';
-  if (result === 'denied' || result === 'blocked') return 'badge-fail';
-  if (result.includes('flag')) return 'badge-warn';
+  if (result == null || result === '') return 'badge-muted';
+  const s = String(result);
+  if (s === 'pass') return 'badge-pass';
+  if (s === 'denied' || s === 'blocked') return 'badge-fail';
+  if (s.includes('flag')) return 'badge-warn';
   return 'badge-muted';
 }
 
 export function verdictBadgeClass(verdict) {
-  if (!verdict) return 'badge-muted';
-  const v = verdict.toLowerCase();
+  if (verdict == null || verdict === '') return 'badge-muted';
+  const v = String(verdict).toLowerCase();
   if (v === 'pass') return 'badge-pass';
   if (v === 'block') return 'badge-fail';
   if (v === 'warn') return 'badge-warn';

@@ -592,3 +592,42 @@ html[data-theme="light"] {
   .activity-row { grid-template-columns: 68px 1fr 54px; }
   .activity-model { display: none; }
 }
+
+/* Handoff: spotlight counter layout (enable via localStorage wal_counters_variant=spotlight) */
+.counters.variant-spotlight {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  border-top: none;
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.counters.variant-spotlight .counter {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+}
+.counters.variant-spotlight .counter + .counter {
+  border-left: 1px solid var(--border);
+}
+.counters.variant-spotlight .counter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--gold-dim);
+  opacity: 0.5;
+}
+.counters.variant-spotlight .counter.green::after {
+  background: var(--green-dim);
+}
+.counters.variant-spotlight .counter.gold::after {
+  background: var(--gold);
+}
+.counters.variant-spotlight .counter-value {
+  font-size: 36px;
+}
