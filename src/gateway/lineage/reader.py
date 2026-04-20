@@ -9,8 +9,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from gateway.core import compute_sha3_512_string
-
 from gateway.lineage._normalize import normalize_record as _normalize_record
 from gateway.pipeline.session_chain import GENESIS_HASH
 
