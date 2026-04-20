@@ -2135,7 +2135,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             )
             logger.debug("Responses API: overriding stream=False for %s", call.model_id)
         except Exception:
-            pass
+            logger.warning(
+                "Responses API stream=False override failed for model=%s; "
+                "streaming request will proceed with tools stripped",
+                call.model_id, exc_info=True,
+            )
 
     # ── Step 3: Forward ───────────────────────────────────────────────────────
     if call.is_streaming:
