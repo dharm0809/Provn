@@ -12,9 +12,14 @@ One command gives you Ollama + Gateway + OpenWebUI, fully wired:
 git clone https://github.com/your-org/walacor-gateway
 cd walacor-gateway/Gateway
 
-WALACOR_GATEWAY_API_KEYS=your-secret-key \
+# Required: a stable OpenWebUI session key so logins survive container restarts
+export WEBUI_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+export WALACOR_GATEWAY_API_KEYS=your-secret-key
+
 docker compose up -d
 ```
+
+> **Important:** Set `WEBUI_SECRET_KEY` **once** and keep it unchanged across restarts. If you omit it, OpenWebUI auto-generates a new key on every container restart, which invalidates all session tokens — users (and any admin accounts you just created) will appear to "reset" on the next restart. Put it in your `.env` file so it's loaded automatically.
 
 | Service | URL |
 |---------|-----|
@@ -98,6 +103,9 @@ Check that `ENABLE_FORWARD_USER_INFO_HEADERS=true` and `ENABLE_DIRECT_CONNECTION
 
 **Gateway returns 401**
 Ensure `OPENAI_API_KEY` in OpenWebUI matches `WALACOR_GATEWAY_API_KEYS` in Gateway. These must be identical.
+
+**Users keep getting logged out / admin-added users "reset" on restart**
+OpenWebUI's session-signing key is missing. Confirm `WEBUI_SECRET_KEY` is set in your `.env` and passed to the container (`docker compose config | grep WEBUI_SECRET_KEY` — should not be empty or `change-me-*`). Generate one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`, put it in `.env`, and restart the stack. User accounts and chat history are safe — they live in the `webui-data` volume — only the session tokens were getting invalidated.
 
 ---
 

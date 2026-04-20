@@ -87,11 +87,13 @@ uvicorn gateway.main:app --host 0.0.0.0 --port 8002
 - `GET http://localhost:8002/health` — JSON health (cache, WAL, chain status)
 - `GET http://localhost:8002/metrics` — Prometheus metrics
 - `http://localhost:8002/lineage/` — Lineage dashboard with the following tabs:
-  - **Overview** — live throughput chart, session list, chain verification
-  - **Control** — manage model attestations, policies, and budgets
-  - **Playground** — interactive prompt testing against attested models
-  - **Compliance** — export EU AI Act / NIST AI RMF compliance reports (PDF)
-  - **Pipeline Trace** — governance timing waterfall for each request stage
+  - **Overview** — live throughput chart, token usage + latency charts, session/attempts summary
+  - **Intelligence** — ONNX model registry, candidate promotions, shadow metrics, verdict inspector
+  - **Sessions** — browse sessions with user identity, question preview, per-session drill-down (chain verification, blockchain proof, pipeline trace waterfall)
+  - **Attempts** — completeness-invariant attempt log with disposition statistics
+  - **Control** — manage model attestations, policies, and budgets; discover models from providers
+  - **Compliance** — export EU AI Act / NIST AI RMF / SOC 2 / ISO 42001 compliance reports (PDF)
+  - **Playground** — interactive prompt testing against attested models with governance readout
 
 ## 7. Web search
 

@@ -204,15 +204,18 @@ Thinking models (qwen3) produce `<think>` blocks which the gateway strips from t
 The gateway serves a built-in React dashboard at `/lineage/` with:
 
 - **Overview** — stat cards, live throughput chart, token usage and latency charts
+- **Intelligence** — ONNX model registry, candidate promotions, shadow metrics, verdict inspector, force retrain controls
 - **Sessions** — browse sessions with user identity, question preview, numbered pagination
+- **Attempts** — completeness invariant tracking with disposition statistics
+- **Control** — manage models, policies, budgets; discover available models from providers
+- **Compliance** — preview and download compliance reports (EU AI Act, NIST, SOC 2, ISO 42001)
+- **Playground** — interactive prompt testing with governance readout and model comparison
+
+Per-session drill-down includes:
 - **Chain Verification** — client-side SHA3-512 recomputation (no server trust required)
 - **Blockchain Proof** — Walacor EId, Block ID, Transaction ID, Data Hash displayed per execution
 - **Pipeline Trace** — canvas waterfall showing time spent in each governance step
 - **System Tasks** — OpenWebUI follow-ups/tags in collapsible section (not polluting main timeline)
-- **Control** — manage models, policies, budgets; discover available models from providers
-- **Playground** — interactive prompt testing with governance readout and model comparison
-- **Compliance** — preview and download compliance reports
-- **Attempts** — completeness invariant tracking with disposition statistics
 
 ---
 
@@ -258,11 +261,12 @@ cp .env.example .env                       # fill in credentials
 python3 -m uvicorn gateway.main:app --reload --port 8000 --app-dir src
 ```
 
-Requirements: Python 3.12+. Core deps include `ddgs` (web search), `scikit-learn` + `onnxruntime` (intent classifier). Optional extras: `[redis]`, `[telemetry]`, `[auth]`, `[presidio]`, `[guard]`.
+Requirements: Python 3.12+. Core deps include `ddgs` (web search), `numpy` + `onnxruntime` (intent classifier inference). Optional extras: `[redis]`, `[telemetry]`, `[auth]`, `[presidio]`, `[guard]`, `[compliance]` (PDF export), `[intelligence]` (classifier training/retraining with scikit-learn + skl2onnx).
 
 ### Retrain Intent Classifier
 
 ```bash
+pip install -e ".[intelligence]"   # adds scikit-learn + skl2onnx + scipy
 # Export labeled data from Walacor, then train
 python scripts/train_intent_classifier.py --real-data /tmp/training_data.json
 # Output: src/gateway/classifier/model.onnx (~181KB, 99.5% accuracy)

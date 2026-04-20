@@ -79,6 +79,12 @@ services:
       - ENABLE_DIRECT_CONNECTIONS=false
       - ENABLE_SIGNUP=true
       - WEBUI_NAME=${WEBUI_NAME:-Walacor Chat}
+      # Stable secret key — without this, OpenWebUI auto-generates a new key on
+      # every container restart, invalidating all session tokens (users get
+      # logged out, newly-added admin users appear to "reset"). Set a long
+      # random value in your .env (see .env.example) and keep it unchanged
+      # across deployments so credentials persist.
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-me-to-a-long-random-string}
     depends_on:
       gateway:
         condition: service_healthy
