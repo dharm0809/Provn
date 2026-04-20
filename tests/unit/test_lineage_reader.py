@@ -8,12 +8,8 @@ import sqlite3
 import tempfile
 
 import pytest
-from gateway.core import compute_sha3_512_string
 
 from gateway.lineage.reader import LineageReader
-
-
-_GENESIS_HASH = "0" * 128
 
 
 # ---------------------------------------------------------------------------
@@ -31,26 +27,14 @@ def _create_wal_db(db_path: str):
     return conn
 
 
-def _compute_hash(execution_id, policy_version, policy_result, prev_hash, seq, timestamp):
-    canonical = "|".join([
-        execution_id,
-        str(policy_version),
-        policy_result,
-        prev_hash,
-        str(seq),
-        timestamp,
-    ])
-    return compute_sha3_512_string(canonical)
-
-
 def _insert_chained_records(conn, session_id: str, count: int = 3):
-    """Insert a Merkle-chained series of execution records into wal_records."""
-    prev_hash = _GENESIS_HASH
+    """Insert ID-pointer chained execution records into wal_records."""
     records = []
+    prev_id = None
     for i in range(count):
         eid = f"exec-{session_id}-{i}"
         ts = f"2026-03-03T10:00:{i:02d}+00:00"
-        record_hash = _compute_hash(eid, 1, "pass", prev_hash, i, ts)
+        record_id = f"0191{session_id[:8]}{i:04x}-0000-7000-8000-000000000{i:03d}"
         record = {
             "execution_id": eid,
             "session_id": session_id,
@@ -63,8 +47,8 @@ def _insert_chained_records(conn, session_id: str, count: int = 3):
             "prompt_text": f"prompt {i}",
             "response_content": f"response {i}",
             "sequence_number": i,
-            "record_hash": record_hash,
-            "previous_record_hash": prev_hash,
+            "record_id": record_id,
+            "previous_record_id": prev_id,
         }
         conn.execute(
             """INSERT INTO wal_records
@@ -74,7 +58,7 @@ def _insert_chained_records(conn, session_id: str, count: int = 3):
             (eid, json.dumps(record), ts, session_id, ts,
              record.get("model_id"), record.get("provider"), i, "pass"),
         )
-        prev_hash = record_hash
+        prev_id = record_id
         records.append(record)
     conn.commit()
     return records

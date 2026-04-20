@@ -35,7 +35,8 @@ def _mock_reader():
             "completion_tokens": 50,
             "total_tokens": 150,
             "sequence_number": 0,
-            "record_hash": "a" * 128,
+            "record_id": "0191a1b2-c3d4-7ef5-a6b7-c8d9e0f1a2b3",
+            "previous_record_id": None,
         },
     ]
     reader.get_attestation_summary.return_value = [
