@@ -164,19 +164,19 @@ export default function Execution({ navigate, executionId, sessionId }) {
           >
             <span style={{ fontSize: 10, color: 'var(--text-muted)', transition: 'transform 0.2s', transform: showChainIntegrity ? 'rotate(90deg)' : 'none' }}>▸</span>
             <span>Data Integrity</span>
-            {r.record_hash && <span className="badge badge-pass" style={{ fontSize: 10, marginLeft: 8 }}>chain linked</span>}
+            {(r.record_id || r.record_hash) && <span className="badge badge-pass" style={{ fontSize: 10, marginLeft: 8 }}>chain linked</span>}
             {r.record_signature && <span className="badge badge-gold" style={{ fontSize: 10, marginLeft: 4 }}>signed</span>}
           </div>
           {showChainIntegrity && (
             <>
-              {/* Session Chain (Merkle) */}
-              {(r.sequence_number != null || r.record_hash) && (
+              {/* Session Chain (ID pointers) */}
+              {(r.sequence_number != null || r.record_id || r.record_hash) && (
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--gold)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 8 }}>Session Chain</div>
                   <div className="detail-grid">
                     <DetailRow label="Sequence #" value={r.sequence_number ?? r.metadata?.sequence_number ?? '-'} className="mono" />
-                    <DetailRow label="Record Hash" value={r.record_hash || r.metadata?.record_hash || '-'} className="hash-gold" copyable />
-                    <DetailRow label="Previous Hash" value={r.previous_record_hash || r.metadata?.previous_record_hash || '-'} className="hash-gold" copyable />
+                    <DetailRow label="Record ID" value={r.record_id || r.record_hash || '-'} className="hash-gold" copyable />
+                    <DetailRow label="Previous ID" value={r.previous_record_id || r.previous_record_hash || '-'} className="hash-gold" copyable />
                     {(r.record_signature || r.metadata?.record_signature) && (
                       <DetailRow label="Ed25519 Signature" value={r.record_signature || r.metadata?.record_signature} className="hash-gold" copyable />
                     )}
@@ -184,24 +184,19 @@ export default function Execution({ navigate, executionId, sessionId }) {
                 </div>
               )}
               {/* TruzenAI Proof (Walacor blockchain) */}
-              {(r._walacor_eid || r._envelope || r.EId) && (() => {
-                const env = r._envelope || {};
-                const eid = r._walacor_eid || r.EId || '';
-                return (
-                  <div>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--gold)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 8 }}>TruzenAI Proof</div>
-                    <div className="detail-grid">
-                      {eid && <DetailRow label="Entity ID (EId)" value={eid} className="mono" copyable />}
-                      {env.block_id && <DetailRow label="Block ID" value={env.block_id} className="gold mono" copyable />}
-                      {env.trans_id && <DetailRow label="Transaction ID" value={env.trans_id} className="gold mono" copyable />}
-                      {env.data_hash && <DetailRow label="Data Hash (DH)" value={env.data_hash} className="gold mono" copyable />}
-                      {env.block_level != null && <DetailRow label="Block Level" value={env.block_level} className="mono" />}
-                      {env.block_index != null && <DetailRow label="Block Index" value={env.block_index} className="mono" />}
-                      {env.created_at && <DetailRow label="Blockchain Timestamp" value={typeof env.created_at === 'number' ? new Date(env.created_at).toISOString() : env.created_at} className="mono" />}
-                    </div>
+              {(r.walacor_block_id || r._walacor_eid || r.EId) && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--gold)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 8 }}>TruzenAI Proof</div>
+                  <div className="detail-grid">
+                    {(r._walacor_eid || r.EId) && <DetailRow label="Entity ID (EId)" value={r._walacor_eid || r.EId} className="mono" copyable />}
+                    {r.walacor_block_id && <DetailRow label="Block ID" value={r.walacor_block_id} className="gold mono" copyable />}
+                    {r.walacor_trans_id && <DetailRow label="Transaction ID" value={r.walacor_trans_id} className="gold mono" copyable />}
+                    {r.walacor_dh && <DetailRow label="Data Hash (DH)" value={r.walacor_dh} className="gold mono" copyable />}
+                    {r.walacor_block_level != null && <DetailRow label="Block Level" value={r.walacor_block_level} className="mono" />}
+                    {r.walacor_created_at && <DetailRow label="Blockchain Timestamp" value={typeof r.walacor_created_at === 'number' ? new Date(r.walacor_created_at).toISOString() : r.walacor_created_at} className="mono" />}
                   </div>
-                );
-              })()}
+                </div>
+              )}
             </>
           )}
         </div>

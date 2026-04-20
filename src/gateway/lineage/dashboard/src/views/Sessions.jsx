@@ -313,7 +313,7 @@ function VerifyBanner({ result }) {
         )}
       </div>
       <div className="ses-verify-meta mono">
-        {ok ? 'SHA3-512 · ED25519' : 'verification failed'}
+        {ok ? 'ID chain · ED25519 · Walacor sealed' : 'verification failed'}
       </div>
     </div>
   );
@@ -324,7 +324,7 @@ function ChainRecord({ r, isLast, verified, onClick }) {
   const prompt = r.prompt_text || '';
   const response = r.response_content || '';
   const seqCls = verified === 'pass' ? 'verified-pass' : verified === 'fail' ? 'verified-fail' : '';
-  const onChain = !!(r._envelope && r._envelope.block_id);
+  const onChain = !!(r.walacor_block_id);
 
   return (
     <div className="ses-chain-node">
@@ -380,17 +380,17 @@ function ChainRecord({ r, isLast, verified, onClick }) {
         <div className="ses-chain-proof">
           <div className="ses-proof-row">
             <span className="ses-proof-lbl mono">RECORD</span>
-            <span className="ses-proof-hash mono">{fmtShortId(r.record_hash, 14, 6)}</span>
-            <CopyBtn text={r.record_hash} title="Copy record hash" />
+            <span className="ses-proof-hash mono">{fmtShortId(r.record_id || r.record_hash, 14, 6)}</span>
+            <CopyBtn text={r.record_id || r.record_hash} title="Copy record ID" />
             {r.record_signature && <span className="ses-proof-sig" title={`Ed25519: ${r.record_signature}`}>signed</span>}
           </div>
           {onChain && (
             <div className="ses-proof-row">
               <span className="ses-proof-lbl mono gold">◆ BLOCK</span>
-              <span className="ses-proof-hash mono gold">{fmtShortId(r._envelope.block_id, 12, 6)}</span>
-              <CopyBtn text={r._envelope.block_id} title="Copy block ID" />
-              {r._envelope.data_hash && <><span className="ses-proof-lbl mono muted">DH</span>
-              <span className="ses-proof-hash mono muted">{fmtShortId(r._envelope.data_hash, 10, 4)}</span></>}
+              <span className="ses-proof-hash mono gold">{fmtShortId(r.walacor_block_id, 12, 6)}</span>
+              <CopyBtn text={r.walacor_block_id} title="Copy block ID" />
+              {r.walacor_dh && <><span className="ses-proof-lbl mono muted">DH</span>
+              <span className="ses-proof-hash mono muted">{fmtShortId(r.walacor_dh, 10, 4)}</span></>}
               {r._walacor_eid && <><span className="ses-proof-lbl mono muted">EID</span>
               <span className="ses-proof-hash mono muted">{fmtShortId(r._walacor_eid, 8, 4)}</span></>}
             </div>
