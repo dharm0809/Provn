@@ -188,7 +188,10 @@ async def _forward_with_resilience(adapter, call, request):
                 resp, mr = await forward(adapter, call, request)
                 return resp, mr, True
             except Exception:
-                pass
+                logger.warning(
+                    "Fallback retry failed for model=%s after %s error",
+                    call.model_id, error_class, exc_info=True,
+                )
         # Return error response
         return JSONResponse(
             {"error": {"message": f"Provider error: {e.body}", "type": "server_error"}},
