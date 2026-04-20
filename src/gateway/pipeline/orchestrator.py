@@ -1810,7 +1810,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 caller_identity = resolved
                 request.state.caller_identity = resolved
         except Exception:
-            pass
+            logger.debug("Identity resolution fallback failed (non-fatal)", exc_info=True)
     if caller_identity is not None:
         if not extra.get("user"):
             extra["user"] = caller_identity.user_id
