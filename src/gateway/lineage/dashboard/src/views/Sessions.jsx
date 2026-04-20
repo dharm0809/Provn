@@ -1,372 +1,540 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { getSessions } from '../api';
-import { formatSessionId, displayModel, timeAgo, copyToClipboard, formatTime } from '../utils';
+/* Walacor Gateway — Sessions View (from design zip, wired to real API)
+   Two-level flow: session list → session timeline drill-down. */
 
-function CopyBtn({ text }) {
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { getSessions, getSession, verifySession } from '../api';
+import { timeAgo } from '../utils';
+import '../styles/sessions-v2.css';
+
+function fmtShortId(id, head = 8, tail = 4) {
+  if (!id) return '—';
+  if (id.length <= head + tail + 1) return id;
+  const tailPart = tail > 0 ? id.slice(-tail) : '';
+  return id.slice(0, head) + '…' + tailPart;
+}
+function fmtDuration(sec) {
+  if (sec == null) return '—';
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m + 'm ' + String(s).padStart(2, '0') + 's';
+}
+function fmtBytes(n) {
+  if (n == null) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+function CopyBtn({ text, title }) {
   const [copied, setCopied] = useState(false);
   if (!text) return null;
   return (
-    <button type="button" className={`copy-btn${copied ? ' copied' : ''}`} onClick={e => {
-      e.stopPropagation();
-      copyToClipboard(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
-    }}>{copied ? '✓' : '⎘'}</button>
+    <button
+      type="button"
+      className={`ses-copy-btn${copied ? ' copied' : ''}`}
+      title={title || 'Copy'}
+      onClick={(e) => {
+        e.stopPropagation();
+        try {
+          navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1400);
+          });
+        } catch { /* ignore */ }
+      }}>
+      {copied ? '✓' : '⎘'}
+    </button>
   );
 }
 
-function Pagination({ current, total, onPage }) {
-  if (total <= 1) return null;
-  const pages = [];
-  const maxVisible = 7;
-
-  if (total <= maxVisible) {
-    for (let i = 1; i <= total; i++) pages.push(i);
-  } else {
-    pages.push(1);
-    let start = Math.max(2, current - 1);
-    let end = Math.min(total - 1, current + 1);
-    if (current <= 3) { start = 2; end = 5; }
-    if (current >= total - 2) { start = total - 4; end = total - 1; }
-    if (start > 2) pages.push('...');
-    for (let i = start; i <= end; i++) pages.push(i);
-    if (end < total - 1) pages.push('...');
-    pages.push(total);
-  }
+function SessionsMetricBar({ sessions }) {
+  const total = sessions.length;
+  const lastHour = sessions.filter(s => (Date.now() - new Date(s.last_activity)) < 3600 * 1000).length;
+  const avgTurns = total ? (sessions.reduce((s, x) => s + (x.user_message_count || 0), 0) / total) : 0;
+  const withTools = sessions.filter(s => (s.tools || []).length > 0).length;
+  const chainOk = sessions.filter(s => s.chain_status === 'verified' || s.chain_status == null).length;
 
   return (
-    <div className="pagination">
-      {pages.map((p, i) =>
-        p === '...' ? (
-          <span key={`ellipsis-${i}`} className="pagination-ellipsis">…</span>
-        ) : (
-          <button
-            key={p}
-            type="button"
-            className={`pagination-btn${p === current ? ' active' : ''}`}
-            onClick={() => onPage(p)}
-          >
-            {p}
-          </button>
-        )
+    <div className="ses-metric-bar">
+      <div className="ses-metric">
+        <div className="ses-metric-label">Sessions</div>
+        <div className="ses-metric-value">{total}</div>
+        <div className="ses-metric-sub">threaded through gateway</div>
+      </div>
+      <div className="ses-metric">
+        <div className="ses-metric-label">Active · last hour</div>
+        <div className="ses-metric-value gold">{lastHour}</div>
+        <div className="ses-metric-sub">
+          <span className="ses-dot-green" />live traffic
+        </div>
+      </div>
+      <div className="ses-metric">
+        <div className="ses-metric-label">Avg turns</div>
+        <div className="ses-metric-value">{avgTurns.toFixed(1)}</div>
+        <div className="ses-metric-sub">user messages / session</div>
+      </div>
+      <div className="ses-metric">
+        <div className="ses-metric-label">Sessions w/ tools</div>
+        <div className="ses-metric-value">{withTools}</div>
+        <div className="ses-metric-sub">gateway + mcp interactions</div>
+      </div>
+      <div className="ses-metric accent">
+        <div className="ses-metric-label">Chain integrity</div>
+        <div className="ses-metric-value green">
+          {chainOk}/{total}
+        </div>
+        <div className="ses-metric-sub">
+          <span className="ses-dot-green" />verified on chain
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ToolBadge({ t }) {
+  const cls = t.source === 'mcp' ? 'ses-tool-mcp' : 'ses-tool-gw';
+  const mark = t.source === 'mcp' ? '⚡' : '⚙';
+  return <span className={`ses-tool-chip ${cls}`}>{mark}<span>{t.name}</span></span>;
+}
+
+// React.memo: skip re-render when a session's fields haven't changed.
+// Session objects arrive as fresh dicts from the API on every 3s poll, but
+// shallow-equality on primitive fields (id, last_activity, record_count, etc.)
+// holds for unchanged sessions — so we manually compare the fields used in
+// render instead of relying on reference equality.
+const SessionListRow = React.memo(function SessionListRow({ s, onOpen }) {
+  const qPreview = s.user_question || '';
+  const user = s.user || 'unknown';
+  return (
+    <div className="ses-row" role="button" tabIndex={0}
+      onClick={() => onOpen(s)}
+      onKeyDown={(e) => { if (e.key === 'Enter') onOpen(s); }}>
+      <div className="ses-row-line1">
+        <span className="ses-row-user">
+          <span className="ses-avatar">{user.charAt(0).toUpperCase()}</span>
+          <span className="ses-user-name">{user}</span>
+        </span>
+        <span className="ses-row-id">
+          <span className="mono ses-row-id-text">{fmtShortId(s.session_id, 13, 0)}</span>
+          <CopyBtn text={s.session_id} />
+        </span>
+        {(s.chain_status === 'verified' || s.chain_status == null)
+          ? <span className="ses-chain-chip ok">◆ chain verified</span>
+          : <span className="ses-chain-chip warn">⚠ chain warn</span>}
+        {s.blocked_count > 0 && (
+          <span className="ses-policy-chip block">{s.blocked_count} blocked</span>
+        )}
+        <span className="ses-row-time">{timeAgo(s.last_activity)}</span>
+      </div>
+
+      {qPreview && (
+        <div className="ses-row-q">&ldquo;{qPreview.length > 124 ? qPreview.slice(0, 124) + '…' : qPreview}&rdquo;</div>
+      )}
+
+      <div className="ses-row-line3">
+        <span className="ses-stat">
+          <span className="ses-stat-lbl">MODEL</span>
+          <span className="ses-stat-val mono">{s.model || '—'}</span>
+        </span>
+        <span className="ses-stat">
+          <span className="ses-stat-lbl">TURNS</span>
+          <span className="ses-stat-val mono">{s.user_message_count ?? '—'}</span>
+        </span>
+        <span className="ses-stat">
+          <span className="ses-stat-lbl">RECORDS</span>
+          <span className="ses-stat-val mono">{s.record_count ?? 0}</span>
+        </span>
+        <span className="ses-stat">
+          <span className="ses-stat-lbl">DURATION</span>
+          <span className="ses-stat-val mono">{fmtDuration(s.duration_sec)}</span>
+        </span>
+
+        <span className="ses-indicators">
+          {(s.tools || []).map((t, i) => <ToolBadge key={i} t={t} />)}
+          {s.has_rag_context && <span className="ses-ind-chip ses-ind-rag">◫ RAG</span>}
+          {s.has_images && <span className="ses-ind-chip ses-ind-img">▣ image</span>}
+          {s.has_files && !s.has_images && <span className="ses-ind-chip ses-ind-file">▤ files</span>}
+          {!(s.tools || []).length && !s.has_rag_context && !s.has_files && !s.has_images && (
+            <span className="ses-ind-none">no attachments</span>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}, (prev, next) => {
+  const a = prev.s, b = next.s;
+  // Compare the primitive fields the row actually reads; short-circuit on any
+  // change. onOpen is stable via useCallback so reference equality is fine.
+  return prev.onOpen === next.onOpen
+    && a.session_id === b.session_id
+    && a.last_activity === b.last_activity
+    && a.record_count === b.record_count
+    && a.user_message_count === b.user_message_count
+    && a.model === b.model
+    && a.user === b.user
+    && a.user_question === b.user_question
+    && a.has_rag_context === b.has_rag_context
+    && a.has_files === b.has_files
+    && a.has_images === b.has_images
+    && a.request_type === b.request_type
+    && a.tool_names === b.tool_names
+    && a.tool_details === b.tool_details;
+});
+
+function SessionsListView({ all, onOpen }) {
+  const [q, setQ] = useState('');
+  const [chainFilter, setChainFilter] = useState('all');
+  const [modelFilter, setModelFilter] = useState('all');
+  const [sort, setSort] = useState('recent');
+
+  const models = useMemo(() => {
+    const s = new Set(all.map(x => x.model).filter(Boolean));
+    return ['all', ...Array.from(s)];
+  }, [all]);
+
+  const filtered = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    let list = all.filter(s => {
+      const chain = s.chain_status || 'verified';
+      if (chainFilter !== 'all' && chain !== chainFilter) return false;
+      if (modelFilter !== 'all' && s.model !== modelFilter) return false;
+      if (!qq) return true;
+      return (
+        (s.session_id || '').toLowerCase().includes(qq) ||
+        (s.user || '').toLowerCase().includes(qq) ||
+        (s.model || '').toLowerCase().includes(qq) ||
+        (s.user_question || '').toLowerCase().includes(qq)
+      );
+    });
+    if (sort === 'turns') list = list.slice().sort((a, b) => (b.user_message_count || 0) - (a.user_message_count || 0));
+    else if (sort === 'duration') list = list.slice().sort((a, b) => (b.duration_sec || 0) - (a.duration_sec || 0));
+    return list;
+  }, [all, q, chainFilter, modelFilter, sort]);
+
+  return (
+    <div className="ses-view">
+      <SessionsMetricBar sessions={all} />
+
+      <div className="card ses-list-card">
+        <div className="ses-list-head">
+          <div className="ses-list-title">
+            <span className="ses-list-title-main">Sessions</span>
+            <span className="ses-list-title-count">
+              <span className="mono">{filtered.length}</span>
+              {filtered.length !== all.length && <span className="ses-muted">of {all.length}</span>}
+            </span>
+          </div>
+
+          <div className="ses-list-controls">
+            <div className="ses-search">
+              <svg className="ses-search-icon" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="7" cy="7" r="5"/>
+                <line x1="11" y1="11" x2="14.5" y2="14.5" strokeLinecap="round"/>
+              </svg>
+              <input
+                className="ses-search-input"
+                placeholder="filter by session, user, model, or question…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)} />
+              {q && (
+                <button type="button" className="ses-search-clear" onClick={() => setQ('')} aria-label="Clear">×</button>
+              )}
+            </div>
+
+            <div className="ses-filter-group">
+              <span className="ses-filter-label">chain</span>
+              {['all', 'verified', 'warn'].map(f => (
+                <button key={f}
+                  className={`ses-filter-chip${chainFilter === f ? ' active' : ''}`}
+                  onClick={() => setChainFilter(f)}>
+                  {f}
+                </button>
+              ))}
+            </div>
+
+            <div className="ses-filter-group">
+              <span className="ses-filter-label">model</span>
+              <select className="ses-select" value={modelFilter} onChange={(e) => setModelFilter(e.target.value)}>
+                {models.map(m => <option key={m} value={m}>{m === 'all' ? 'all models' : m}</option>)}
+              </select>
+            </div>
+
+            <div className="ses-filter-group">
+              <span className="ses-filter-label">sort</span>
+              <select className="ses-select" value={sort} onChange={(e) => setSort(e.target.value)}>
+                <option value="recent">most recent</option>
+                <option value="turns">most turns</option>
+                <option value="duration">longest duration</option>
+              </select>
+            </div>
+
+            <button className="btn-wal btn-ghost btn-sm">⇣ Export</button>
+          </div>
+        </div>
+
+        <div className="ses-rows">
+          {filtered.length === 0 ? (
+            <div className="ses-empty">
+              <div className="ses-empty-title">No sessions match</div>
+              <div className="ses-empty-sub">Adjust the filters above or clear the search.</div>
+            </div>
+          ) : filtered.map(s => (
+            <SessionListRow key={s.session_id} s={s} onOpen={onOpen} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PolicyChip({ result }) {
+  const map = {
+    allow:                { cls: 'ses-pol-allow', label: 'ALLOW' },
+    allow_with_redaction: { cls: 'ses-pol-redact', label: 'ALLOW + REDACT' },
+    block:                { cls: 'ses-pol-block', label: 'BLOCK' },
+    warn:                 { cls: 'ses-pol-warn', label: 'WARN' },
+  };
+  const meta = map[result] || map.allow;
+  return <span className={`ses-pol-chip ${meta.cls}`}>{meta.label}</span>;
+}
+
+function VerifyBanner({ result }) {
+  if (!result) return null;
+  const ok = result.valid;
+  return (
+    <div className={`ses-verify-banner ${ok ? 'pass' : 'fail'}`}>
+      <div className="ses-verify-icon">{ok ? '◆' : '✗'}</div>
+      <div className="ses-verify-body">
+        <div className="ses-verify-msg">{result.message}</div>
+        {!ok && result.errors && (
+          <ul className="ses-verify-errs">
+            {result.errors.slice(0, 3).map((e, i) => <li key={i}>{e}</li>)}
+          </ul>
+        )}
+      </div>
+      <div className="ses-verify-meta mono">
+        {ok ? 'SHA3-512 · ED25519' : 'verification failed'}
+      </div>
+    </div>
+  );
+}
+
+function ChainRecord({ r, isLast, verified, onClick }) {
+  const tools = (r.metadata && r.metadata.tool_interactions) || [];
+  const prompt = r.prompt_text || '';
+  const response = r.response_content || '';
+  const seqCls = verified === 'pass' ? 'verified-pass' : verified === 'fail' ? 'verified-fail' : '';
+  const onChain = !!(r._envelope && r._envelope.block_id);
+
+  return (
+    <div className="ses-chain-node">
+      <div className="ses-chain-marker">
+        <div className={`ses-chain-seq ${seqCls}`}>
+          {verified === 'pass' ? '✓' : verified === 'fail' ? '✗' : r.sequence_number}
+        </div>
+        {!isLast && <div className={`ses-chain-connector ${seqCls}`} />}
+      </div>
+
+      <div className="ses-chain-card" onClick={onClick}>
+        <div className="ses-chain-card-head">
+          <span className="ses-chain-seq-lbl mono">#{r.sequence_number}</span>
+          <PolicyChip result={r.policy_result} />
+          {r.user && <span className="ses-identity-chip">👤 {r.user}</span>}
+          <span className="ses-chain-time mono">{new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+          <span className="ses-chain-toks mono">{r.tokens || 0} tok</span>
+        </div>
+
+        {prompt && (
+          <div className="ses-chain-prompt">
+            <span className="ses-chain-arrow">▸</span>
+            <span className="ses-chain-prompt-text">{prompt}</span>
+          </div>
+        )}
+        {response && (
+          <div className="ses-chain-response">
+            <span className="ses-chain-arrow">↳</span>
+            <span className="ses-chain-response-text">{response}</span>
+          </div>
+        )}
+
+        {(tools.length > 0 || r.file_metadata) && (
+          <div className="ses-chain-attach">
+            {tools.map((t, i) => (
+              <span key={i} className={`ses-tool-chip ${t.tool_source === 'mcp' ? 'ses-tool-mcp' : 'ses-tool-gw'}${t.is_error ? ' err' : ''}`}>
+                {t.tool_source === 'mcp' ? '⚡' : '⚙'}
+                <span>{t.tool_name}</span>
+                {t.is_error ? <span className="ses-tool-err"> failed</span> : null}
+                {t.tool_name === 'web_search' && !t.is_error ? <span className="ses-tool-cnt">·{(t.sources || []).length}</span> : null}
+              </span>
+            ))}
+            {r.file_metadata && r.file_metadata.map((f, i) => (
+              <span key={`f-${i}`} className="ses-file-chip">
+                <span className="ses-file-icon">◱</span>
+                <span className="ses-file-name">{f.filename}</span>
+                <span className="ses-file-size mono">{fmtBytes(f.size_bytes)}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="ses-chain-proof">
+          <div className="ses-proof-row">
+            <span className="ses-proof-lbl mono">RECORD</span>
+            <span className="ses-proof-hash mono">{fmtShortId(r.record_hash, 14, 6)}</span>
+            <CopyBtn text={r.record_hash} title="Copy record hash" />
+            {r.record_signature && <span className="ses-proof-sig" title={`Ed25519: ${r.record_signature}`}>signed</span>}
+          </div>
+          {onChain && (
+            <div className="ses-proof-row">
+              <span className="ses-proof-lbl mono gold">◆ BLOCK</span>
+              <span className="ses-proof-hash mono gold">{fmtShortId(r._envelope.block_id, 12, 6)}</span>
+              <CopyBtn text={r._envelope.block_id} title="Copy block ID" />
+              {r._envelope.data_hash && <><span className="ses-proof-lbl mono muted">DH</span>
+              <span className="ses-proof-hash mono muted">{fmtShortId(r._envelope.data_hash, 10, 4)}</span></>}
+              {r._walacor_eid && <><span className="ses-proof-lbl mono muted">EID</span>
+              <span className="ses-proof-hash mono muted">{fmtShortId(r._walacor_eid, 8, 4)}</span></>}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SessionTimelineView({ session, onBack }) {
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState(null);
+  const [nodeResults, setNodeResults] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await getSession(session.session_id);
+        if (cancelled) return;
+        const recs = res?.records || res?.executions || [];
+        setRecords(recs);
+      } catch { if (!cancelled) setRecords([]); }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [session.session_id]);
+
+  const handleVerify = useCallback(async () => {
+    setVerifying(true);
+    setVerifyResult(null);
+    setNodeResults([]);
+    try {
+      const res = await verifySession(session.session_id);
+      const results = (res?.records || []).map(r => r.valid !== false);
+      for (let i = 0; i < results.length; i++) {
+        await new Promise(r => setTimeout(r, 240));
+        setNodeResults(prev => [...prev, results[i]]);
+      }
+      const allOk = res?.valid !== false && results.every(Boolean);
+      setVerifyResult(allOk
+        ? { valid: true, message: `Chain verified — ${records.length} records, all hashes match, all signatures valid.` }
+        : { valid: false, message: res?.message || `Chain invalid — ${results.filter(x => !x).length} mismatch(es)`, errors: res?.errors || [] }
+      );
+    } catch (e) {
+      setVerifyResult({ valid: false, message: `Verification failed: ${e.message}`, errors: [] });
+    } finally {
+      setVerifying(false);
+    }
+  }, [session.session_id, records.length]);
+
+  const duration = records.length > 1
+    ? Math.round((new Date(records[records.length - 1].timestamp) - new Date(records[0].timestamp)) / 1000)
+    : 0;
+  const totalTokens = records.reduce((s, r) => s + (r.tokens || 0), 0);
+
+  return (
+    <div className="ses-view">
+      <button className="ses-back-btn" onClick={onBack}>
+        <span className="ses-back-arrow">◂</span>
+        <span>Back to sessions</span>
+      </button>
+
+      <div className="card ses-timeline-head">
+        <div className="ses-timeline-head-left">
+          <div className="ses-timeline-eyebrow">◆ SESSION CHAIN · {records.length} RECORDS</div>
+          <div className="ses-timeline-id">
+            <span className="mono">{session.session_id}</span>
+            <CopyBtn text={session.session_id} title="Copy session id" />
+          </div>
+          <div className="ses-timeline-meta">
+            <span className="ses-meta-item"><span className="ses-meta-lbl">USER</span><span className="ses-meta-val">{session.user || '—'}</span></span>
+            <span className="ses-meta-item"><span className="ses-meta-lbl">MODEL</span><span className="ses-meta-val mono">{session.model || '—'}</span></span>
+            <span className="ses-meta-item"><span className="ses-meta-lbl">DURATION</span><span className="ses-meta-val mono">{fmtDuration(duration || session.duration_sec)}</span></span>
+            <span className="ses-meta-item"><span className="ses-meta-lbl">TOKENS</span><span className="ses-meta-val mono">{totalTokens.toLocaleString()}</span></span>
+            <span className="ses-meta-item"><span className="ses-meta-lbl">STARTED</span><span className="ses-meta-val mono">{records[0]?.timestamp ? new Date(records[0].timestamp).toLocaleString() : (session.started_at ? new Date(session.started_at).toLocaleString() : '—')}</span></span>
+          </div>
+        </div>
+        <div className="ses-timeline-head-right">
+          <div className="ses-verify-card">
+            <div className="ses-verify-eyebrow mono">CRYPTOGRAPHIC VERIFICATION</div>
+            <div className="ses-verify-algo mono">SHA3-512 + ED25519 · Walacor chain</div>
+            <button
+              className="btn-wal btn-primary"
+              onClick={handleVerify}
+              disabled={verifying || loading || records.length === 0}>
+              {verifying ? '◆ verifying…' : '◆ verify chain'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <VerifyBanner result={verifyResult} />
+
+      {loading ? (
+        <div className="card"><div className="empty">Loading chain…</div></div>
+      ) : records.length === 0 ? (
+        <div className="card"><div className="empty">No records found for this session.</div></div>
+      ) : (
+        <div className="ses-chain">
+          {records.map((r, i) => (
+            <ChainRecord
+              key={r.execution_id || i}
+              r={r}
+              isLast={i === records.length - 1}
+              verified={i < nodeResults.length ? (nodeResults[i] ? 'pass' : 'fail') : null}
+              onClick={() => {}} />
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-function TableSkeletonRows({ cols }) {
-  return (
-    <>
-      {Array.from({ length: 8 }, (_, i) => (
-        <tr key={`sk-${i}`} className="sessions-skeleton-row">
-          {Array.from({ length: cols }, (_, j) => (
-            <td key={j}><div className="skeleton-line skeleton-line-wide" /></td>
-          ))}
-        </tr>
-      ))}
-    </>
-  );
-}
-
 export default function Sessions({ navigate, params = {} }) {
-  const limit = 20;
-  const offset = Math.max(0, params.offset || 0);
-  const qParam = params.q || '';
-  const sortCol = params.sort || 'last_activity';
-  const sortDir = params.order || 'desc';
-  const currentPage = Math.floor(offset / limit) + 1;
-
-  const [sessions, setSessions] = useState([]);
-  const [totalCount, setTotalCount] = useState(0);
+  const [all, setAll] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [reloadKey, setReloadKey] = useState(0);
-  const [draftQ, setDraftQ] = useState(qParam);
-  const [expandedId, setExpandedId] = useState(null);
-  const [narrow, setNarrow] = useState(false);
-  const navigateRef = useRef(navigate);
-  navigateRef.current = navigate;
-
-  useEffect(() => { setDraftQ(qParam); }, [qParam]);
+  const [selected, setSelected] = useState(null);
 
   useEffect(() => {
-    const mq = window.matchMedia('(max-width: 900px)');
-    const fn = () => setNarrow(mq.matches);
-    fn();
-    mq.addEventListener('change', fn);
-    return () => mq.removeEventListener('change', fn);
-  }, []);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getSessions(100, 0, params);
+        if (!cancelled) setAll(res.sessions || []);
+      } catch { if (!cancelled) setAll([]); }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [params.q, params.sort, params.order, params.offset]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      const trimmed = draftQ.trim();
-      const cur = (qParam || '').trim();
-      if (trimmed === cur) return;
-      navigateRef.current('sessions', {
-        offset: 0, q: draftQ, sort: sortCol, order: sortDir,
-      });
-    }, 350);
-    return () => clearTimeout(t);
-  }, [draftQ, qParam, sortCol, sortDir]);
+    const el = document.querySelector('.main');
+    if (el) el.scrollTop = 0;
+  }, [selected]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await getSessions(limit, offset, { q: qParam, sort: sortCol, order: sortDir });
-      setSessions(data.sessions || []);
-      setTotalCount(Number(data.total) || 0);
-    } catch (e) {
-      setError(e.message || String(e));
-      setSessions([]);
-      setTotalCount(0);
-    } finally {
-      setLoading(false);
-    }
-  }, [limit, offset, qParam, sortCol, sortDir, reloadKey]);
+  if (loading) return <div className="card"><div className="empty">Loading sessions…</div></div>;
 
-  useEffect(() => { load(); }, [load]);
-
-  const retry = () => setReloadKey(k => k + 1);
-
-  const totalPages = Math.max(1, Math.ceil(totalCount / limit));
-  const rangeStart = totalCount === 0 ? 0 : offset + 1;
-  const rangeEnd = offset + sessions.length;
-
-  const goSessions = (next) => {
-    navigate('sessions', {
-      offset: next.offset ?? offset,
-      q: next.q != null ? next.q : qParam,
-      sort: next.sort != null ? next.sort : sortCol,
-      order: next.order != null ? next.order : sortDir,
-    });
-  };
-
-  const applySort = (col) => {
-    const nextOrder = sortCol === col ? (sortDir === 'asc' ? 'desc' : 'asc') : 'desc';
-    goSessions({ offset: 0, sort: col, order: nextOrder });
-  };
-
-  const ariaSortFor = (col) => {
-    if (sortCol !== col) return 'none';
-    return sortDir === 'asc' ? 'ascending' : 'descending';
-  };
-
-  const openTimeline = (sessionId) => {
-    navigate('timeline', { sessionId });
-  };
-
-  const SortBtn = ({ col, label, width }) => (
-    <th scope="col" aria-sort={ariaSortFor(col)} style={width ? { width } : undefined}>
-      <button
-        type="button"
-        className="th-sort-btn"
-        onClick={() => applySort(col)}
-      >
-        <span>{label}</span>
-        <span className={`sort-arrow${sortCol === col ? ' active' : ''}`} aria-hidden>
-          {sortCol === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
-        </span>
-      </button>
-    </th>
-  );
-
-  if (error && !loading) {
-    return (
-      <div className="fade-child">
-        <div className="error-card" role="alert">
-          <p><strong>Could not load sessions.</strong> {error}</p>
-          <button type="button" className="btn btn-primary" onClick={retry}>Retry</button>
-        </div>
-      </div>
-    );
+  if (selected) {
+    return <SessionTimelineView session={selected} onBack={() => setSelected(null)} />;
   }
-
-  const noRows = !loading && sessions.length === 0;
-  const emptyHint = (qParam || '').trim()
-    ? 'No sessions match your search. Try different keywords or clear the filter.'
-    : 'Send requests through the gateway to see audit records here.';
-
-  return (
-    <div className="fade-child">
-      <div className="card sessions-card" style={{ padding: 0 }}>
-        <div style={{ padding: '16px 18px 0' }}>
-          <div className="card-head" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 12 }}>
-            <div>
-              <span className="card-title">Sessions ({totalCount})</span>
-              {totalCount > 0 && (
-                <span className="sessions-range muted" style={{ marginLeft: 12, fontSize: 13 }}>
-                  Showing {rangeStart}–{rangeEnd} of {totalCount}
-                </span>
-              )}
-            </div>
-            <Pagination
-              current={currentPage}
-              total={totalPages}
-              onPage={p => goSessions({ offset: (p - 1) * limit })}
-            />
-          </div>
-          <div className="search-bar">
-            <label htmlFor="sessions-search" className="sr-only">Search sessions</label>
-            <input
-              id="sessions-search"
-              className="search-input"
-              placeholder="Search by session ID, model, user, or question…"
-              value={draftQ}
-              onChange={e => setDraftQ(e.target.value)}
-              autoComplete="off"
-            />
-            {loading && <span className="search-count sessions-loading-hint" aria-live="polite">Updating…</span>}
-          </div>
-        </div>
-        <div className="table-wrap sessions-table-wrap" style={{ maxHeight: 'none' }}>
-          <table className="sessions-table" style={{ width: '100%' }}>
-            <thead>
-              <tr>
-                <th scope="col" style={{ width: '38%' }}>Session</th>
-                <SortBtn col="record_count" label="Turns" width="8%" />
-                <SortBtn col="model" label="Model" width="14%" />
-                <th scope="col" style={{ width: '22%' }}>Indicators</th>
-                <SortBtn col="last_activity" label="Last active" width="18%" />
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <TableSkeletonRows cols={5} />
-              ) : noRows ? (
-                <tr className="sessions-empty-row">
-                  <td colSpan={5} className="empty-state-cell">
-                    <div className="empty-state compact">
-                      <h3>No sessions found</h3>
-                      <p>{emptyHint}</p>
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                sessions.map(s => {
-                  const tools = s.tool_names ? s.tool_names.split(',').filter(Boolean) : [];
-                  const isSystemTask = (s.request_type === 'system_task');
-                  const user = s.user || '';
-                  const question = s.user_question || '';
-                  const turns = s.user_message_count || s.record_count || 0;
-                  const hasRag = s.has_rag_context;
-                  const hasFiles = s.has_files || s.file_count > 0;
-                  const hasImages = s.has_images;
-                  const expanded = expandedId === s.session_id;
-                  const qPreviewClass = narrow && question
-                    ? `sessions-q-preview${expanded ? ' is-expanded' : ''}`
-                    : 'sessions-q-preview';
-
-                  return (
-                    <tr
-                      key={s.session_id}
-                      className="clickable sessions-row"
-                      tabIndex={0}
-                      role="row"
-                      onClick={() => openTimeline(s.session_id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          openTimeline(s.session_id);
-                        }
-                      }}
-                      style={isSystemTask ? { opacity: 0.5 } : {}}
-                    >
-                      <td>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            {user ? (
-                              <span style={{ fontSize: 13, color: 'var(--gold)', fontWeight: 600 }}>
-                                {'👤 '}{user}
-                              </span>
-                            ) : isSystemTask ? (
-                              <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>⚙ system task</span>
-                            ) : null}
-                            <span className="copy-wrap" style={{ marginLeft: 'auto' }}>
-                              <span className="mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{formatSessionId(s.session_id)}</span>
-                              <CopyBtn text={s.session_id} />
-                            </span>
-                          </div>
-                          {question && (
-                            <div className="sessions-q-block">
-                              {narrow && (
-                                <button
-                                  type="button"
-                                  className="sessions-q-toggle"
-                                  aria-expanded={expanded}
-                                  aria-label={expanded ? 'Collapse question' : 'Expand question'}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setExpandedId(expanded ? null : s.session_id);
-                                  }}
-                                >
-                                  {expanded ? '▾' : '▸'}
-                                </button>
-                              )}
-                              <div
-                                className={qPreviewClass}
-                                title={!narrow ? `"${question}"` : undefined}
-                              >
-                                &ldquo;{!narrow && question.length > 80 ? `${question.slice(0, 80)}…` : question}&rdquo;
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                      <td style={{ fontFamily: 'var(--mono)', fontWeight: 600, textAlign: 'center' }}>
-                        {turns}
-                      </td>
-                      <td className="mono" style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
-                        {displayModel(s.model)}
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
-                          {tools.length > 0 && (() => {
-                            const details = s.tool_details ? s.tool_details.split(',').filter(Boolean) : [];
-                            const toolMap = {};
-                            details.forEach(d => {
-                              const [name, source] = d.split(':');
-                              if (name) toolMap[name] = source || 'unknown';
-                            });
-                            const entries = Object.keys(toolMap).length > 0
-                              ? Object.entries(toolMap)
-                              : tools.map(tn => [tn, 'unknown']);
-                            return entries.map(([name, source]) => {
-                              let icon;
-                              let badgeClass;
-                              if (source === 'gateway') { icon = name === 'web_search' ? '🔍' : '⚙'; badgeClass = 'badge badge-gold'; }
-                              else if (source === 'mcp') { icon = '🔌'; badgeClass = 'badge badge-blue'; }
-                              else { icon = '⚙'; badgeClass = 'badge badge-gold'; }
-                              return <span key={name} className={badgeClass} style={{ fontSize: 12 }} title={name}>{icon} {name}</span>;
-                            });
-                          })()}
-                          {hasRag && <span className="badge badge-blue" style={{ fontSize: 12 }} title="RAG context detected">📎 RAG</span>}
-                          {hasImages && <span className="badge badge-blue" style={{ fontSize: 12 }} title="Image attached">📷 image</span>}
-                          {hasFiles && !hasImages && <span className="badge" style={{ fontSize: 10, background: 'var(--bg-hover)', color: 'var(--text-secondary)' }} title="Files attached">📄 files</span>}
-                          {!tools.length && !hasRag && !hasFiles && !hasImages && (
-                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                      <td
-                        style={{ fontSize: 13, color: 'var(--text-muted)' }}
-                        title={s.last_activity ? formatTime(s.last_activity) : undefined}
-                      >
-                        {timeAgo(s.last_activity)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-        <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'center' }}>
-          <Pagination
-            current={currentPage}
-            total={totalPages}
-            onPage={p => goSessions({ offset: (p - 1) * limit })}
-          />
-        </div>
-      </div>
-    </div>
-  );
+  return <SessionsListView all={all} onOpen={setSelected} />;
 }

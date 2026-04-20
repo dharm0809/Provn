@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Any
 
 from gateway.core.constants import EnforcementLevel
 from gateway.core.models.policy import PolicyEvalResult
+
+
+@lru_cache(maxsize=4096)
+def _compile_pattern(pattern: str) -> re.Pattern[str]:
+    """Cache compiled regex per pattern string.
+
+    `re.search` already caches up to 512 patterns internally, but under high
+    rule-count or multi-tenant traffic that cache evicts. A 4096-entry LRU here
+    means regex rules compile at most once per gateway lifetime.
+    """
+    return re.compile(pattern)
 
 VERIFICATION_LEVEL_ORDER = {
     "self_reported": 1,
@@ -54,9 +66,9 @@ def _evaluate_rule(operator: str, actual: Any, expected: Any, case_sensitive: bo
         case "not_contains":
             return expected_str not in actual_str
         case "regex":
-            return bool(re.search(expected_str, actual_str))
+            return bool(_compile_pattern(expected_str).search(actual_str))
         case "not_regex":
-            return not re.search(expected_str, actual_str)
+            return not _compile_pattern(expected_str).search(actual_str)
         case "greater_than":
             try:
                 return float(actual) > float(expected)

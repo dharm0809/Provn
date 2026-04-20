@@ -112,6 +112,16 @@ class PromptGuardAnalyzer(ContentAnalyzer):
             reason=f"{class_name}:{confidence:.3f}:below_threshold",
         )
 
+    def configure(self, policies: list[dict]) -> None:
+        """No-op: threshold is model-card-driven, not policy-driven.
+
+        Present for ContentAnalyzer protocol parity with PII/toxicity/LlamaGuard.
+        The 0.9 confidence threshold comes from the Prompt Guard 2 model card;
+        overriding it per-tenant via the control plane would silently weaken
+        injection detection across the fleet, so we reject that surface area.
+        """
+        return None
+
     async def analyze(self, text: str) -> Decision:
         if not self._available:
             return Decision(

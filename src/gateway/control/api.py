@@ -144,6 +144,31 @@ async def control_upsert_attestation(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Invalid attestation data"}, status_code=400)
 
 
+async def control_revoke_attestation(request: Request) -> JSONResponse:
+    """Mark an attestation as revoked without deleting it.
+
+    Preferred over DELETE for audit/compliance: revoked rows remain visible
+    in the control plane and the orchestrator's auto-attest path checks for
+    status=="revoked" before re-approving a model (orchestrator.py:834).
+    """
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    attestation_id = request.path_params["id"]
+    try:
+        rows = store.list_attestations("")
+        existing = next((r for r in rows if r.get("attestation_id") == attestation_id), None)
+        if existing is None:
+            return JSONResponse({"error": "Attestation not found"}, status_code=404)
+        existing["status"] = "revoked"
+        result = store.upsert_attestation(existing)
+        _refresh_attestation_cache()
+        return JSONResponse(result, status_code=200)
+    except Exception:
+        logger.error("control_revoke_attestation error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
 async def control_delete_attestation(request: Request) -> JSONResponse:
     store = _store_or_503()
     if store is None:

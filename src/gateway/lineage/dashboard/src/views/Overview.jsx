@@ -1,14 +1,18 @@
-import { useState, useEffect } from 'react';
-import Chart from 'react-apexcharts';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { getSessions, getAttempts, getThroughputHistory, getTokenLatency } from '../api';
-import { timeAgo, formatNumber, formatUptime, displayModel, formatSessionId, dispositionClass, dispositionLabel } from '../utils';
+import { timeAgo, formatNumber, formatUptime, displayModel, formatSessionId, isTabVisible } from '../utils';
+import { ThroughputChart, TokenChart, LatencyChart } from '../components/SvgCharts';
+import '../styles/overview-v2.css';
 
 const POLL_MS = 3000;
 const RANGE_SECONDS = { '1h': 3600, '24h': 86400, '7d': 604800, '30d': 2592000 };
-const AXIS_LABEL_FONT = '12px';
-const MONO = '"IBM Plex Mono", Menlo, monospace';
+const RANGES = [
+  { key: '1h',  label: '1H' },
+  { key: '24h', label: '24H' },
+  { key: '7d',  label: '7D' },
+  { key: '30d', label: '30D' },
+];
 
-/** Tracks `data-theme="light"` on <html> (same as App sidebar toggle). */
 function useLineageTheme() {
   const [isLight, setIsLight] = useState(
     () => typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light',
@@ -24,349 +28,215 @@ function useLineageTheme() {
   return isLight;
 }
 
-function chartPalette(isLight) {
-  if (isLight) {
-    return {
-      themeMode: 'light',
-      tooltipTheme: 'light',
-      axisColor: '#57524a',
-      gridBorder: 'rgba(26, 23, 20, 0.14)',
-      crosshair: 'rgba(26, 23, 20, 0.2)',
-      gold: '#9a6700',
-      green: '#15803d',
-      red: '#dc2626',
-      blue: '#2563eb',
-    };
-  }
-  return {
-    themeMode: 'dark',
-    tooltipTheme: 'dark',
-    axisColor: '#8b8ba8',
-    gridBorder: 'rgba(255, 255, 255, 0.1)',
-    crosshair: 'rgba(255, 255, 255, 0.16)',
-    gold: '#c9a84c',
-    green: '#34d399',
-    red: '#ef4444',
-    blue: '#6366f1',
-  };
+function dispositionMeta(d) {
+  if (!d) return { cls: 'disp-allowed', label: '-' };
+  if (d === 'allowed' || d === 'forwarded') return { cls: 'disp-allowed', label: 'ALLOW' };
+  if (d.startsWith('denied')) return { cls: 'disp-blocked', label: 'BLOCK' };
+  if (d.startsWith('error'))  return { cls: 'disp-error',   label: 'ERROR' };
+  return { cls: 'disp-allowed', label: d.toUpperCase() };
 }
 
-function axisLabelStyle(palette) {
-  return { colors: palette.axisColor, fontSize: AXIS_LABEL_FONT, fontFamily: MONO };
-}
-
-/** Merge chart options without losing `toolbar: false` when callers pass `chart.zoom`. */
-function baseChartOptions(palette, overrides = {}) {
-  const { chart: chartOverrides = {}, ...rest } = overrides;
-  return {
-    chart: {
-      background: 'transparent',
-      toolbar: {
-        show: false,
-        tools: {
-          download: false,
-          selection: false,
-          zoom: false,
-          zoomin: false,
-          zoomout: false,
-          pan: false,
-          reset: false,
-        },
-      },
-      zoom: { enabled: false },
-      fontFamily: MONO,
-      animations: {
-        enabled: true,
-        easing: 'easeinout',
-        speed: 600,
-        dynamicAnimation: { enabled: true, speed: 400 },
-      },
-      ...chartOverrides,
-    },
-    theme: { mode: palette.themeMode },
-    grid: {
-      borderColor: palette.gridBorder,
-      strokeDashArray: 4,
-      xaxis: { lines: { show: false } },
-      yaxis: { lines: { show: true } },
-      padding: { left: 6, right: 8 },
-    },
-    tooltip: {
-      theme: palette.tooltipTheme,
-      style: { fontSize: '12px', fontFamily: MONO },
-      x: { show: true },
-    },
-    stroke: { curve: 'smooth', width: 2 },
-    dataLabels: { enabled: false },
-    legend: { show: false },
-    ...rest,
-  };
-}
-
-function xAxisCommon(palette, partial) {
-  return {
-    axisBorder: { show: false },
-    axisTicks: { show: false },
-    crosshairs: { show: true, stroke: { color: palette.crosshair, width: 1, dashArray: 4 } },
-    tooltip: { enabled: false },
-    ...partial,
-    labels: { style: axisLabelStyle(palette), ...partial.labels },
-  };
-}
-
-// ─── Throughput Historical Chart ──────────────────────────────────────────────
-function ThroughputHistoricalChart({ data, palette }) {
-  const series = [
-    { name: 'req/s', data: data.map(d => d.rps || 0) },
-    { name: 'allowed', data: data.map(d => d.allowed || 0) },
-    { name: 'blocked', data: data.map(d => d.blocked || 0) },
-  ];
-  const categories = data.map(d => d.t || '');
-
-  const options = baseChartOptions(palette, {
-    chart: {
-      type: 'area',
-      height: 300,
-      zoom: { enabled: true, type: 'x', allowMouseWheelZoom: true, autoScaleYaxis: true },
-      selection: {
-        enabled: true,
-        type: 'x',
-        fill: { color: palette.axisColor, opacity: 0.12 },
-        stroke: { width: 1, color: palette.gold, opacity: 0.55, dashArray: 4 },
-      },
-    },
-    colors: [palette.gold, palette.green, palette.red],
-    fill: {
-      type: 'gradient',
-      gradient: { shadeIntensity: 1, opacityFrom: 0.12, opacityTo: 0.0, stops: [0, 90, 100] },
-    },
-    stroke: { curve: 'smooth', width: [2, 1.5, 1.5] },
-    xaxis: xAxisCommon(palette, {
-      categories,
-      tickAmount: 8,
-      labels: { rotate: -45, rotateAlways: false, hideOverlappingLabels: true, maxHeight: 52 },
-    }),
-    yaxis: {
-      labels: {
-        style: axisLabelStyle(palette),
-        formatter: (v) => v < 1 ? v.toFixed(2) : Math.round(v),
-      },
-    },
-    tooltip: {
-      shared: true,
-      intersect: false,
-      y: { formatter: (v) => v != null ? v.toFixed(2) : '0' },
-    },
-  });
-
-  return <Chart options={options} series={series} type="area" height={300} />;
-}
-
-// ─── Token Usage Chart ────────────────────────────────────────────────────────
-function TokenUsageChart({ data, palette }) {
-  const series = [
-    { name: 'prompt', data: data.map(d => d.prompt || 0) },
-    { name: 'completion', data: data.map(d => d.completion || 0) },
-  ];
-  const categories = data.map(d => d.t || '');
-
-  const options = baseChartOptions(palette, {
-    chart: {
-      type: 'area',
-      height: 240,
-      zoom: { enabled: true, type: 'x', allowMouseWheelZoom: true, autoScaleYaxis: true },
-      selection: {
-        enabled: true,
-        type: 'x',
-        fill: { color: palette.axisColor, opacity: 0.12 },
-        stroke: { width: 1, color: palette.gold, opacity: 0.55, dashArray: 4 },
-      },
-    },
-    colors: [palette.blue, palette.gold],
-    fill: {
-      type: 'gradient',
-      gradient: { shadeIntensity: 1, opacityFrom: 0.2, opacityTo: 0.0, stops: [0, 95, 100] },
-    },
-    stroke: { curve: 'smooth', width: [2, 2] },
-    xaxis: xAxisCommon(palette, {
-      categories,
-      tickAmount: 8,
-      labels: { rotate: -45, rotateAlways: false, hideOverlappingLabels: true, maxHeight: 52 },
-    }),
-    yaxis: {
-      labels: {
-        style: axisLabelStyle(palette),
-        formatter: (v) => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v),
-      },
-    },
-    tooltip: {
-      shared: true,
-      intersect: false,
-      y: { formatter: (v) => v != null ? Math.round(v) + ' tok' : '0' },
-    },
-    markers: { size: 0, hover: { size: 4, sizeOffset: 2 } },
-  });
-
-  return <Chart options={options} series={series} type="area" height={240} />;
-}
-
-// ─── Latency Chart ────────────────────────────────────────────────────────────
-function LatencyChart({ data, palette }) {
-  const series = [{ name: 'avg latency', data: data.map(d => Math.round(d.avg || 0)) }];
-  const categories = data.map(d => d.t || '');
-
-  const options = baseChartOptions(palette, {
-    chart: {
-      type: 'area',
-      height: 240,
-      zoom: { enabled: true, type: 'x', allowMouseWheelZoom: true, autoScaleYaxis: true },
-      selection: {
-        enabled: true,
-        type: 'x',
-        fill: { color: palette.axisColor, opacity: 0.12 },
-        stroke: { width: 1, color: palette.gold, opacity: 0.55, dashArray: 4 },
-      },
-    },
-    colors: [palette.gold],
-    fill: {
-      type: 'gradient',
-      gradient: { shadeIntensity: 1, opacityFrom: 0.15, opacityTo: 0.0, stops: [0, 95, 100] },
-    },
-    stroke: { curve: 'smooth', width: [2.5] },
-    xaxis: xAxisCommon(palette, {
-      categories,
-      tickAmount: 8,
-      labels: { rotate: -45, rotateAlways: false, hideOverlappingLabels: true, maxHeight: 52 },
-    }),
-    yaxis: {
-      labels: {
-        style: axisLabelStyle(palette),
-        formatter: (v) => Math.round(v) + 'ms',
-      },
-    },
-    tooltip: {
-      shared: true,
-      intersect: false,
-      y: { formatter: (v) => v != null ? Math.round(v) + ' ms' : '--' },
-    },
-    markers: { size: 0, hover: { size: 4, sizeOffset: 2 } },
-  });
-
-  return <Chart options={options} series={series} type="area" height={240} />;
-}
-
-// ─── Range Selector ───────────────────────────────────────────────────────────
-function RangeSelector({ active, onChange }) {
-  const opts = [
-    { key: '1h', label: '1H' },
-    { key: '24h', label: '24H' },
-    { key: '7d', label: '7D' },
-    { key: '30d', label: '30D' },
-  ];
+// ─── Status Strip (7 cells — exact design order) ─────────────────────────────
+function StatusStrip({ health, sessions, total, pctAllowed }) {
+  const ok = health?.status === 'healthy';
   return (
-    <div className="range-bar">
-      {opts.map(o => (
-        <button key={o.key} className={`range-btn${active === o.key ? ' active' : ''}`} onClick={() => onChange(o.key)}>
-          {o.label}
-        </button>
-      ))}
+    <div className="status-strip">
+      <div className="status-inner">
+
+        <div className="status-cell health">
+          <div className="health-row">
+            <span className="health-dot-wrap">
+              <span className="health-dot-ping" style={!ok ? { background: 'var(--amber)' } : {}} />
+              <span className="health-dot" style={!ok ? { background: 'var(--amber)', boxShadow: '0 0 10px var(--amber)' } : {}} />
+            </span>
+            <div>
+              <div className="health-label" style={!ok ? { color: 'var(--amber)' } : {}}>
+                {ok ? 'ALL CLEAR' : (health?.status || 'OFFLINE').toUpperCase()}
+              </div>
+              <div className="health-sub">gateway · {health?.status || 'offline'}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="status-cell">
+          <div className="status-cell-label">Sessions</div>
+          <div className="status-cell-value">{sessions}</div>
+        </div>
+
+        <div className="status-cell">
+          <div className="status-cell-label">Total Requests</div>
+          <div className="status-cell-value">{formatNumber(total)}</div>
+        </div>
+
+        <div className="status-cell value-green">
+          <div className="status-cell-label">% Allowed</div>
+          <div className="status-cell-value">{pctAllowed}%</div>
+        </div>
+
+        <div className="status-cell mode">
+          <div className="status-cell-label">Enforcement</div>
+          <div className="status-cell-value">
+            <span className="status-mode-badge">{health?.enforcement_mode || 'unknown'}</span>
+          </div>
+        </div>
+
+        <div className="status-cell value-blue">
+          <div className="status-cell-label">Analyzers</div>
+          <div className="status-cell-value">{health?.content_analyzers ?? '--'}</div>
+        </div>
+
+        <div className="status-cell">
+          <div className="status-cell-label">Uptime</div>
+          <div className="status-cell-value">
+            {health?.uptime_seconds != null ? formatUptime(health.uptime_seconds) : '--'}
+          </div>
+        </div>
+
+      </div>
     </div>
   );
 }
 
-// ─── Compact Status Strip ─────────────────────────────────────────────────────
-function StatusStrip({ health, sessionsCount, attTotal, pctAllowed }) {
-  const ok = health?.status === 'healthy';
-  const divider = <div style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />;
+// ─── Range Bar (4 options, matches design) ────────────────────────────────────
+function RangeBar({ range, setRange }) {
   return (
-    <div className="card card-accent-green" style={{ padding: '12px 20px', marginBottom: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
-        {/* Health dot + label */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-            <span style={{ position: 'absolute', width: 14, height: 14, borderRadius: '50%', backgroundColor: ok ? 'var(--green)' : 'var(--amber)', opacity: 0.35, animation: 'ping 2s cubic-bezier(0,0,0.2,1) infinite' }} />
-            <span style={{ position: 'relative', width: 9, height: 9, borderRadius: '50%', backgroundColor: ok ? 'var(--green)' : 'var(--amber)' }} />
-          </span>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: ok ? 'var(--green)' : 'var(--amber)', letterSpacing: '0.5px' }}>
-            {ok ? 'ALL CLEAR' : (health?.status || 'OFFLINE').toUpperCase()}
-          </span>
-        </div>
-
-        {divider}
-
-        {/* Request stats */}
-        {[
-          [sessionsCount, 'sessions'],
-          [formatNumber(attTotal), 'requests'],
-          [pctAllowed + '%', 'allowed'],
-        ].map(([val, label], i) => (
-          <div key={i} style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>
-            <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{val}</span>
-            <span style={{ margin: '0 5px', opacity: 0.3 }}>·</span>
-            <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.4px' }}>{label}</span>
-          </div>
-        ))}
-
-        {divider}
-
-        {/* Governance flags */}
-        {[
-          [health?.enforcement_mode === 'enforced', health?.enforcement_mode || '-', 'mode'],
-          [!!health?.content_analyzers, `${health?.content_analyzers ?? 0}`, 'analyzers'],
-          [!!health?.session_chain, health?.session_chain ? 'enabled' : 'disabled', 'chain'],
-          [ok, health?.uptime_seconds != null ? formatUptime(health.uptime_seconds) : '-', 'uptime'],
-        ].map(([isOk, val, label], i) => (
-          <div key={i} style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-            <span style={{ fontFamily: 'var(--mono)', color: isOk ? 'var(--green)' : 'var(--text-primary)' }}>{val}</span>
-            <span style={{ margin: '0 4px', opacity: 0.3 }}>·</span>
-            <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.4px' }}>{label}</span>
-          </div>
+    <div className="ov2-range-bar">
+      <div className="range-left">
+        {range === '1h' && <span className="range-pulse-dot" />}
+        <span className="range-title">Time range</span>
+        <span className="range-sub">· throughput · tokens · latency</span>
+      </div>
+      <div className="range-buttons">
+        {RANGES.map(o => (
+          <button key={o.key}
+                  className={`range-btn-v2${range === o.key ? ' active' : ''}`}
+                  onClick={() => setRange(o.key)}>
+            {o.label}
+            {range === o.key && o.key === '1h' && <span className="live-dot" />}
+          </button>
         ))}
       </div>
     </div>
   );
 }
 
-// ─── Chart empty/loading placeholder ─────────────────────────────────────────
-function ChartPlaceholder({ height, message, sub }) {
+// ─── Counters (with delta arrows + tick animation) ────────────────────────────
+function Counters({ counters, prev }) {
+  const items = [
+    { key: 'rps',   label: 'req/s',    value: counters.rps < 0.1 && counters.rps > 0 ? counters.rps.toFixed(2) : counters.rps.toFixed(1), unit: '', color: 'gold',  dot: 'var(--gold)' },
+    { key: 'tps',   label: 'tokens/s', value: counters.tps < 1 ? counters.tps.toFixed(1) : formatNumber(Math.round(counters.tps)),        unit: '', color: '',      dot: 'var(--blue)' },
+    { key: 'pct',   label: 'allowed',  value: counters.pct.toFixed(1),                                                                    unit: '%', color: 'green', dot: 'var(--green)' },
+    { key: 'total', label: 'total',    value: formatNumber(counters.total),                                                               unit: '', color: '',      dot: 'var(--text-muted)' },
+  ];
   return (
-    <div style={{ height, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-secondary)' }}>{message}</span>
-      {sub && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{sub}</span>}
+    <div className="counters">
+      {items.map(c => {
+        const cur = counters[c.key] || 0;
+        const pv  = prev ? (prev[c.key] || 0) : null;
+        const delta = pv != null ? cur - pv : 0;
+        const changed = pv != null && Math.abs(delta) > 0.001;
+        return (
+          <div key={c.key} className="counter">
+            <div className="counter-label">
+              <span className="counter-dot" style={{ background: c.dot }} />
+              {c.label}
+            </div>
+            <div className={`counter-value ${c.color} ${changed ? 'counter-tick' : ''}`} key={c.value}>
+              {c.value}
+              {c.unit && <span className="counter-unit">{c.unit}</span>}
+            </div>
+            <div className="counter-delta">
+              {delta > 0.001  ? <span className="up">↑ {Math.abs(delta).toFixed(c.key === 'total' ? 0 : 2)}</span> :
+               delta < -0.001 ? <span className="down">↓ {Math.abs(delta).toFixed(c.key === 'total' ? 0 : 2)}</span> :
+                                <span>—</span>} <span style={{ opacity: 0.5 }}>vs prev</span>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// ─── Main Overview ───────────────────────────────────────────────────────────
+// ─── Loading skeleton ─────────────────────────────────────────────────────────
+function Skeleton() {
+  return (
+    <div>
+      <div className="skeleton-block" style={{ height: 62, marginBottom: 14 }} />
+      <div className="skeleton-block" style={{ height: 38, marginBottom: 14 }} />
+      <div className="skeleton-block" style={{ height: 340, marginBottom: 14 }} />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+        <div className="skeleton-block" style={{ height: 240 }} />
+        <div className="skeleton-block" style={{ height: 240 }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Overview ────────────────────────────────────────────────────────────
 export default function Overview({ navigate, health }) {
   const isLight = useLineageTheme();
-  const palette = chartPalette(isLight);
 
-  const [sessions, setSessions] = useState([]);
-  const [attempts, setAttempts] = useState([]);
-  const [attStats, setAttStats] = useState({});
-  const [attTotal, setAttTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [sessions,   setSessions]   = useState([]);
+  const [attempts,   setAttempts]   = useState([]);
+  const [attStats,   setAttStats]   = useState({});
+  const [attTotal,   setAttTotal]   = useState(0);
+  const [loading,    setLoading]    = useState(true);
+  const [error,      setError]      = useState(null);
+  const [newSessionIds,  setNewSessionIds]  = useState(() => new Set());
+  const [newActivityIds, setNewActivityIds] = useState(() => new Set());
 
-  const [chartRange, setChartRange] = useState('1h');
+  const [range, setRange] = useState('1h');
   const [tpData, setTpData] = useState([]);
-  const [tpLoading, setTpLoading] = useState(false);
   const [tkData, setTkData] = useState([]);
   const [ltData, setLtData] = useState([]);
+  const [tpLoading, setTpLoading] = useState(false);
   const [counters, setCounters] = useState({ rps: 0, tps: 0, pct: 100, total: 0 });
+  const [prevCounters, setPrevCounters] = useState(null);
   const [tokenSnap, setTokenSnap] = useState({ prompt: 0, completion: 0 });
   const [latencySnap, setLatencySnap] = useState({ avg: 0 });
+  const [hoverIdx, setHoverIdx] = useState(null);
 
-  // Recent sessions + activity: initial load then same cadence as charts (no loading flash on refresh)
+  // Track previous counter snapshot every ~5 polls for delta display
+  const tickRef = useRef(0);
+  useEffect(() => {
+    tickRef.current++;
+    if (tickRef.current % 5 === 0) {
+      setPrevCounters({ ...counters });
+    }
+  }, [counters.total]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sessions + activity — detect new entries for row-enter animation
+  const prevSessionIdsRef = useRef(new Set());
+  const prevActivityIdsRef = useRef(new Set());
+
   useEffect(() => {
     let cancelled = false;
     const refresh = async (isFirst) => {
       try {
         const [sessData, attData] = await Promise.all([getSessions(6, 0), getAttempts(8, 0)]);
         if (cancelled) return;
-        setSessions(sessData.sessions || []);
-        setAttempts(attData.attempts || attData.items || []);
+        const ss = sessData.sessions || [];
+        const aa = attData.attempts || attData.items || [];
+
+        if (!isFirst) {
+          const prevSess = prevSessionIdsRef.current;
+          const freshSess = new Set(ss.map(s => s.session_id).filter(id => !prevSess.has(id)));
+          if (freshSess.size > 0) {
+            setNewSessionIds(freshSess);
+            setTimeout(() => setNewSessionIds(new Set()), 800);
+          }
+          const prevAct = prevActivityIdsRef.current;
+          const freshAct = new Set(aa.map((a, i) => a.execution_id || `r${i}`).filter(id => !prevAct.has(id)));
+          if (freshAct.size > 0) {
+            setNewActivityIds(freshAct);
+            setTimeout(() => setNewActivityIds(new Set()), 800);
+          }
+        }
+        prevSessionIdsRef.current  = new Set(ss.map(s => s.session_id));
+        prevActivityIdsRef.current = new Set(aa.map((a, i) => a.execution_id || `r${i}`));
+
+        setSessions(ss);
+        setAttempts(aa);
         setAttStats(attData.stats || {});
         setAttTotal(attData.total || 0);
         setError(null);
@@ -377,266 +247,252 @@ export default function Overview({ navigate, health }) {
       }
     };
     refresh(true);
-    const id = setInterval(() => refresh(false), POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+    const id = setInterval(() => { if (isTabVisible()) refresh(false); }, POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  // Throughput + token usage + latency: one range for all charts (WAL bucket APIs). 1H refreshes on POLL_MS.
+  // Charts
+  const applySummary = useCallback((tpRows, tkRows, rng) => {
+    const total   = tpRows.reduce((s, d) => s + (d.rps || 0), 0);
+    const allowed = tpRows.reduce((s, d) => s + (d.allowed || 0), 0);
+    const secs    = RANGE_SECONDS[rng] || 3600;
+    const rps     = secs > 0 ? total / secs : 0;
+    const promptSum = tkRows.reduce((s, d) => s + (d.prompt || 0), 0);
+    const compSum   = tkRows.reduce((s, d) => s + (d.completion || 0), 0);
+    const tps = secs > 0 ? (promptSum + compSum) / secs : 0;
+    const pct = total > 0 ? (allowed / total * 100) : 100;
+    setCounters({ rps, tps, pct, total });
+    setTokenSnap({ prompt: promptSum, completion: compSum });
+    let wSum = 0, wCount = 0;
+    for (const d of tkRows) {
+      const c = d.count || 0;
+      if (c > 0) { wSum += (d.avg || 0) * c; wCount += c; }
+    }
+    setLatencySnap({ avg: wCount > 0 ? wSum / wCount : 0 });
+  }, []);
+
   useEffect(() => {
-    const needsDate = chartRange === '7d' || chartRange === '30d';
-    const label = (t) => (t ? (needsDate ? t.substring(5, 16).replace('T', ' ') : t.substring(11, 16)) : '');
+    const needsDate = range === '7d' || range === '30d';
+    const label = (t) => t ? (needsDate ? t.substring(5, 16).replace('T', ' ') : t.substring(11, 16)) : '';
     const mapThroughput = (d) => (d.buckets || []).map(b => ({
       t: label(b.t),
-      rps: b.request_count ?? b.total ?? 0,
+      rps:     b.request_count ?? b.total ?? 0,
       allowed: b.allowed || 0,
       blocked: b.blocked != null ? b.blocked : Math.max(0, (b.request_count ?? b.total ?? 0) - (b.allowed || 0)),
     }));
     const mapTkLt = (d) => (d.buckets || []).map(b => ({
-      t: label(b.t),
-      prompt: b.prompt_tokens ?? 0,
+      t:          label(b.t),
+      prompt:     b.prompt_tokens    ?? 0,
       completion: b.completion_tokens ?? 0,
-      avg: b.avg_latency_ms ?? 0,
-      count: b.request_count ?? 0,
+      avg:        b.avg_latency_ms   ?? 0,
+      count:      b.request_count    ?? 0,
     }));
 
-    const applySummary = (tpRows, tkRows) => {
-      const total = tpRows.reduce((s, d) => s + (d.rps || 0), 0);
-      const allowed = tpRows.reduce((s, d) => s + (d.allowed || 0), 0);
-      const secs = RANGE_SECONDS[chartRange] || 3600;
-      const rps = secs > 0 ? total / secs : 0;
-      const promptSum = tkRows.reduce((s, d) => s + (d.prompt || 0), 0);
-      const compSum = tkRows.reduce((s, d) => s + (d.completion || 0), 0);
-      const tkTotal = promptSum + compSum;
-      const tps = secs > 0 ? tkTotal / secs : 0;
-      const pct = total > 0 ? (allowed / total * 100) : 100;
-      setCounters({ rps, tps, pct, total });
-      setTokenSnap({ prompt: promptSum, completion: compSum });
-      let wSum = 0;
-      let wCount = 0;
-      for (const d of tkRows) {
-        const c = d.count || 0;
-        if (c > 0) {
-          wSum += (d.avg || 0) * c;
-          wCount += c;
-        }
-      }
-      setLatencySnap({ avg: wCount > 0 ? wSum / wCount : 0 });
-    };
-
     let cancelled = false;
-    const loadCharts = async (isFirst) => {
-      if (isFirst) {
-        setTpLoading(true);
-        setTpData([]);
-        setTkData([]);
-        setLtData([]);
-      }
+    const load = async (isFirst) => {
+      if (isFirst) { setTpLoading(true); setTpData([]); setTkData([]); setLtData([]); }
       try {
-        const [td, tld] = await Promise.all([
-          getThroughputHistory(chartRange),
-          getTokenLatency(chartRange),
-        ]);
+        const [td, tld] = await Promise.all([getThroughputHistory(range), getTokenLatency(range)]);
         if (cancelled) return;
         const tpRows = mapThroughput(td);
         const tkRows = mapTkLt(tld);
         setTpData(tpRows);
         setTkData(tkRows);
         setLtData(tkRows.map(({ t, avg }) => ({ t, avg })));
-        applySummary(tpRows, tkRows);
-      } catch { /* keep prior series on refresh failure */ }
+        applySummary(tpRows, tkRows, range);
+      } catch { /* retain prior on refresh error */ }
       if (!cancelled && isFirst) setTpLoading(false);
     };
 
-    loadCharts(true);
-    if (chartRange === '1h') {
-      const id = setInterval(() => { if (!cancelled) loadCharts(false); }, POLL_MS);
-      return () => {
-        cancelled = true;
-        clearInterval(id);
-      };
+    load(true);
+    if (range === '1h') {
+      const id = setInterval(() => {
+        if (!cancelled && isTabVisible()) load(false);
+      }, POLL_MS);
+      return () => { cancelled = true; clearInterval(id); };
     }
     return () => { cancelled = true; };
-  }, [chartRange]);
+  }, [range, applySummary]);
 
-  if (loading) return (
-    <div>
-      <div className="skeleton-block" style={{ height: 48, marginBottom: 16 }} />
-      <div className="skeleton-block" style={{ height: 360, marginBottom: 16 }} />
-      <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
-        <div className="skeleton-block" style={{ flex: 1, height: 300 }} />
-        <div className="skeleton-block" style={{ flex: 1, height: 300 }} />
-      </div>
-    </div>
-  );
-  if (error) return <div className="error-card">Error: {error}</div>;
+  if (loading) return <Skeleton />;
+  if (error)   return <div className="error-card">Error: {error}</div>;
 
   const allowed = attStats.allowed || 0;
-  const pctAllowed = attTotal > 0 ? (allowed / attTotal * 100).toFixed(1) : '100';
-
-  const showThroughputChart = tpData.length > 0;
-  const showTkLtCharts = tkData.length > 0;
+  const pctAllowedReq = attTotal > 0 ? (allowed / attTotal * 100).toFixed(1) : '100';
+  const totalRequests = counters.total > 0 ? Math.round(counters.total) : attTotal;
+  // Memoized so the palette object reference is stable across renders while
+  // isLight is unchanged. Prevents spurious style-prop updates on the legend
+  // swatches (which would otherwise receive a new `{background: ...}` object
+  // every render, defeating React's style-attribute fast path).
+  const P = useMemo(
+    () => isLight
+      ? { gold: '#9a6700', green: '#15803d', red: '#dc2626', blue: '#2563eb' }
+      : { gold: '#c9a84c', green: '#34d399', red: '#ef4444', blue: '#60a5fa' },
+    [isLight],
+  );
 
   return (
     <div className="fade-child">
 
-      {/* ── Compact Status Strip ── */}
       <StatusStrip
         health={health}
-        sessionsCount={sessions.length}
-        attTotal={attTotal}
-        pctAllowed={pctAllowed}
+        sessions={sessions.length}
+        total={totalRequests}
+        pctAllowed={counters.pct > 0 ? counters.pct.toFixed(1) : pctAllowedReq}
       />
 
-      {/* ── Shared time range (all telemetry charts) ── */}
-      <div className="card" style={{ marginBottom: 16, padding: '12px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {chartRange === '1h' && (
-            <div
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                background: palette.gold,
-                boxShadow: isLight ? `0 0 6px ${palette.gold}55` : `0 0 8px rgba(201,168,76,0.45)`,
-                animation: 'pulse 1.5s ease-in-out infinite',
-              }}
-              title="Charts refresh every few seconds for 1H"
-            />
-          )}
-          <span className="card-title" style={{ marginBottom: 0 }}>Time range</span>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>throughput · tokens · latency</span>
-        </div>
-        <RangeSelector active={chartRange} onChange={setChartRange} />
-      </div>
+      <RangeBar range={range} setRange={setRange} />
 
-      {/* ── Throughput Chart ── */}
-      <div className="card card-accent" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <span className="card-title" style={{ marginBottom: 0 }}>Throughput</span>
-          <div style={{ display: 'flex', gap: 12 }}>
-            {[['req/s', palette.gold], ['allowed', palette.green], ['blocked', palette.red]].map(([l, c]) => (
-              <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
-                <span style={{ width: 20, height: 2, background: c, display: 'inline-block', borderRadius: 1 }} />
-                {l}
-              </div>
-            ))}
+      {/* ── Throughput ── */}
+      <div className="card card-accent-top throughput-card" style={{ position: 'relative' }}>
+        <div className="card-header">
+          <span className="card-title">◇ Throughput</span>
+          <div className="chart-legend">
+            <span className="chart-legend-item"><span className="chart-legend-swatch" style={{ background: P.gold }} />req/s</span>
+            <span className="chart-legend-item"><span className="chart-legend-swatch" style={{ background: P.green }} />allowed</span>
+            <span className="chart-legend-item"><span className="chart-legend-swatch" style={{ background: P.red }} />blocked</span>
           </div>
         </div>
 
         {tpLoading ? (
-          <ChartPlaceholder height={300} message="loading…" />
-        ) : showThroughputChart ? (
-          <>
-            <ThroughputHistoricalChart data={tpData} palette={palette} />
-            <p className="chart-zoom-hint">
-              <span className="chart-zoom-hint-label">Zoom and explore</span>
-              All charts use the same time range. Hover and <strong>scroll</strong> (or <strong>pinch</strong>) to zoom the
-              time axis; <strong>drag</strong> to select a span. To reset zoom, pick another range above, then switch back.
-            </p>
-          </>
+          <div className="skeleton-block throughput-chart-wrap" style={{ margin: 0 }} />
+        ) : tpData.length > 0 ? (
+          <div className="throughput-chart-wrap">
+            <ThroughputChart data={tpData} hoverIdx={hoverIdx} setHoverIdx={setHoverIdx} isLight={isLight} />
+          </div>
         ) : (
-          <ChartPlaceholder height={300} message="no data for this range" sub="no attempts in the selected window" />
+          <div className="throughput-chart-wrap" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>no data for this range</span>
+          </div>
         )}
 
-        {/* Counter strip */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 12, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
-          {[
-            { value: counters.rps < 0.1 && counters.rps > 0 ? counters.rps.toFixed(2) : counters.rps.toFixed(1), label: 'req/s', color: 'var(--gold)' },
-            { value: counters.tps < 1 ? counters.tps.toFixed(1) : Math.round(counters.tps), label: 'tokens/s', color: 'var(--text-primary)' },
-            { value: counters.pct.toFixed(0) + '%', label: 'allowed', color: 'var(--green)' },
-            { value: formatNumber(counters.total), label: 'total', color: 'var(--text-primary)' },
-          ].map((c, i) => (
-            <div key={i} style={{ textAlign: 'center' }}>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 600, color: c.color }}>{c.value}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginTop: 2 }}>{c.label}</div>
-            </div>
-          ))}
-        </div>
+        <Counters counters={counters} prev={prevCounters} />
       </div>
 
-      {/* ── Token Usage + Latency Charts ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-
-        {/* Token Usage */}
-        <div className="card" style={{ marginBottom: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-            <span className="card-title" style={{ marginBottom: 0 }}>Token Usage</span>
-            <div style={{ display: 'flex', gap: 16, fontSize: 11, fontFamily: 'var(--mono)' }}>
-              <span style={{ color: 'var(--text-muted)' }}>
-                <span style={{ color: 'var(--blue)' }}>P</span> {formatNumber(tokenSnap.prompt)}
-              </span>
-              <span style={{ color: 'var(--text-muted)' }}>
-                <span style={{ color: 'var(--gold)' }}>C</span> {formatNumber(tokenSnap.completion)}
-              </span>
-              <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
-                {formatNumber(tokenSnap.prompt + tokenSnap.completion)}
-              </span>
+      {/* ── Token + Latency twin ── */}
+      <div className="twin-grid">
+        <div className="card twin-card" style={{ position: 'relative' }}>
+          <div className="card-header">
+            <span className="card-title">◇ Token Usage</span>
+            <div className="twin-summary">
+              <div className="twin-stat">
+                <span className="twin-stat-label">Prompt</span>
+                <span className="twin-stat-value blue">{formatNumber(tokenSnap.prompt)}</span>
+              </div>
+              <div className="twin-stat">
+                <span className="twin-stat-label">Completion</span>
+                <span className="twin-stat-value gold">{formatNumber(tokenSnap.completion)}</span>
+              </div>
+              <div className="twin-stat">
+                <span className="twin-stat-label">Total</span>
+                <span className="twin-stat-value">{formatNumber(tokenSnap.prompt + tokenSnap.completion)}</span>
+              </div>
             </div>
           </div>
-          {showTkLtCharts ? (
-            <TokenUsageChart data={tkData} palette={palette} />
+          {tkData.length > 0 ? (
+            <TokenChart data={tkData} isLight={isLight} />
           ) : (
-            <ChartPlaceholder height={240} message={tpLoading ? 'loading…' : 'no token data for this range'} sub="execution records with token fields appear here" />
+            <div className="chart-wrap" style={{ height: 170, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                {tpLoading ? 'loading…' : 'no token data'}
+              </span>
+            </div>
           )}
         </div>
 
-        {/* Latency */}
-        <div className="card" style={{ marginBottom: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-            <span className="card-title" style={{ marginBottom: 0 }}>Latency</span>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: latencySnap.avg > 0 ? 'var(--gold)' : 'var(--text-muted)' }}>
-              {latencySnap.avg > 0 ? Math.round(latencySnap.avg) + ' ms' : '--'}
-              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 4 }}>avg</span>
+        <div className="card twin-card" style={{ position: 'relative' }}>
+          <div className="card-header">
+            <span className="card-title">◇ Latency</span>
+            <div className="twin-summary">
+              <div className="twin-stat">
+                <span className="twin-stat-label">Average</span>
+                <span className="twin-stat-value gold">
+                  {Math.round(latencySnap.avg)}
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 4 }}>ms</span>
+                </span>
+              </div>
+              <div className="twin-stat">
+                <span className="twin-stat-label">P95 est.</span>
+                <span className="twin-stat-value">
+                  {Math.round(latencySnap.avg * 1.8)}
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 4 }}>ms</span>
+                </span>
+              </div>
             </div>
           </div>
-          {showTkLtCharts ? (
-            <LatencyChart data={ltData} palette={palette} />
+          {ltData.length > 0 ? (
+            <LatencyChart data={ltData} isLight={isLight} />
           ) : (
-            <ChartPlaceholder height={240} message={tpLoading ? 'loading…' : 'no latency data for this range'} sub="execution records with latency_ms appear here" />
+            <div className="chart-wrap" style={{ height: 170, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                {tpLoading ? 'loading…' : 'no latency data'}
+              </span>
+            </div>
           )}
         </div>
       </div>
 
-      {/* ── Sessions + Activity ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 16 }}>
+      {/* ── Recent Sessions + Activity ── */}
+      <div className="bottom-grid">
+
         <div className="card" style={{ marginBottom: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-            <span className="card-title" style={{ marginBottom: 0 }}>Recent Sessions</span>
-            <button className="btn-ghost" onClick={() => navigate('sessions')}>View all →</button>
+          <div className="feed-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="card-title">◇ Recent Sessions</span>
+              <span className="feed-live"><span className="feed-live-dot" />LIVE</span>
+            </div>
+            <button className="view-all-btn" onClick={() => navigate('sessions')}>View all →</button>
           </div>
           {sessions.length === 0 ? (
-            <div className="empty-state" style={{ padding: '24px 0' }}><p>No sessions yet.</p></div>
-          ) : sessions.map((s, i) => (
-            <div key={s.session_id} onClick={() => navigate('timeline', { sessionId: s.session_id })}
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 0', borderBottom: i < sessions.length - 1 ? '1px solid var(--border)' : 'none', cursor: 'pointer' }}>
-              <div>
-                <div className="id" style={{ marginBottom: 2 }}>{formatSessionId(s.session_id)}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{s.record_count} records · {displayModel(s.model)}</div>
+            <div className="ov2-empty">No sessions yet</div>
+          ) : sessions.map(s => (
+            <div
+              key={s.session_id}
+              className={`session-row${newSessionIds.has(s.session_id) ? ' new' : ''}`}
+              onClick={() => navigate('timeline', { sessionId: s.session_id })}
+            >
+              <div className="session-id-col">
+                <span className="session-id-text">{formatSessionId(s.session_id)}</span>
+                <span className="session-meta-text">{displayModel(s.model) || 'unknown'}</span>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>{timeAgo(s.last_activity)}</div>
+              <div className="session-count-col">
+                <span className="session-count-num">{s.record_count}</span>
+                <span className="session-count-lbl">records</span>
+              </div>
+              <div className="session-time-text">{timeAgo(s.last_activity)}</div>
             </div>
           ))}
         </div>
+
         <div className="card" style={{ marginBottom: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-            <span className="card-title" style={{ marginBottom: 0 }}>Recent Activity</span>
-            <button className="btn-ghost" onClick={() => navigate('attempts')}>View all →</button>
+          <div className="feed-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="card-title">◇ Recent Activity</span>
+              <span className="feed-live"><span className="feed-live-dot" />LIVE</span>
+            </div>
+            <button className="view-all-btn" onClick={() => navigate('attempts')}>View all →</button>
           </div>
           {attempts.length === 0 ? (
-            <div className="empty-state" style={{ padding: '24px 0' }}><p>No activity yet.</p></div>
-          ) : attempts.map((a, i) => (
-            <div key={i} onClick={() => a.execution_id && navigate('execution', { executionId: a.execution_id })}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderBottom: i < attempts.length - 1 ? '1px solid var(--border)' : 'none', cursor: a.execution_id ? 'pointer' : 'default' }}>
-              <span className={`badge ${dispositionClass(a.disposition)}`}>{dispositionLabel(a.disposition)}</span>
-              <span className="mono" style={{ color: 'var(--text-secondary)', minWidth: 80 }}>{displayModel(a.model_id)}</span>
-              <span style={{ fontSize: 12, color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.path}</span>
-              <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>{timeAgo(a.timestamp)}</span>
-            </div>
-          ))}
+            <div className="ov2-empty">No activity yet</div>
+          ) : attempts.map((a, i) => {
+            const rowId = a.execution_id || `r${i}`;
+            const meta = dispositionMeta(a.disposition);
+            return (
+              <div
+                key={rowId}
+                className={`activity-row${newActivityIds.has(rowId) ? ' new' : ''}`}
+                onClick={() => a.execution_id && navigate('execution', { executionId: a.execution_id })}
+                style={{ cursor: a.execution_id ? 'pointer' : 'default' }}
+              >
+                <span className={`disposition-badge ${meta.cls}`}>{meta.label}</span>
+                <span className="activity-model">{displayModel(a.model_id)}</span>
+                <span className="activity-path"><span className="method">{a.method || 'POST'}</span>{a.path}</span>
+                <span className="activity-time">{timeAgo(a.timestamp)}</span>
+              </div>
+            );
+          })}
         </div>
+
       </div>
     </div>
   );

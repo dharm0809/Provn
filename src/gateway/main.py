@@ -31,6 +31,7 @@ from gateway.lineage.api import (
     lineage_execution,
     lineage_attempts,
     lineage_metrics_history,
+    lineage_metrics_stream,
     lineage_token_latency_history,
     lineage_trace,
     lineage_verify,
@@ -42,6 +43,7 @@ from gateway.control.api import (
     control_list_attestations,
     control_upsert_attestation,
     control_delete_attestation,
+    control_revoke_attestation,
     control_list_policies,
     control_create_policy,
     control_update_policy,
@@ -1504,6 +1506,16 @@ async def on_startup() -> None:
             ctx.resource_monitor = DefaultResourceMonitor(
                 wal_path=settings.wal_path,
                 min_free_pct=settings.disk_min_free_percent)
+        if settings.custom_resource_monitors:
+            from gateway.adaptive import load_custom_class, parse_custom_paths
+            paths = parse_custom_paths(settings.custom_resource_monitors)
+            if paths:
+                try:
+                    cls = load_custom_class(paths[0])
+                    ctx.resource_monitor = cls()
+                    logger.info("Loaded custom resource monitor: %s", paths[0])
+                except Exception as e:
+                    logger.warning("Failed to load custom resource monitor %s: %s", paths[0], e)
         await _self_test()
         # Phase 23: Resource monitor background task
         if ctx.resource_monitor and settings.disk_monitor_enabled:
@@ -1873,6 +1885,7 @@ def create_app() -> Starlette:
         Route("/v1/lineage/executions/{execution_id:path}", lineage_execution, methods=["GET"]),
         Route("/v1/lineage/attempts", lineage_attempts, methods=["GET"]),
         Route("/v1/lineage/metrics", lineage_metrics_history, methods=["GET"]),
+        Route("/v1/lineage/metrics/stream", lineage_metrics_stream, methods=["GET"]),
         Route("/v1/lineage/token-latency", lineage_token_latency_history, methods=["GET"]),
         Route("/v1/lineage/trace/{execution_id:path}", lineage_trace, methods=["GET"]),
         Route("/v1/lineage/verify/{session_id:path}", lineage_verify, methods=["GET"]),
@@ -1882,6 +1895,7 @@ def create_app() -> Starlette:
         # Control plane CRUD
         Route("/v1/control/attestations", control_list_attestations, methods=["GET"]),
         Route("/v1/control/attestations", control_upsert_attestation, methods=["POST"]),
+        Route("/v1/control/attestations/{id:path}/revoke", control_revoke_attestation, methods=["POST"]),
         Route("/v1/control/attestations/{id:path}", control_delete_attestation, methods=["DELETE"]),
         Route("/v1/control/policies", control_list_policies, methods=["GET"]),
         Route("/v1/control/policies", control_create_policy, methods=["POST"]),

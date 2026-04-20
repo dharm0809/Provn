@@ -1,3 +1,10 @@
+// Skip work when the tab isn't visible. Polling timers still fire on schedule
+// so the UI snaps back the instant the user returns, but we don't burn
+// bandwidth or server CPU while the tab is in the background.
+export function isTabVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+}
+
 export function timeAgo(ts) {
   if (!ts) return '-';
   const diff = (Date.now() - new Date(ts).getTime()) / 1000;
@@ -258,4 +265,23 @@ export function fileTypeInfo(mimetype, filename) {
       || ext === 'c' || ext === 'cpp' || ext === 'go'
       || ext === 'rs' || ext === 'rb' || ext === 'sh')             return { icon: '💻', label: 'Code',        badgeClass: 'badge-gold' };
   return                                                             { icon: '📄', label: 'File',        badgeClass: 'badge-muted' };
+}
+
+export function fmtPct(x, digits = 1) {
+  if (x == null || Number.isNaN(Number(x))) return '—';
+  return (Number(x) * 100).toFixed(digits) + '%';
+}
+
+export function fmtDelta(cand, prod) {
+  if (cand == null || prod == null) return '—';
+  const d = Number(cand) - Number(prod);
+  if (Number.isNaN(d)) return '—';
+  const sign = d >= 0 ? '+' : '';
+  return sign + (d * 100).toFixed(2) + 'pp';
+}
+
+export function asArray(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; }
 }

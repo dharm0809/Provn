@@ -41,14 +41,27 @@ class BudgetTracker:
     Period resets are lazy (checked on each call).
     """
 
+    # Number of lock shards. 64 gives practically zero contention up to
+    # several thousand distinct tenant/user keys without the memory cost of
+    # per-key locks. A single global lock previously serialized EVERY budget
+    # check across all tenants — painful at 1000+ RPS.
+    _LOCK_SHARDS = 64
+
     def __init__(self, alert_bus=None, alert_thresholds: list[int] | None = None) -> None:
-        self._lock = asyncio.Lock()
+        # Sharded locks keyed by hash((tenant_id, user)) % _LOCK_SHARDS.
+        # Correct because every operation on a given key always routes to the
+        # same shard, preserving the atomicity guarantees of check_and_reserve
+        # and record_usage.
+        self._locks: list[asyncio.Lock] = [asyncio.Lock() for _ in range(self._LOCK_SHARDS)]
         # key: (tenant_id, user | "") -> BudgetState
         self._states: dict[tuple[str, str], BudgetState] = {}
         self._alert_bus = alert_bus
         self._alert_thresholds = sorted(alert_thresholds or [])
         # Track which thresholds have been crossed per key to avoid duplicates
         self._alerted: dict[tuple[str, str], set[int]] = {}
+
+    def _lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
+        return self._locks[hash(key) % self._LOCK_SHARDS]
 
     def configure(
         self,
@@ -92,7 +105,7 @@ class BudgetTracker:
         """
         key = (tenant_id, user or "")
         now = datetime.now(timezone.utc)
-        async with self._lock:
+        async with self._lock_for(key):
             state = self._states.get(key)
             if state is None:
                 # No budget configured — allow
@@ -129,7 +142,7 @@ class BudgetTracker:
             return
         key = (tenant_id, user or "")
         now = datetime.now(timezone.utc)
-        async with self._lock:
+        async with self._lock_for(key):
             state = self._states.get(key)
             if state is None:
                 return
@@ -160,7 +173,7 @@ class BudgetTracker:
     async def get_snapshot(self, tenant_id: str, user: str | None = None) -> dict | None:
         """Return current usage snapshot for health/metrics. None if no budget configured."""
         key = (tenant_id, user or "")
-        async with self._lock:
+        async with self._lock_for(key):
             state = self._states.get(key)
             if state is None:
                 return None
@@ -176,18 +189,25 @@ class BudgetTracker:
             }
 
     async def all_snapshots(self) -> list[dict]:
-        """All active budget states (for health endpoint)."""
-        async with self._lock:
-            return [
-                {
-                    "tenant_id": k[0],
-                    "user": k[1] or None,
-                    "period": s.period,
-                    "tokens_used": s.tokens_used,
-                    "max_tokens": s.max_tokens,
-                }
-                for k, s in self._states.items()
-            ]
+        """All active budget states (for health endpoint).
+
+        Telemetry-only read: we snapshot the dict items without locking because
+        each value is a simple dataclass of primitives (a torn read at worst
+        shows slightly-stale tokens_used, never an invariant violation). Taking
+        all 64 shard locks to produce a health payload would defeat the point
+        of sharding.
+        """
+        items = list(self._states.items())
+        return [
+            {
+                "tenant_id": k[0],
+                "user": k[1] or None,
+                "period": s.period,
+                "tokens_used": s.tokens_used,
+                "max_tokens": s.max_tokens,
+            }
+            for k, s in items
+        ]
 
 
 # Lua: atomic check-and-reserve. Returns {allowed(0|1), remaining}.
@@ -332,9 +352,16 @@ class RedisBudgetTracker:
             )
 
     async def get_snapshot(self, tenant_id: str, user: str | None = None) -> dict | None:
-        return None  # not implemented for Redis tracker
+        """Not implemented for Redis — snapshots require a SCAN over budget keys.
+
+        Health endpoint treats None as "no visibility" and falls back gracefully;
+        in-memory deployments expose real snapshots. Redis deployments should rely
+        on `/metrics` (Prometheus) for per-key budget telemetry instead.
+        """
+        return None
 
     async def all_snapshots(self) -> list[dict]:
+        """Not implemented for Redis (see get_snapshot). Returns [] so health stays flat."""
         return []
 
 

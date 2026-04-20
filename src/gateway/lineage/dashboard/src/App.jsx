@@ -1,14 +1,19 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { getHealth, getSessions } from './api';
-import { formatUptime } from './utils';
+import { formatUptime, isTabVisible } from './utils';
+// Overview is the default landing view — keep eager so first paint has no
+// Suspense boundary. Every other view is lazy-loaded so its bundle (and its
+// transitive dependencies — e.g. Control's heavy CRUD surface, Intelligence's
+// charts) only ship when the user actually navigates there.
 import Overview from './views/Overview';
-import Sessions from './views/Sessions';
-import Timeline from './views/Timeline';
-import Execution from './views/Execution';
-import Attempts from './views/Attempts';
-import Control from './views/Control';
-import Compliance from './views/Compliance';
-import Playground from './views/Playground';
+const Intelligence = lazy(() => import('./views/Intelligence'));
+const Sessions = lazy(() => import('./views/Sessions'));
+const Timeline = lazy(() => import('./views/Timeline'));
+const Execution = lazy(() => import('./views/Execution'));
+const Attempts = lazy(() => import('./views/Attempts'));
+const Control = lazy(() => import('./views/Control'));
+const Compliance = lazy(() => import('./views/Compliance'));
+const Playground = lazy(() => import('./views/Playground'));
 
 /* ── Sidebar Icons — minimal stroked geometry, control-panel feel ── */
 const navIcons = {
@@ -18,6 +23,12 @@ const navIcons = {
       <rect x="10.5" y="2" width="5.5" height="5.5" rx="1"/>
       <rect x="2" y="10.5" width="5.5" height="5.5" rx="1"/>
       <rect x="10.5" y="10.5" width="5.5" height="5.5" rx="1"/>
+    </svg>
+  ),
+  intelligence: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 1.5l6 3v4.5c0 3-2.5 6-6 7.5-3.5-1.5-6-4.5-6-7.5V4.5l6-3z"/>
+      <path d="M9 6v3l2 2"/>
     </svg>
   ),
   sessions: (
@@ -79,6 +90,7 @@ function readViewFromUrl() {
       },
     };
   }
+  if (sp.get('view') === 'intelligence') return { name: 'intelligence', params: {} };
   return { name: 'overview', params: {} };
 }
 
@@ -115,7 +127,7 @@ function HashTicker() {
       } catch {}
     };
     load();
-    const t = setInterval(load, 30000);
+    const t = setInterval(() => { if (isTabVisible()) load(); }, 30000);
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
@@ -170,7 +182,7 @@ export default function App() {
       try { setHealth(await getHealth()); } catch { setHealth(null); }
     };
     poll();
-    const t = setInterval(poll, 30000);
+    const t = setInterval(() => { if (isTabVisible()) poll(); }, 30000);
     return () => clearInterval(t);
   }, []);
 
@@ -213,23 +225,32 @@ export default function App() {
     setTimeout(() => document.documentElement.classList.remove('theme-transitioning'), 350);
   };
 
-  const tabs = ['overview', 'sessions', 'attempts', 'control', 'compliance', 'playground'];
+  const tabs = ['overview', 'intelligence', 'sessions', 'attempts', 'control', 'compliance', 'playground'];
   const activeTab = ['overview', 'sessions', 'timeline', 'execution'].includes(view.name)
     ? (view.name === 'timeline' || view.name === 'execution' ? 'sessions' : view.name)
     : view.name === 'attempts' ? 'attempts' : view.name;
 
   const status = health?.status || 'offline';
 
+  // Lightweight fallback — same container geometry the views use, so the
+  // switch doesn't cause layout shift while a lazy chunk streams in.
+  const viewFallback = (
+    <div className="view-loading" style={{ padding: '40px 20px', opacity: 0.5, fontSize: 13 }}>
+      Loading…
+    </div>
+  );
+
   const renderView = () => {
     switch (view.name) {
       case 'overview': return <Overview navigate={navigate} health={health} />;
-      case 'sessions': return <Sessions navigate={navigate} params={view.params} />;
-      case 'timeline': return <Timeline navigate={navigate} sessionId={view.params.sessionId} />;
-      case 'execution': return <Execution navigate={navigate} executionId={view.params.executionId} sessionId={view.params.sessionId} />;
-      case 'attempts': return <Attempts navigate={navigate} params={view.params} />;
-      case 'control': return <Control navigate={navigate} params={view.params} health={health} />;
-      case 'compliance': return <Compliance navigate={navigate} />;
-      case 'playground': return <Playground navigate={navigate} />;
+      case 'intelligence': return <Suspense fallback={viewFallback}><Intelligence navigate={navigate} /></Suspense>;
+      case 'sessions': return <Suspense fallback={viewFallback}><Sessions navigate={navigate} params={view.params} /></Suspense>;
+      case 'timeline': return <Suspense fallback={viewFallback}><Timeline navigate={navigate} sessionId={view.params.sessionId} /></Suspense>;
+      case 'execution': return <Suspense fallback={viewFallback}><Execution navigate={navigate} executionId={view.params.executionId} sessionId={view.params.sessionId} /></Suspense>;
+      case 'attempts': return <Suspense fallback={viewFallback}><Attempts navigate={navigate} params={view.params} /></Suspense>;
+      case 'control': return <Suspense fallback={viewFallback}><Control navigate={navigate} params={view.params} health={health} /></Suspense>;
+      case 'compliance': return <Suspense fallback={viewFallback}><Compliance /></Suspense>;
+      case 'playground': return <Suspense fallback={viewFallback}><Playground /></Suspense>;
       default: return <Overview navigate={navigate} health={health} />;
     }
   };

@@ -64,6 +64,68 @@ export async function getThroughputHistory(range) {
   return data;
 }
 
+// Progressive-enhancement SSE subscription for live throughput.
+//
+// Returns a cancellation function. The caller registers an onData handler
+// and receives the exact same shape `getThroughputHistory` returns.
+//
+// If the browser has no EventSource (ancient environments), or the backend
+// returns 404/5xx on first connect, we fall through to a standard
+// setInterval poll of the REST endpoint so the UI is never left without
+// data. All connected browsers share a single backend single-flight cache
+// regardless of which transport they use.
+export function subscribeThroughput(range, onData, { pollMs = 3000 } = {}) {
+  let cancelled = false;
+  const normalize = (data) => {
+    if (data && data.buckets) {
+      data.buckets = data.buckets.map(b => ({ ...b, request_count: b.total }));
+    }
+    return data;
+  };
+
+  if (typeof EventSource === 'undefined') {
+    return _pollFallback(range, onData, normalize, pollMs, () => cancelled);
+  }
+
+  let es = null;
+  let fallbackCleanup = null;
+  try {
+    es = new EventSource(`${API}/metrics/stream?range=${range}`);
+    es.onmessage = (e) => {
+      if (cancelled) return;
+      try { onData(normalize(JSON.parse(e.data))); } catch { /* ignore malformed frame */ }
+    };
+    es.onerror = () => {
+      // First error after open: server likely lacks the endpoint or proxy
+      // is buffering. Close SSE and fall back to polling transparently.
+      if (cancelled || fallbackCleanup) return;
+      try { es.close(); } catch {}
+      fallbackCleanup = _pollFallback(range, onData, normalize, pollMs, () => cancelled);
+    };
+  } catch {
+    fallbackCleanup = _pollFallback(range, onData, normalize, pollMs, () => cancelled);
+  }
+
+  return () => {
+    cancelled = true;
+    if (es) { try { es.close(); } catch {} }
+    if (fallbackCleanup) fallbackCleanup();
+  };
+}
+
+function _pollFallback(range, onData, normalize, pollMs, isCancelled) {
+  const tick = async () => {
+    if (isCancelled()) return;
+    try {
+      const data = await fetchJSON(`${API}/metrics?range=${range}`);
+      if (!isCancelled()) onData(normalize(data));
+    } catch { /* swallow; next tick retries */ }
+  };
+  tick();
+  const id = setInterval(tick, pollMs);
+  return () => clearInterval(id);
+}
+
 export async function getTrace(executionId) {
   return fetchJSON(`${API}/trace/${executionId}`);
 }
