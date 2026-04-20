@@ -105,11 +105,11 @@ class TestSchemaMapper:
 
     def test_empty_response(self, mapper):
         r = mapper.map_response({})
-        assert r._mapping_incomplete
+        assert r.mapping.incomplete
 
     def test_invalid_input(self, mapper):
         r = mapper.map_response(None)
-        assert r._mapping_incomplete
+        assert r.mapping.incomplete
 
     def test_unknown_format_content_by_value(self, mapper):
         """Content found by value semantics (longest NL string)."""
@@ -282,7 +282,8 @@ class TestCanonicalSchema:
         assert r.is_complete()
 
     def test_incomplete_response(self):
-        r = CanonicalResponse(_mapping_incomplete=True)
+        from gateway.schema.canonical import MappingReport
+        r = CanonicalResponse(mapping=MappingReport(incomplete=True))
         assert not r.is_complete()
 
     def test_labels_defined(self):

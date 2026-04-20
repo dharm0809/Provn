@@ -1479,7 +1479,7 @@ async def _build_and_write_record(
             "finish_reason": _canonical.finish_reason,
             "response_id": _canonical.response_id,
             "model": _canonical.model,
-            "mapping_confidence": round(_canonical._mapping_confidence, 3),
+            "mapping_confidence": round(_canonical.mapping.confidence, 3),
         }
         if _canonical.usage:
             _can_dict["usage"] = {
@@ -2263,9 +2263,9 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
 
             # Store ML mapping metadata for audit trail
             _mapping_meta = {
-                "schema_mapper_confidence": round(_canonical._mapping_confidence, 3),
-                "schema_mapper_mapped": len(_canonical._mapped_fields),
-                "schema_mapper_unmapped": len(_canonical._unmapped_fields),
+                "schema_mapper_confidence": round(_canonical.mapping.confidence, 3),
+                "schema_mapper_mapped": len(_canonical.mapping.mapped_fields),
+                "schema_mapper_unmapped": len(_canonical.mapping.unmapped_fields),
             }
             if _canonical.overflow:
                 _mapping_meta["schema_mapper_overflow_keys"] = list(_canonical.overflow.keys())[:20]

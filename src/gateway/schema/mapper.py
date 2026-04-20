@@ -29,6 +29,7 @@ from gateway.schema.canonical import (
     CanonicalToolCall,
     CanonicalUsage,
     IDX_TO_LABEL,
+    MappingReport,
     SINGLETON_FIELDS,
     USAGE_FIELDS,
 )
@@ -177,12 +178,12 @@ class SchemaMapper:
         self._maybe_reload()
 
         if not isinstance(raw, dict):
-            result = CanonicalResponse(_mapping_incomplete=True)
+            result = CanonicalResponse(mapping=MappingReport(incomplete=True))
         else:
             # 1. Flatten JSON to field list
             fields = flatten_json(raw)
             if not fields:
-                result = CanonicalResponse(_mapping_incomplete=True)
+                result = CanonicalResponse(mapping=MappingReport(incomplete=True))
             else:
                 # 2. Classify each field
                 classifications = self._classify_fields(fields)
@@ -204,14 +205,14 @@ class SchemaMapper:
                     input_text = json.dumps(raw, sort_keys=True, default=str)
                 except (TypeError, ValueError):
                     input_text = repr(raw)
-                prediction = "incomplete" if result._mapping_incomplete else "complete"
+                prediction = "incomplete" if result.mapping.incomplete else "complete"
                 rid = request_id_var.get() or None
                 self._verdict_buffer.record(
                     ModelVerdict.from_inference(
                         model_name="schema_mapper",
                         input_text=input_text,
                         prediction=prediction,
-                        confidence=float(result._mapping_confidence or 0.0),
+                        confidence=float(result.mapping.confidence or 0.0),
                         request_id=rid,
                     )
                 )
@@ -470,10 +471,12 @@ class SchemaMapper:
 
         # ── Mapping metadata ─────────────────────────────────────────
         confidences = [conf for _, (_, conf) in zip(fields, classifications) if _ != "UNKNOWN"]
-        cr._mapping_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-        cr._mapping_incomplete = not cr.content and not cr.thinking_content
-        cr._mapped_fields = mapped
-        cr._unmapped_fields = unmapped
+        cr.mapping = MappingReport(
+            confidence=sum(confidences) / len(confidences) if confidences else 0.0,
+            incomplete=not cr.content and not cr.thinking_content,
+            mapped_fields=mapped,
+            unmapped_fields=unmapped,
+        )
 
         return cr
 
