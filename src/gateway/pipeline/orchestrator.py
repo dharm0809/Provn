@@ -509,13 +509,10 @@ from gateway.pipeline.tool_executor import (
     build_tool_audit_metadata, write_tool_events, emit_tool_metrics,
     strip_tools_from_call, filter_tools_for_key, is_tool_unsupported_error,
 )
-# Backward-compat aliases for tests/external imports
 _build_tool_audit_metadata = build_tool_audit_metadata
 _write_tool_events = write_tool_events
 _emit_tool_metrics = emit_tool_metrics
 _filter_tools_for_key = filter_tools_for_key
-_inject_tools_into_call = None  # removed — use tool_executor.prepare_tools()
-_run_active_tool_loop = None    # removed — use tool_executor.execute_tools()
 _is_tool_unsupported_error = is_tool_unsupported_error
 
 
