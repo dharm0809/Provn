@@ -18,7 +18,7 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModelVerdict:
     model_name: str
     input_hash: str
@@ -29,6 +29,10 @@ class ModelVerdict:
     timestamp: str = field(default_factory=_utcnow_iso)
     divergence_signal: str | None = None
     divergence_source: str | None = None
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.confidence <= 1.0):
+            raise ValueError(f"confidence must be in [0.0, 1.0], got {self.confidence}")
 
     @classmethod
     def from_inference(
