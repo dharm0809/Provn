@@ -125,7 +125,7 @@ rate_limit_hits_total = Counter(
     ["model"],
 )
 
-# Phase 25 Task 35: intelligence-layer observability.
+# intelligence-layer observability.
 # `verdict_buffer_size` is intentionally label-less because the buffer
 # is a single shared deque across models — a per-model breakdown would
 # require either separate buffers or scanning the deque on every Gauge
@@ -168,7 +168,7 @@ distillation_run_duration_seconds = Histogram(
     buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0),
 )
 
-# Phase 25 Task 16: teacher-LLM calls from the intent harvester.
+# teacher-LLM calls from the intent harvester.
 # Labels the call outcome so operators can reason about teacher cost
 # vs. harvest value: `called` = request made; `failed` = teacher call
 # errored or returned an unparseable label (fail-open, no signal

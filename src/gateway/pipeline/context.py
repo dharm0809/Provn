@@ -64,7 +64,7 @@ class PipelineContext:
         self.control_store: Any | None = None
         # Phase 20: Local sync loop task
         self.local_sync_task: Any | None = None
-        # Phase 25: Resilience layer
+        # Resilience layer
         self.load_balancer: Any | None = None
         self.circuit_breakers: Any | None = None
         # Phase 26: Rate limiting + alerting
@@ -91,36 +91,36 @@ class PipelineContext:
         self.audit_exporter: AuditExporter | None = None
         # B.4: Semantic cache (exact-match tier)
         self.semantic_cache: SemanticCache | None = None
-        # Phase 25: ONNX self-learning intelligence layer
+        # ONNX self-learning intelligence layer
         self.verdict_buffer: VerdictBuffer | None = None
         self.intelligence_db: IntelligenceDB | None = None
         self.intelligence_flush_task: Any | None = None
         self.intelligence_flush_worker: Any | None = None
         self.intelligence_retention_task: Any | None = None
         self.intelligence_retention_sweeper: Any | None = None
-        # Phase 25 Task 12: ONNX model registry (directory-backed artifact store).
+        # ONNX model registry (directory-backed artifact store).
         # Clients resolve their `.onnx` file via
         # `ctx.model_registry.production_path(model_name)` and rebuild their
         # session when the per-model generation counter moves.
         self.model_registry: ModelRegistry | None = None
-        # Phase 25 Task 13: verdict harvester runner. Tasks 14-16 register
+        # verdict harvester runner. Tasks 14-16 register
         # per-model harvesters that back-write divergence signals onto the
         # verdict log. Signals are enqueued fire-and-forget from the
         # orchestrator's audit-finalization path.
         self.harvester_runner: HarvesterRunner | None = None
-        # Phase 25 Task 22: shadow inference runner. When a candidate
+        # shadow inference runner. When a candidate
         # model is registered via `ModelRegistry.enable_shadow`, every
         # production inference fires a parallel candidate run and
         # records a `shadow_comparisons` row. None disables shadow.
         self.shadow_runner: ShadowRunner | None = None
-        # Phase 25 Task 21+27: lifecycle event writer. Wraps Walacor
+        # lifecycle event writer. Wraps Walacor
         # with retry + SQLite mirror for all lifecycle event emissions
         # (candidate_created, shadow_validation_complete, model_promoted,
         # model_rejected, training_dataset_fingerprint). `None` when
         # Walacor is not wired — callers fall back to writing the event
         # directly or skip emission.
         self.lifecycle_event_writer: LifecycleEventWriter | None = None
-        # Phase 25 Task 20 + 28: background distillation worker. When
+        # background distillation worker. When
         # set, the Task 28 retrain endpoint calls `retrain_one(model)`
         # on it to kick an immediate training pass for one model.
         self.distillation_worker: DistillationWorker | None = None

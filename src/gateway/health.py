@@ -117,7 +117,7 @@ async def health_response(request: Request) -> JSONResponse:
             for name, r in ctx.startup_probe_results.items()
         }
 
-    # Phase 25 Task 36: intelligence-layer status. Only emitted when the
+    # intelligence-layer status. Only emitted when the
     # intelligence DB is initialized so disabled deployments don't see
     # noise. All queries wrapped in try/except — a stale schema or
     # missing table must NOT take /health down.

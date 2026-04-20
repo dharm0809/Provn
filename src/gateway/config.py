@@ -548,7 +548,7 @@ class Settings(BaseSettings):
     merkle_checkpoint_enabled: bool = Field(default=True, description="Enable periodic Merkle tree checkpoints for session chains")
     merkle_checkpoint_interval_seconds: int = Field(default=3600, description="Seconds between Merkle tree checkpoint builds")
 
-    # Phase 25: Transparency log publishing
+    # Transparency log publishing
     transparency_log_enabled: bool = Field(default=False, description="Publish Merkle checkpoint roots to external transparency log")
     transparency_log_url: str = Field(default="", description="Transparency log endpoint URL for POST requests")
 

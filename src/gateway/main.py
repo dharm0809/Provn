@@ -934,7 +934,7 @@ def _init_semantic_cache(settings, ctx) -> None:
     )
 
 
-# Phase 25 Task 12: in-repo packaged `.onnx` files. The source tree ships a
+# in-repo packaged `.onnx` files. The source tree ships a
 # baseline model per canonical name — on first run we copy them into the
 # registry's `production/` so the directory-backed registry is self-bootstrapping
 # and all clients converge on a single source of truth for live models.
@@ -987,7 +987,7 @@ def _migrate_packaged_models_to_registry(registry) -> None:
 
 
 def _init_model_registry(settings, ctx) -> None:
-    """Phase 25 Task 12: initialize the directory-backed ONNX model registry.
+    """initialize the directory-backed ONNX model registry.
 
     Attached to `ctx.model_registry` for client wiring. The base path
     defaults to `{wal_path}/models` so model artifacts live alongside other
@@ -1014,7 +1014,7 @@ def _init_model_registry(settings, ctx) -> None:
 
 
 def _init_lifecycle_writer(settings, ctx) -> None:
-    """Phase 25 Task 21+27: wire the Walacor lifecycle-event writer.
+    """wire the Walacor lifecycle-event writer.
 
     Shared across DistillationWorker, shadow-gate auto-promote, and the
     control-plane promote/reject/rollback endpoints. When Walacor is not
@@ -1043,7 +1043,7 @@ def _init_lifecycle_writer(settings, ctx) -> None:
 
 
 def _init_distillation_worker(settings, ctx) -> None:
-    """Phase 25 Task 20 + 28: background distillation worker.
+    """background distillation worker.
 
     Depends on `ctx.intelligence_db` + `ctx.model_registry`. When
     either is missing the worker is skipped — the force-retrain
@@ -1095,7 +1095,7 @@ def _init_distillation_worker(settings, ctx) -> None:
 
 
 def _init_shadow_runner(settings, ctx) -> None:
-    """Phase 25 Task 22: wire the shadow-inference runner.
+    """wire the shadow-inference runner.
 
     Depends on `ctx.intelligence_db` for the `shadow_comparisons`
     write target. Fail-open: missing DB or init failure leaves
@@ -1116,7 +1116,7 @@ def _init_shadow_runner(settings, ctx) -> None:
 
 
 def _init_harvesters(settings, ctx) -> None:
-    """Phase 25 Task 13+: verdict harvester runner with per-model harvesters.
+    """verdict harvester runner with per-model harvesters.
 
     Creates a `HarvesterRunner` with any available per-model harvesters
     registered, then starts its background consumer task. Each harvester
@@ -1398,7 +1398,7 @@ async def on_startup() -> None:
         _init_storage(settings, ctx)
         _init_lineage(settings, ctx)
         ctx.redis_client = await _init_redis(settings)
-        # Phase 25: Intelligence verdict capture must init BEFORE any ONNX client
+        # Intelligence verdict capture must init BEFORE any ONNX client
         # (SafetyClassifier, SchemaMapper) so the buffer is available for wiring.
         # Model registry (Task 12) initializes first so clients can resolve their
         # ONNX file via `ctx.model_registry.production_path(...)` and pick up
@@ -1774,7 +1774,7 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"merkle_checkpoint_task: {e}")
 
-    # Phase 25: Intelligence flush worker — stop() flips the running flag,
+    # Intelligence flush worker — stop() flips the running flag,
     # await drains any in-flight tick. Short timeout so shutdown never hangs
     # on a stuck SQLite write.
     if ctx.intelligence_flush_worker:
@@ -1800,7 +1800,7 @@ async def on_shutdown() -> None:
     ctx.intelligence_flush_task = None
     ctx.intelligence_flush_worker = None
 
-    # Phase 25: Intelligence retention sweeper — same drain pattern as the
+    # Intelligence retention sweeper — same drain pattern as the
     # flush worker. stop() flips the running flag; the await drains the
     # in-flight sleep / sweep.
     if ctx.intelligence_retention_sweeper:
@@ -1826,7 +1826,7 @@ async def on_shutdown() -> None:
     ctx.intelligence_retention_task = None
     ctx.intelligence_retention_sweeper = None
 
-    # Phase 25 Task 13: drain the harvester runner. stop() injects a
+    # drain the harvester runner. stop() injects a
     # sentinel so the background task wakes from its queue-get and exits;
     # a cancel fallback handles the pathologically-full queue case.
     if ctx.harvester_runner is not None:
@@ -1838,7 +1838,7 @@ async def on_shutdown() -> None:
             errors.append(f"harvester_runner: {e}")
         ctx.harvester_runner = None
 
-    # Phase 25 Task 20+28: distillation worker. stop() injects a
+    # distillation worker. stop() injects a
     # sentinel to wake the loop, then awaits the task with a 2s
     # ceiling matching the other background workers.
     if ctx.distillation_worker is not None:
@@ -1921,17 +1921,17 @@ def create_app() -> Starlette:
         Route("/v1/control/keys/{key_hash}/tools", control_get_key_tools, methods=["GET"]),
         Route("/v1/control/keys/{key_hash}/tools", control_set_key_tools, methods=["PUT"]),
         Route("/v1/control/keys/{key_hash}/tools/{tool_name:path}", control_remove_key_tool, methods=["DELETE"]),
-        # Phase 25 Task 26: intelligence read endpoints
+        # intelligence read endpoints
         Route("/v1/control/intelligence/models", intel_list_production_models, methods=["GET"]),
         Route("/v1/control/intelligence/candidates", intel_list_candidates, methods=["GET"]),
         Route("/v1/control/intelligence/history/{model}", intel_model_history, methods=["GET"]),
-        # Phase 25 Task 27: intelligence actions
+        # intelligence actions
         Route("/v1/control/intelligence/promote/{model}/{version}", intel_promote_candidate, methods=["POST"]),
         Route("/v1/control/intelligence/reject/{model}/{version}", intel_reject_candidate, methods=["POST"]),
         Route("/v1/control/intelligence/rollback/{model}", intel_rollback_model, methods=["POST"]),
-        # Phase 25 Task 28: force retrain
+        # force retrain
         Route("/v1/control/intelligence/retrain/{model}", intel_force_retrain, methods=["POST"]),
-        # Phase 25 Task 29: verdict log inspector
+        # verdict log inspector
         Route("/v1/control/intelligence/verdicts", intel_list_verdicts, methods=["GET"]),
         # Sync-contract endpoints (for fleet sync)
         Route("/v1/attestation-proofs", sync_attestation_proofs, methods=["GET"]),

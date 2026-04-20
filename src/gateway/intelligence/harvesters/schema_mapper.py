@@ -1,4 +1,4 @@
-"""Phase 25 Task 14: SchemaMapper harvester — overflow-key training signal.
+"""SchemaMapper harvester — overflow-key training signal.
 
 When the SchemaMapper fails to classify a field its path lands in
 `canonical.overflow`; the orchestrator surfaces the first ~30 such paths

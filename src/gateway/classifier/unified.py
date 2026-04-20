@@ -213,7 +213,7 @@ class SchemaIntelligence:
         self._onnx_session = None
         self._label_map: dict[int, str] = {}
         self._verdict_buffer = verdict_buffer
-        # Phase 25 Task 22: shadow runner — when wired, every classified
+        # shadow runner — when wired, every classified
         # intent fires a background candidate inference and records a
         # `shadow_comparisons` row. Fail-open: runner is None on any
         # wiring failure and the hook silently no-ops.
@@ -222,7 +222,7 @@ class SchemaIntelligence:
         # Provider profile cache — learned from observed responses
         self._provider_profiles: dict[str, dict[str, Any]] = {}
 
-        # Phase 25: optional `ModelRegistry` wiring — see intent.py for the
+        # optional `ModelRegistry` wiring — see intent.py for the
         # contract. When set, `classify_intent` polls the registry generation
         # counter and rebuilds the ONNX session after a promote/rollback.
         from gateway.intelligence.reload import ReloadState
@@ -347,7 +347,7 @@ class SchemaIntelligence:
         model_id: str,
     ) -> IntentResult:
         """Classify request intent. Tier 1 deterministic, Tier 2 ONNX ML."""
-        # Phase 25: rebuild the ONNX session if the registry has promoted a
+        # rebuild the ONNX session if the registry has promoted a
         # new intent model since our last inference.
         self._maybe_reload()
 
@@ -362,7 +362,7 @@ class SchemaIntelligence:
                 tier="deterministic", reason="no_ml_model_default",
             )
 
-        # Phase 25: record verdict for self-learning (observational only).
+        # record verdict for self-learning (observational only).
         # Never allowed to break inference — wrap the whole stanza defensively.
         # Note: model_name="intent" matches IntentClassifier so the distillation
         # pipeline treats them as one stream (the harvester keys off model_name).
@@ -383,7 +383,7 @@ class SchemaIntelligence:
             except Exception:
                 logger.debug("verdict recording failed", exc_info=True)
 
-        # Phase 25 Task 22: shadow candidate inference. Fire-and-forget —
+        # shadow candidate inference. Fire-and-forget —
         # the returned result above is already what the caller gets;
         # this side-call only populates `shadow_comparisons`.
         self._fire_shadow(prompt, result)
@@ -776,7 +776,7 @@ class SchemaIntelligence:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Shadow inference driver (Phase 25 Task 22)
+# Shadow inference driver
 # ═══════════════════════════════════════════════════════════════════════════
 # Separate function, not a method, so the `ShadowRunner` never retains a
 # reference to the `SchemaIntelligence` instance — that would defeat the

@@ -84,7 +84,7 @@ class IntelligenceDB:
     def init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
-            # Phase 25 Task 17: migrate pre-existing DBs to the post-Task-17
+            # migrate pre-existing DBs to the post-Task-17
             # layout. `ALTER TABLE ... ADD COLUMN` is the most compatible
             # migration path (no data movement). Wrap in try/except so a
             # second startup, where the column already exists, is a no-op.

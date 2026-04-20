@@ -2,7 +2,7 @@
 
 Defines `ModelVerdict` — the canonical record produced every time an ONNX
 (or Ollama-backed) model renders a prediction inside the gateway. Verdicts
-are later harvested by the shadow/self-learning loop (Phase 25 Tasks 13-16),
+are later harvested by the shadow/self-learning loop (self-learning loop),
 which may populate `divergence_signal` / `divergence_source` after the fact.
 """
 from __future__ import annotations

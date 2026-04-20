@@ -1,4 +1,4 @@
-"""Phase 25 Task 21: lifecycle event writer (Walacor + SQLite mirror).
+"""lifecycle event writer (Walacor + SQLite mirror).
 
 Thin wrapper around the existing Walacor client that:
 

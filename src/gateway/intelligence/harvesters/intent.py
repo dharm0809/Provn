@@ -1,4 +1,4 @@
-"""Phase 25 Task 16: Intent harvester.
+"""Intent harvester.
 
 Three signal sources feed divergence labels onto the intent verdict row:
 

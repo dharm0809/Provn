@@ -138,7 +138,7 @@ class SafetyClassifier(ContentAnalyzer):
         self._loaded = False
         self._verdict_buffer = verdict_buffer
 
-        # Phase 25: optional `ModelRegistry` wiring — see `intelligence/reload.py`.
+        # optional `ModelRegistry` wiring — see `intelligence/reload.py`.
         # Only the `.onnx` session is swap-reloaded; TF-IDF vocab, IDF, and SVD
         # components are stable training artifacts that do not change with
         # retraining in the current distillation setup.
@@ -252,7 +252,7 @@ class SafetyClassifier(ContentAnalyzer):
 
     def analyze(self, text: str) -> Decision:
         """Classify text for safety. Returns Decision with verdict and category."""
-        # Phase 25: refresh session from registry if a new version was promoted.
+        # refresh session from registry if a new version was promoted.
         self._maybe_reload()
 
         # `label` is the raw ONNX class label (e.g. "safe", "violence") — used
@@ -320,7 +320,7 @@ class SafetyClassifier(ContentAnalyzer):
                     reason=f"inference_error: {e}",
                 )
 
-        # Phase 25: record verdict for self-learning (observational only).
+        # record verdict for self-learning (observational only).
         # Never allowed to break inference — wrap the whole stanza defensively.
         if self._verdict_buffer is not None:
             try:

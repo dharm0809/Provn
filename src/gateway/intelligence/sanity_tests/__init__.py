@@ -1,4 +1,4 @@
-"""Phase 25 Task 25: offline sanity fixtures.
+"""offline sanity fixtures.
 
 Each `*_sanity.json` file contains labeled examples the
 `SanityRunner` uses to gate a candidate BEFORE it enters shadow

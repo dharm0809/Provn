@@ -1,4 +1,4 @@
-"""Phase 25 Task 11: `InferenceSession` reload signaling helper.
+"""`InferenceSession` reload signaling helper.
 
 All three ONNX clients (IntentClassifier, SchemaIntelligence, SchemaMapper,
 SafetyClassifier) poll a per-model generation counter on the registry and

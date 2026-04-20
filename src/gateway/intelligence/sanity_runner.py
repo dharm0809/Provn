@@ -1,4 +1,4 @@
-"""Phase 25 Task 25: offline sanity test runner.
+"""offline sanity test runner.
 
 Before a candidate is allowed to enter live shadow validation, we run
 it against a fixed labeled set and confirm it clears a per-class
