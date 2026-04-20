@@ -11,6 +11,7 @@ from typing import Any
 
 from gateway.core import compute_sha3_512_string
 
+from gateway.lineage._normalize import normalize_record as _normalize_record
 from gateway.pipeline.session_chain import GENESIS_HASH
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,7 @@ class LineageReader:
         for row in cur.fetchall():
             record = json.loads(row["record_json"])
             record["_wal_created_at"] = row["created_at"]
+            _normalize_record(record)
             results.append(record)
         return results
 
@@ -347,7 +349,9 @@ class LineageReader:
         row = cur.fetchone()
         if row is None:
             return None
-        return json.loads(row["record_json"])
+        record = json.loads(row["record_json"])
+        _normalize_record(record)
+        return record
 
     def get_tool_events(self, execution_id: str) -> list[dict]:
         """Return tool event records linked to an execution."""
@@ -587,7 +591,10 @@ class LineageReader:
             """,
             (start, end, limit),
         )
-        return [json.loads(row["record_json"]) for row in cur.fetchall()]
+        records = [json.loads(row["record_json"]) for row in cur.fetchall()]
+        for r in records:
+            _normalize_record(r)
+        return records
 
     def get_attestation_summary(self, start: str, end: str) -> list[dict]:
         """Model attestation inventory with usage counts in period."""

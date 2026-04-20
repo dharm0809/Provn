@@ -13,6 +13,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
+from gateway.lineage._normalize import normalize_record as _normalize_record
+
 if TYPE_CHECKING:
     from gateway.walacor.client import WalacorClient
 
@@ -303,15 +305,7 @@ class WalacorLineageReader:
         for r in rows:
             _deserialize_record(r)
             r["_walacor_eid"] = r.get("EId")
-            env = r.pop("env", [])
-            if env:
-                r["_envelope"] = {
-                    "block_id": env[0].get("BlockId"),
-                    "trans_id": env[0].get("TransId"),
-                    "data_hash": env[0].get("DH"),
-                    "block_level": env[0].get("BL"),
-                    "created_at": env[0].get("CreatedAt"),
-                }
+            _normalize_record(r)
             results.append(r)
         return results
 
@@ -334,16 +328,7 @@ class WalacorLineageReader:
         r = rows[0]
         _deserialize_record(r)
         r["_walacor_eid"] = r.get("EId")
-        env = r.pop("env", [])
-        if env:
-            r["_envelope"] = {
-                "block_id": env[0].get("BlockId"),
-                "trans_id": env[0].get("TransId"),
-                "data_hash": env[0].get("DH"),
-                "block_level": env[0].get("BL"),
-                "block_index": env[0].get("BlockIndexId"),
-                "created_at": env[0].get("CreatedAt"),
-            }
+        _normalize_record(r)
         return r
 
     async def get_tool_events(self, execution_id: str) -> list[dict]:
