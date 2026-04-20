@@ -35,10 +35,82 @@ def load_signing_key(key_path: str) -> bool:
         return False
 
 
+def _canonical_bytes(
+    record_id: str | None,
+    previous_record_id: str | None,
+    sequence_number: int,
+    execution_id: str,
+    timestamp: str,
+) -> bytes:
+    return "|".join([
+        record_id or "",
+        previous_record_id or "",
+        str(sequence_number),
+        execution_id,
+        timestamp,
+    ]).encode("utf-8")
+
+
+def sign_canonical(
+    *,
+    record_id: str | None,
+    previous_record_id: str | None,
+    sequence_number: int,
+    execution_id: str,
+    timestamp: str,
+    private_key: Any = None,
+) -> str | None:
+    """Sign a canonical ID+metadata string with Ed25519.
+
+    Returns base64-encoded signature or None. Uses the module-level key
+    when private_key is omitted (normal runtime path); pass private_key
+    explicitly in tests.
+    """
+    key = private_key if private_key is not None else _signing_key
+    if key is None:
+        return None
+    try:
+        msg = _canonical_bytes(record_id, previous_record_id, sequence_number, execution_id, timestamp)
+        signature = key.sign(msg)
+        return base64.b64encode(signature).decode("ascii")
+    except Exception as e:
+        logger.warning("Record signing failed (fail-open): %s", e)
+        return None
+
+
+def verify_canonical(
+    *,
+    record_id: str | None,
+    previous_record_id: str | None,
+    sequence_number: int,
+    execution_id: str,
+    timestamp: str,
+    signature: str,
+    public_key: Any = None,
+) -> bool:
+    """Verify an Ed25519 signature over the canonical ID string."""
+    key = public_key if public_key is not None else _verify_key
+    if key is None:
+        return False
+    try:
+        msg = _canonical_bytes(record_id, previous_record_id, sequence_number, execution_id, timestamp)
+        sig_bytes = base64.b64decode(signature)
+        key.verify(sig_bytes, msg)
+        return True
+    except ImportError:
+        return False
+    except Exception:
+        return False
+
+
 def sign_hash(record_hash: str) -> str | None:
-    """Sign a record hash with Ed25519. Returns base64-encoded signature or None."""
+    """Sign a record hash with Ed25519. Returns base64-encoded signature or None.
+
+    Deprecated: use sign_canonical instead. Kept for one release cycle.
+    """
     if _signing_key is None:
         return None
+    logger.debug("sign_hash is deprecated; migrate callers to sign_canonical")
     try:
         signature = _signing_key.sign(record_hash.encode("utf-8"))
         return base64.b64encode(signature).decode("ascii")
@@ -48,9 +120,13 @@ def sign_hash(record_hash: str) -> str | None:
 
 
 def verify_signature(record_hash: str, signature_b64: str) -> bool:
-    """Verify an Ed25519 signature against a record hash."""
+    """Verify an Ed25519 signature against a record hash.
+
+    Deprecated: use verify_canonical instead. Kept for one release cycle.
+    """
     if _verify_key is None:
         return False
+    logger.debug("verify_signature is deprecated; migrate callers to verify_canonical")
     try:
         sig_bytes = base64.b64decode(signature_b64)
         _verify_key.verify(sig_bytes, record_hash.encode("utf-8"))
