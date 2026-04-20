@@ -23,6 +23,9 @@ class CanonicalUsage:
     cache_creation_tokens: int | None = None
     cost_usd: float | None = None
 
+    def __post_init__(self) -> None:
+        self.compute_total()
+
     def compute_total(self) -> None:
         """Fill total_tokens if missing but components are present."""
         if not self.total_tokens and (self.prompt_tokens or self.completion_tokens):
@@ -67,6 +70,16 @@ class CanonicalSafety:
 
 
 @dataclass
+class MappingReport:
+    """Metadata produced by SchemaMapper describing how well the mapping succeeded."""
+
+    confidence: float = 1.0
+    incomplete: bool = False
+    mapped_fields: list[str] = field(default_factory=list)
+    unmapped_fields: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CanonicalResponse:
     """Universal LLM response representation.
 
@@ -104,15 +117,12 @@ class CanonicalResponse:
     # Self-healing: unknown fields preserved here, never dropped
     overflow: dict[str, Any] = field(default_factory=dict)
 
-    # Mapping metadata
-    _mapping_confidence: float = 1.0
-    _mapping_incomplete: bool = False
-    _mapped_fields: list[str] = field(default_factory=list)
-    _unmapped_fields: list[str] = field(default_factory=list)
+    # Mapping metadata (populated by SchemaMapper after assembly)
+    mapping: MappingReport = field(default_factory=MappingReport)
 
     def is_complete(self) -> bool:
         """Check if the mapping captured the essential fields."""
-        return bool(self.content or self.thinking_content) and not self._mapping_incomplete
+        return bool(self.content or self.thinking_content) and not self.mapping.incomplete
 
 
 # ── Canonical field labels for the ONNX classifier ──────────────────────────
