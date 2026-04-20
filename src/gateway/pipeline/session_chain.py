@@ -155,9 +155,11 @@ class SessionChainTracker:
         ]
         for sid in to_delete:
             del self._sessions[sid]
+            self._session_locks.pop(sid, None)
         # If still over limit, pop from front (oldest in LRU order) — O(1)
         while len(self._sessions) > self._max:
-            self._sessions.popitem(last=False)
+            sid, _ = self._sessions.popitem(last=False)
+            self._session_locks.pop(sid, None)
 
     def warm(self, sessions: list[tuple]) -> None:
         """Bulk-load session chain state on startup (e.g. from WAL).
