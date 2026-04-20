@@ -504,8 +504,8 @@ class WALWriter:
         conn.commit()
         logger.debug("WAL write_batch count=%d", len(rows))
 
-    def get_chain_heads(self, ttl_hours: int = 24) -> list[tuple[str, int, str]]:
-        """Return (session_id, max_sequence_number, last_record_hash) for recent sessions.
+    def get_chain_heads(self, ttl_hours: int = 24) -> list[tuple[str, int, str, str | None]]:
+        """Return (session_id, max_sequence_number, last_record_hash, last_record_id) for recent sessions.
 
         Used to warm the SessionChainTracker on startup so chains survive restarts.
         Only loads sessions active within *ttl_hours* to avoid loading stale data.
@@ -513,8 +513,8 @@ class WALWriter:
         conn = self._ensure_conn()
         cur = conn.execute(
             """SELECT session_id, MAX(sequence_number) AS seq,
-                      -- record_hash from the row with the highest sequence_number
-                      json_extract(record_json, '$.record_hash') AS rh
+                      json_extract(record_json, '$.record_hash') AS rh,
+                      json_extract(record_json, '$.record_id') AS rid
                FROM wal_records
                WHERE event_type = 'execution'
                  AND session_id IS NOT NULL
@@ -525,9 +525,9 @@ class WALWriter:
         )
         results = []
         for row in cur.fetchall():
-            sid, seq, rh = row
-            if sid and seq is not None and rh:
-                results.append((sid, int(seq), str(rh)))
+            sid, seq, rh, rid = row
+            if sid and seq is not None and (rh or rid):
+                results.append((sid, int(seq), str(rh or ""), rid))
         return results
 
     def get_undelivered(self, limit: int = 50) -> list[tuple[str, str, str]]:
