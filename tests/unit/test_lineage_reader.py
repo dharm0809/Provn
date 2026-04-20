@@ -277,21 +277,21 @@ def test_verify_chain_valid(wal_db):
     reader.close()
 
     assert result["valid"] is True
-    assert result["record_count"] == 5
+    assert result["records_checked"] == 5
     assert result["errors"] == []
     assert result["session_id"] == "session-g"
 
 
 def test_verify_chain_detects_tamper(wal_db):
     db_path, conn = wal_db
-    records = _insert_chained_records(conn, "session-h", count=3)
+    _insert_chained_records(conn, "session-h", count=3)
 
-    # Tamper with the second record's hash
+    # Tamper: break the ID pointer on the second record
     tampered = json.loads(conn.execute(
         "SELECT record_json FROM wal_records WHERE execution_id = ?",
         ("exec-session-h-1",),
     ).fetchone()[0])
-    tampered["record_hash"] = "f" * 128  # bogus hash
+    tampered["previous_record_id"] = "TAMPERED-POINTER"
     conn.execute(
         "UPDATE wal_records SET record_json = ? WHERE execution_id = ?",
         (json.dumps(tampered), "exec-session-h-1"),
@@ -303,7 +303,7 @@ def test_verify_chain_detects_tamper(wal_db):
     reader.close()
 
     assert result["valid"] is False
-    assert result["record_count"] == 3
+    assert result["records_checked"] == 3
     assert len(result["errors"]) > 0
 
 
@@ -315,7 +315,7 @@ def test_verify_chain_empty_session(wal_db):
     reader.close()
 
     assert result["valid"] is True
-    assert result["record_count"] == 0
+    assert result["records_checked"] == 0
 
 
 def test_list_sessions_pagination(wal_db):
