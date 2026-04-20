@@ -8,12 +8,8 @@ import sqlite3
 import tempfile
 
 import pytest
-from gateway.core import compute_sha3_512_string
 
 from gateway.lineage.reader import LineageReader
-
-
-_GENESIS_HASH = "0" * 128
 
 
 def _create_wal_db(db_path: str):
@@ -26,23 +22,16 @@ def _create_wal_db(db_path: str):
     return conn
 
 
-def _compute_hash(execution_id, policy_version, policy_result, prev_hash, seq, timestamp):
-    canonical = "|".join([
-        execution_id, str(policy_version), policy_result, prev_hash, str(seq), timestamp,
-    ])
-    return compute_sha3_512_string(canonical)
-
-
 def _insert_chained_records(conn, session_id: str, count: int = 3,
                             model_id: str = "qwen3:4b", provider: str = "ollama",
                             policy_result: str = "pass",
                             date_prefix: str = "2026-03-05"):
-    prev_hash = _GENESIS_HASH
     records = []
+    prev_id = None
     for i in range(count):
         eid = f"exec-{session_id}-{i}"
         ts = f"{date_prefix}T10:00:{i:02d}+00:00"
-        record_hash = _compute_hash(eid, 1, policy_result, prev_hash, i, ts)
+        record_id = f"0191{session_id[:8]}{i:04d}-0000-7000-8000-000000000000"
         metadata = {
             "response_policy_result": "skipped",
             "analyzer_decisions": [],
@@ -64,8 +53,8 @@ def _insert_chained_records(conn, session_id: str, count: int = 3,
             "total_tokens": 150,
             "latency_ms": 200.0 + i * 50,
             "sequence_number": i,
-            "record_hash": record_hash,
-            "previous_record_hash": prev_hash,
+            "record_id": record_id,
+            "previous_record_id": prev_id,
             "metadata": metadata,
         }
         conn.execute(
@@ -77,7 +66,7 @@ def _insert_chained_records(conn, session_id: str, count: int = 3,
             (eid, json.dumps(record), ts, session_id, ts, model_id, provider,
              100, 50, 150, 200.0 + i * 50, i, policy_result),
         )
-        prev_hash = record_hash
+        prev_id = record_id
         records.append(record)
     conn.commit()
     return records
