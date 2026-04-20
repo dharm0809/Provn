@@ -26,6 +26,7 @@ env/
 
 # --- Node / Dashboard ---
 node_modules/
+.truzenai-handoff/
 
 # --- Pytest / type checkers ---
 .pytest_cache/

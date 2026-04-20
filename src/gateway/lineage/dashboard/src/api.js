@@ -1,3 +1,5 @@
+import { normalizeTimelineRecords } from './utils';
+
 const API = '/v1/lineage';
 const CTRL_API = '/v1/control';
 const HEALTH_URL = '/health';
@@ -35,7 +37,12 @@ export async function getSessions(limit = 50, offset = 0, opts = {}) {
 }
 
 export async function getSession(sessionId) {
-  return fetchJSON(`${API}/sessions/${sessionId}`);
+  const enc = encodeURIComponent(String(sessionId ?? ''));
+  const data = await fetchJSON(`${API}/sessions/${enc}`);
+  if (data && data.records != null) {
+    data.records = normalizeTimelineRecords(data.records);
+  }
+  return data;
 }
 
 export async function getExecution(executionId) {
@@ -289,7 +296,8 @@ export async function forceRetrain(model) {
 }
 
 export async function getIntelligenceVerdicts(model, opts = {}) {
-  const sp = new URLSearchParams({ model });
+  const sp = new URLSearchParams();
+  sp.set('model', String(model ?? ''));
   if (opts.divergence_only) sp.set('divergence_only', 'true');
   if (opts.limit != null) sp.set('limit', String(opts.limit));
   return fetchControlJSON(`${INTEL_API}/verdicts?${sp.toString()}`);

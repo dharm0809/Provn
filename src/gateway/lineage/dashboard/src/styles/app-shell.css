@@ -1,0 +1,313 @@
+/* TruzenAI shell — handoff parity (Walacor Gateway Overview.html).
+   Scoped under .tz-shell so legacy index.css .sidebar / .app-layout rules
+   do not collapse the 56px icon rail on mobile. */
+
+.tz-shell.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+.tz-shell .sidebar {
+  width: 56px;
+  min-height: 100vh;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  flex-shrink: 0;
+  z-index: 50;
+  transform: none;
+  box-shadow: none;
+}
+
+.tz-shell .sidebar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, var(--gold-dim) 30%, var(--gold-dim) 70%, transparent);
+  opacity: 0.15;
+}
+
+.tz-shell .sb-brand {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  width: 100%;
+  cursor: pointer;
+  padding: 0;
+  color: inherit;
+}
+
+.tz-shell .sb-diamond {
+  color: var(--gold);
+  font-size: 18px;
+  text-shadow: 0 0 12px var(--gold-dim);
+}
+
+.tz-shell .sb-nav {
+  flex: 1;
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tz-shell .sb-item {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  border: none;
+  background: none;
+  position: relative;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tz-shell .sb-item:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.tz-shell .sb-item.active {
+  color: var(--gold);
+}
+
+.tz-shell .sb-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--gold);
+  box-shadow: 0 0 8px var(--gold-dim);
+}
+
+.tz-shell .content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tz-shell .topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  height: 42px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  flex-shrink: 0;
+}
+
+.tz-shell .topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.tz-shell .tz-view-label {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.tz-shell .topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.tz-shell .topbar-right .sep {
+  opacity: 0.3;
+}
+
+.tz-shell .topbar-right .time {
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+}
+
+.tz-shell .topbar-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tz-shell .topbar-sub-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.tz-shell .topbar-sub-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.tz-shell .topbar-sub-indicator.ok {
+  background: var(--green);
+  box-shadow: 0 0 4px var(--green);
+}
+
+.tz-shell .topbar-sub-indicator.down {
+  background: var(--amber);
+}
+
+/* Theme toggle (handoff) */
+.tz-shell .theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 4px 8px 4px 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.tz-shell .theme-toggle:hover {
+  border-color: var(--gold-dim);
+  color: var(--gold);
+  background: var(--gold-glow);
+}
+
+.tz-shell .theme-toggle-track {
+  width: 28px;
+  height: 16px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  position: relative;
+  display: inline-block;
+}
+
+.tz-shell .theme-toggle-thumb {
+  position: absolute;
+  top: 1px;
+  width: 12px;
+  height: 12px;
+  background: var(--gold);
+  color: var(--bg-root);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: left 0.2s ease;
+}
+
+.tz-shell .theme-toggle-thumb.dark {
+  left: 1px;
+}
+
+.tz-shell .theme-toggle-thumb.light {
+  left: 13px;
+}
+
+.tz-shell .theme-toggle-label {
+  font-weight: 500;
+}
+
+.tz-shell .tz-main {
+  padding: 20px 24px 60px;
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin: 0 auto;
+  overflow-x: hidden;
+}
+
+/* Staggered enter — handoff .fade-in */
+.tz-shell .fade-in > * {
+  animation: fadeIn 0.3s ease both;
+}
+.tz-shell .fade-in > *:nth-child(1) { animation-delay: 0ms; }
+.tz-shell .fade-in > *:nth-child(2) { animation-delay: 60ms; }
+.tz-shell .fade-in > *:nth-child(3) { animation-delay: 120ms; }
+.tz-shell .fade-in > *:nth-child(4) { animation-delay: 180ms; }
+.tz-shell .fade-in > *:nth-child(5) { animation-delay: 240ms; }
+
+.tz-shell .tz-mobile-menu-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  align-items: center;
+  justify-content: center;
+}
+
+.tz-shell .tz-backdrop {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .tz-shell .topbar-sub {
+    display: none;
+  }
+  .tz-shell .tz-meta-compact {
+    display: none;
+  }
+  .tz-shell .tz-mobile-menu-btn {
+    display: inline-flex;
+  }
+  .tz-shell .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 220;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+  .tz-shell.tz-mobile-nav-open .sidebar {
+    transform: translateX(0);
+  }
+  .tz-shell .tz-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 210;
+    background: rgba(0, 0, 0, 0.45);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+  .tz-shell.tz-mobile-nav-open .tz-backdrop {
+    display: block;
+  }
+}

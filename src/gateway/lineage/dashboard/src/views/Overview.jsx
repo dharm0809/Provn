@@ -121,22 +121,23 @@ function RangeBar({ range, setRange }) {
 }
 
 // ─── Counters (with delta arrows + tick animation) ────────────────────────────
-function Counters({ counters, prev }) {
+function Counters({ counters, prev, variant = 'flush' }) {
   const items = [
     { key: 'rps',   label: 'req/s',    value: counters.rps < 0.1 && counters.rps > 0 ? counters.rps.toFixed(2) : counters.rps.toFixed(1), unit: '', color: 'gold',  dot: 'var(--gold)' },
     { key: 'tps',   label: 'tokens/s', value: counters.tps < 1 ? counters.tps.toFixed(1) : formatNumber(Math.round(counters.tps)),        unit: '', color: '',      dot: 'var(--blue)' },
     { key: 'pct',   label: 'allowed',  value: counters.pct.toFixed(1),                                                                    unit: '%', color: 'green', dot: 'var(--green)' },
     { key: 'total', label: 'total',    value: formatNumber(counters.total),                                                               unit: '', color: '',      dot: 'var(--text-muted)' },
   ];
+  const gridClass = variant === 'spotlight' ? 'counters variant-spotlight' : 'counters';
   return (
-    <div className="counters">
+    <div className={gridClass}>
       {items.map(c => {
         const cur = counters[c.key] || 0;
         const pv  = prev ? (prev[c.key] || 0) : null;
         const delta = pv != null ? cur - pv : 0;
         const changed = pv != null && Math.abs(delta) > 0.001;
         return (
-          <div key={c.key} className="counter">
+          <div key={c.key} className={['counter', c.color].filter(Boolean).join(' ')}>
             <div className="counter-label">
               <span className="counter-dot" style={{ background: c.dot }} />
               {c.label}
@@ -175,6 +176,16 @@ function Skeleton() {
 // ─── Main Overview ────────────────────────────────────────────────────────────
 export default function Overview({ navigate, health }) {
   const isLight = useLineageTheme();
+  /** Default spotlight (handoff); set localStorage wal_counters_variant=flush for the strip layout. */
+  const counterVariant = useMemo(() => {
+    try {
+      const v = localStorage.getItem('wal_counters_variant');
+      if (v === 'flush') return 'flush';
+      return 'spotlight';
+    } catch {
+      return 'spotlight';
+    }
+  }, []);
 
   const [sessions,   setSessions]   = useState([]);
   const [attempts,   setAttempts]   = useState([]);
@@ -367,7 +378,7 @@ export default function Overview({ navigate, health }) {
           </div>
         )}
 
-        <Counters counters={counters} prev={prevCounters} />
+        <Counters counters={counters} prev={prevCounters} variant={counterVariant} />
       </div>
 
       {/* ── Token + Latency twin ── */}
