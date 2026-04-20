@@ -1,4 +1,4 @@
-"""Phase 25 Task 13+: ONNX verdict harvesters.
+"""ONNX verdict harvesters.
 
 Harvesters run AFTER a request has been audited to the WAL, inspect the
 captured context (response, analyzer decisions, overflow keys, next-turn

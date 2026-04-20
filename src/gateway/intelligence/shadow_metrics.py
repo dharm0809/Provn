@@ -1,4 +1,4 @@
-"""Phase 25 Task 23: shadow validation metrics + McNemar paired test.
+"""shadow validation metrics + McNemar paired test.
 
 Reads `shadow_comparisons` rows for a given `(model, candidate_version)`,
 joins with the verdict log's `divergence_signal` (when available) to get

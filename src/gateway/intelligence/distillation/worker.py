@@ -1,4 +1,4 @@
-"""Phase 25 Task 20: DistillationWorker — scheduler + orchestration.
+"""DistillationWorker — scheduler + orchestration.
 
 Ties the dataset builder (Task 17), the per-model trainers (Task 18-19),
 and the registry (Task 9-12) into a single background asyncio loop. A

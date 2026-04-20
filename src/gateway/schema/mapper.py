@@ -134,7 +134,7 @@ class SchemaMapper:
         self._label_to_idx: dict[str, int] = {}
         self._verdict_buffer = verdict_buffer
 
-        # Phase 25: optional `ModelRegistry` wiring — see `intelligence/reload.py`.
+        # optional `ModelRegistry` wiring — see `intelligence/reload.py`.
         from gateway.intelligence.reload import ReloadState
         self._reload_state = ReloadState(registry=registry, model_name=model_name)
 
@@ -174,7 +174,7 @@ class SchemaMapper:
             CanonicalResponse with all recognized fields mapped and
             unrecognized fields preserved in overflow.
         """
-        # Phase 25: refresh session from registry if a new version was promoted.
+        # refresh session from registry if a new version was promoted.
         self._maybe_reload()
 
         if not isinstance(raw, dict):
@@ -192,7 +192,7 @@ class SchemaMapper:
                 # 4. Assemble canonical response
                 result = self._assemble(fields, classifications, raw)
 
-        # Phase 25: record verdict for self-learning (observational only).
+        # record verdict for self-learning (observational only).
         # Never allowed to break inference — wrap the whole stanza defensively.
         if self._verdict_buffer is not None:
             try:

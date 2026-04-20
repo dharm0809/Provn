@@ -1,4 +1,4 @@
-"""Phase 25 Phase E trainers.
+"""ONNX distillation trainers.
 
 One module per ONNX model. Each trainer takes a
 `(X, y, version, candidates_dir)` input and produces a candidate `.onnx`

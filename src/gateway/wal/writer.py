@@ -82,7 +82,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         ("wal_records", "parent_execution_id", "TEXT"),
         ("wal_records", "tool_name", "TEXT"),
         ("wal_records", "tool_type", "TEXT"),
-        # Phase 25: hot metadata fields promoted to columns so the sessions-list
+        # hot metadata fields promoted to columns so the sessions-list
         # query (_SESSIONS_AGG_SUBQUERY in lineage/reader.py) stops calling
         # json_extract() 6x per row on a large record_json blob.
         ("wal_records", "request_type", "TEXT"),

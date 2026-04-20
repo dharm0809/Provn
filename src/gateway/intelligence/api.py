@@ -1,4 +1,4 @@
-"""Phase 25 Phase G: intelligence control-plane API.
+"""intelligence control-plane API.
 
 Routes under `/v1/control/intelligence/...` expose the intelligence
 layer's runtime state (production models, candidates, lifecycle history,

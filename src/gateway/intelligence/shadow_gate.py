@@ -1,4 +1,4 @@
-"""Phase 25 Task 24: promotion-gate evaluation + auto-promote branch.
+"""promotion-gate evaluation + auto-promote branch.
 
 Decides whether a candidate can leave the shadow pen. Consumes
 `ShadowMetrics` from Task 23, checks every threshold the operator has

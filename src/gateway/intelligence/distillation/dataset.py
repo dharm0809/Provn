@@ -1,4 +1,4 @@
-"""Phase 25 Task 17: training dataset builder.
+"""training dataset builder.
 
 Pulls divergent verdict rows, dedupes them, caps per-session
 contribution to prevent a single noisy session from skewing the

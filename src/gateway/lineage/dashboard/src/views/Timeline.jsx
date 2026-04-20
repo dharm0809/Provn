@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import { sha3_512 } from 'js-sha3';
 import { getSession, verifySession } from '../api';
 import { formatSessionId, displayModel, timeAgo, truncHash, getTokenCount, policyBadgeClass, copyToClipboard, fileTypeInfo, formatBytes } from '../utils';
 
@@ -37,69 +36,21 @@ export default function Timeline({ navigate, sessionId }) {
     setVerifyResult(null);
     setNodeResults([]);
     try {
-      const data = await getSession(sessionId);
-      const recs = data.records || [];
-      if (!recs.length) {
-        setVerifyResult({ valid: true, message: 'No records to verify' });
-        setVerifying(false);
-        return;
-      }
-      const errors = [];
-      const GENESIS = '0'.repeat(128);
-      let prevHash = GENESIS;
-      const results = [];
-
-      for (let i = 0; i < recs.length; i++) {
-        const r = recs[i];
-        let ok = true;
-        if (!r.record_hash) {
-          errors.push(`Record #${i}: missing record_hash`);
-          ok = false;
-        } else {
-          if (r.previous_record_hash != null && r.previous_record_hash !== prevHash) {
-            errors.push(`Record #${i}: previous_record_hash mismatch`);
-            ok = false;
-          }
-          const canonical = [
-            r.execution_id,
-            String(r.policy_version ?? ''),
-            String(r.policy_result ?? ''),
-            String(r.previous_record_hash ?? ''),
-            String(r.sequence_number ?? ''),
-            String(r.timestamp ?? ''),
-          ].join('|');
-          const computed = sha3_512(canonical);
-          if (computed !== r.record_hash) {
-            errors.push(`Record #${i}: hash mismatch (client recompute)`);
-            ok = false;
-          }
-          prevHash = r.record_hash;
-        }
-        results.push(ok);
-      }
-
-      // Animate nodes sequentially
-      for (let i = 0; i < results.length; i++) {
+      const result = await verifySession(sessionId);
+      const n = result.records_checked ?? 0;
+      // Animate nodes: valid if no errors for that record (all-or-nothing per session)
+      const nodeOk = result.valid;
+      for (let i = 0; i < n; i++) {
         await new Promise(r => setTimeout(r, 180));
-        setNodeResults(prev => [...prev, results[i]]);
+        setNodeResults(prev => [...prev, nodeOk]);
       }
-
-      if (errors.length === 0) {
-        setVerifyResult({ valid: true, message: `Chain Valid — ${recs.length} record${recs.length !== 1 ? 's' : ''} verified, all hashes match` });
+      if (result.valid) {
+        setVerifyResult({ valid: true, message: `Chain Valid — ${n} record${n !== 1 ? 's' : ''} verified, ID pointers link · Walacor sealed`, attestation: result.walacor_attestation });
       } else {
-        setVerifyResult({ valid: false, errors, message: `Chain Invalid — ${errors.length} error${errors.length !== 1 ? 's' : ''}` });
+        setVerifyResult({ valid: false, errors: result.errors, message: `Chain Invalid — ${result.errors.length} error${result.errors.length !== 1 ? 's' : ''}`, attestation: result.walacor_attestation });
       }
-    } catch {
-      // Fallback to server-side
-      try {
-        const result = await verifySession(sessionId);
-        setVerifyResult(result.valid
-          ? { valid: true, message: `Chain Valid (server-side) — ${result.record_count} record(s)` }
-          : { valid: false, errors: result.errors, message: 'Chain Invalid (server-side)' }
-        );
-      } catch (e2) {
-        setVerifyResult({ valid: false, message: `Verification failed: ${e2.message}`, errors: [] });
-      }
+    } catch (e) {
+      setVerifyResult({ valid: false, message: `Verification failed: ${e.message}`, errors: [] });
     }
     setVerifying(false);
   }, [sessionId]);
@@ -201,19 +152,21 @@ export default function Timeline({ navigate, sessionId }) {
                       );
                     })}
                     {tokens && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>{tokens} tokens</span>}
-                    <span className="hash-gold">
-                      <span className="copy-wrap">
-                        <span className="copy-text">{truncHash(r.record_hash, 20)}</span>
-                        <CopyBtn text={r.record_hash} />
+                    {(r.record_id || r.record_hash) && (
+                      <span className="hash-gold">
+                        <span className="copy-wrap">
+                          <span className="copy-text">{truncHash(r.record_id || r.record_hash, 20)}</span>
+                          <CopyBtn text={r.record_id || r.record_hash} />
+                        </span>
                       </span>
-                    </span>
+                    )}
                     {r.record_signature && (
                       <span className="badge badge-gold" title={`Ed25519: ${r.record_signature}`} style={{ cursor: 'default', fontSize: 10 }}>
                         signed
                       </span>
                     )}
-                    {(r._envelope || r._walacor_eid || r.EId) && (
-                      <span className="badge badge-gold" title={`EId: ${r._walacor_eid || r.EId || ''}\nBlock: ${(r._envelope || {}).block_id || '—'}`} style={{ cursor: 'default' }}>
+                    {(r.walacor_block_id || r.walacor_dh || r._walacor_eid || r.EId) && (
+                      <span className="badge badge-gold" title={`Block: ${r.walacor_block_id || '—'}\nDH: ${r.walacor_dh || '—'}\nTrans: ${r.walacor_trans_id || '—'}`} style={{ cursor: 'default' }}>
                         ◆ on-chain
                       </span>
                     )}

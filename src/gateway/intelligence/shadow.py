@@ -1,4 +1,4 @@
-"""Phase 25 Task 22: shadow inference runtime.
+"""shadow inference runtime.
 
 The plan is "run the candidate in parallel for every production inference
 and record a paired comparison". Three concerns:

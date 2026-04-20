@@ -1,4 +1,4 @@
-"""Phase 25 Phase E: closed-loop distillation.
+"""closed-loop distillation.
 
 Components
 ----------

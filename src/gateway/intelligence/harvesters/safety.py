@@ -1,4 +1,4 @@
-"""Phase 25 Task 15: Safety harvester — LlamaGuard as teacher.
+"""Safety harvester — LlamaGuard as teacher.
 
 When both the ONNX `SafetyClassifier` (student) and `LlamaGuardAnalyzer`
 (teacher) ran on the same response, compare their emitted categories. If

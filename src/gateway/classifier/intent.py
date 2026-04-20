@@ -69,7 +69,7 @@ class IntentClassifier:
         self._label_map: dict[int, str] = {}
         self._verdict_buffer = verdict_buffer
 
-        # Phase 25: optional `ModelRegistry` wiring. When set, the client
+        # optional `ModelRegistry` wiring. When set, the client
         # rebuilds its `InferenceSession` whenever the registry's per-model
         # generation counter moves (i.e. after a promote/rollback). Held in
         # a ReloadState so the client + helper share a single source of truth.
@@ -98,7 +98,7 @@ class IntentClassifier:
         Tier 1 checks are deterministic (100% accurate).
         Tier 2 ML runs only when Tier 1 doesn't match.
         """
-        # Phase 25: check for a freshly promoted model before inferring.
+        # check for a freshly promoted model before inferring.
         # Placed ABOVE tier1 so deterministic-rule hits still pick up new
         # candidate versions for the audit-logged probability hit later.
         self._maybe_reload()
@@ -117,7 +117,7 @@ class IntentClassifier:
                 tier="deterministic", reason="no_ml_model_default",
             )
 
-        # Phase 25: record verdict for self-learning (observational only).
+        # record verdict for self-learning (observational only).
         # Never allowed to break inference — wrap the whole stanza defensively.
         if self._verdict_buffer is not None:
             try:
