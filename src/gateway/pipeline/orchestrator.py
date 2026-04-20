@@ -528,7 +528,7 @@ from contextlib import asynccontextmanager
 async def _session_chain_lock(ctx, session_id: str | None):
     """Serialize the (reserve-seq → write-record → update-tracker) span
     per session so concurrent same-session requests can never read a
-    stale `last_record_hash` and produce a broken Merkle chain.
+    stale `last_record_id` and produce a broken ID-pointer chain.
 
     No-ops when session tracking is disabled or session_id is missing.
     Works for both in-memory and Redis trackers — each exposes
@@ -742,7 +742,7 @@ async def _after_stream_record(
 
         # Serialize the full chain critical section per session so
         # concurrent same-session requests can't race and break the
-        # Merkle linkage. The `_session_chain_lock` no-ops when
+        # ID-pointer chain linkage. The `_session_chain_lock` no-ops when
         # session tracking is off.
         async with _session_chain_lock(ctx, session_id):
             record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
