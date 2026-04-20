@@ -54,7 +54,7 @@ class VerdictBuffer:
             from gateway.metrics.prometheus import verdict_buffer_size
             verdict_buffer_size.set(len(self._buf))
         except Exception:
-            pass
+            logger.debug("verdict_buffer_size metric failed", exc_info=True)
 
     def drain(self, max_batch: int = 500) -> list[ModelVerdict]:
         out: list[ModelVerdict] = []

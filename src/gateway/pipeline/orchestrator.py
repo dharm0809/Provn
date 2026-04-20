@@ -1022,7 +1022,7 @@ async def _budget_check(
             from gateway.metrics.prometheus import budget_failopen_total
             budget_failopen_total.inc()
         except Exception:
-            pass
+            logger.debug("budget_failopen_total metric increment failed", exc_info=True)
         return None, 0, whb, reason, None  # fail-open: allow request
     budget_rem: int | None = remaining if remaining >= 0 else None
     if not allowed:
@@ -2291,8 +2291,8 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                     status_code=http_response.status_code,
                     headers=rebuilt_headers,
                 )
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+        except (json.JSONDecodeError, KeyError, TypeError) as _rb_err:
+            logger.debug("Response body rebuild skipped (non-fatal): %s", _rb_err)
     fwd_rtt = time.perf_counter() - t_fwd
     timings["forward_ms"] = round(fwd_rtt * 1000, 1)
     forward_duration_by_model.labels(model=call.model_id or "unknown").observe(fwd_rtt)

@@ -62,14 +62,14 @@ class VerdictFlushWorker:
                     )
                     intelligence_db_write_failures_total.inc()
                 except Exception:
-                    pass
+                    logger.debug("intelligence_db_write_failures_total metric failed", exc_info=True)
 
     def _update_size_gauge(self) -> None:
         try:
             from gateway.metrics.prometheus import verdict_buffer_size
             verdict_buffer_size.set(self._buf.size)
         except Exception:
-            pass
+            logger.debug("verdict_buffer_size metric failed", exc_info=True)
 
     def stop(self) -> None:
         self._running = False

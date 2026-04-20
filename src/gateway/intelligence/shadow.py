@@ -241,7 +241,7 @@ async def fire_shadow_text(
             from gateway.metrics.prometheus import shadow_inference_errors_total
             shadow_inference_errors_total.labels(model=model).inc()
         except Exception:
-            pass
+            logger.debug("shadow_inference_errors_total metric failed", exc_info=True)
         await runner.record(
             model=model,
             candidate_version=candidate.version,
