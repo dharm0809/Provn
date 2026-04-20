@@ -18,7 +18,8 @@ _CSV_COLUMNS = [
     "execution_id", "timestamp", "session_id", "model_id", "provider",
     "model_attestation_id", "policy_result", "latency_ms",
     "prompt_tokens", "completion_tokens", "total_tokens",
-    "sequence_number", "record_hash",
+    "sequence_number", "record_id", "previous_record_id",
+    "walacor_block_id", "walacor_trans_id", "walacor_dh",
 ]
 
 
