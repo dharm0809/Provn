@@ -8,9 +8,9 @@ Walacor Gateway — ASGI audit/governance proxy for LLM providers. Source: `src/
 - If you're unsure which applies, ask me before starting
 
 ## Key Architectural Facts
-- Gateway does NOT compute SHA3-512 hashes of prompt/response text — it sends full text; Walacor backend hashes on ingest
-- Session chain `record_hash` IS computed by the gateway (metadata fields only: execution_id, policy_version, policy_result, previous_record_hash, sequence_number, timestamp)
-- Tool input/output hashes ARE computed by the gateway (orchestrator.py, for MCP/tool interactions)
+- Gateway does NOT compute SHA3-512 hashes — it sends full text and tool data; Walacor backend hashes on ingest (returns DH as tamper-evident checkpoint)
+- Session chain uses UUIDv7 ID-pointer chain: each record carries `record_id` (UUIDv7) + `previous_record_id` (pointer to prior record); no gateway-side SHA3 Merkle chain
+- Tool events store `input_data`/`output_data` (actual content, not hashes); Walacor hashes tool data on ingest
 - Model routing reads `model` field from request body; routes by fnmatch before path-based routing
 - One port (8000) serves all providers; audit records are differentiated by model/provider/attestation_id
 - `WALACOR_SKIP_GOVERNANCE=false` (default) = full governance; `=true` = transparent proxy (audit-only, no chain/policy/budget)
@@ -26,9 +26,9 @@ Walacor Gateway — ASGI audit/governance proxy for LLM providers. Source: `src/
 - `OVERVIEW.md` — one-page summary
 
 ## Doc Conventions
-- WIKI-EXECUTIVE.md: plain English only — no SHA3-512 formulas, no code snippets, no `record_hash = ...` blocks
-- Session chain formula belongs in README/FLOW docs, not the wiki
-- "We compute hashes" only applies to: session chain record_hash (G5) and tool input/output hashes
+- WIKI-EXECUTIVE.md: plain English only — no SHA3-512 formulas, no code snippets
+- Session chain section in README/FLOW docs: describe ID-pointer chain (record_id + previous_record_id), not Merkle hash chain
+- Gateway computes no SHA3 hashes; Ed25519 signing still applies to canonical ID string
 
 ## Testing
 - Async tests use `@pytest.mark.anyio` with `anyio_backend` fixture (NOT `pytest.mark.asyncio`)
@@ -41,7 +41,7 @@ Walacor Gateway — ASGI audit/governance proxy for LLM providers. Source: `src/
   - Tier 3: `tier3_performance.py` (baseline, ramp, sustained load, SLA card)
   - Tier 4: `tier4_resilience.py` (Ollama down, gateway restart, streaming safety — Docker only)
   - Tier 5: `tier5_compliance.py` (chain audit 50 sessions, EU AI Act, health, metrics, SLA card)
-  - Tier 6: `tier6_advanced.py` (web search, tool audit SHA3-512, multi-turn chain, attachments, content analysis, MCP registry)
+  - Tier 6: `tier6_advanced.py` (web search, tool audit, multi-turn chain, attachments, content analysis, MCP registry)
   - Tier 6b: `tier6_mcp.py` (MCP fetch/time tools, multi-tool, error handling, chain after tools, WAL dual-write — native only)
   - Tier 7: `tier7_gauntlet.py` (89 checks: control plane CRUD, caller identity, PII, streaming, multi-model, metrics depth, lineage completeness, 5-turn chain, WAL burst, completeness invariant, health depth, models API)
   - `scripts/native-setup.sh` — runs gateway natively with MCP servers (Ollama stays in Docker)
@@ -90,8 +90,8 @@ Walacor Gateway — ASGI audit/governance proxy for LLM providers. Source: `src/
 - Static dashboard served at `/lineage/` via `StaticFiles(html=True)`
 - Lineage and `/v1/lineage` paths skip `api_key_middleware` and `completeness_middleware`
 - `WALACOR_LINEAGE_ENABLED=true` (default); lineage always inits WAL even in skip_governance mode
-- Chain verification recomputes SHA3-512 server-side; client-side uses js-sha3 CDN
-- Dashboard tool events display: rich cards with tool name/type/source badges, terminal-style input data, clickable source links, SHA3-512 hashes, content analysis verdicts, duration, iteration count
+- Chain verification walks `previous_record_id` pointers server-side; dashboard calls `verifySession()` API (no client-side js-sha3)
+- Dashboard tool events display: rich cards with tool name/type/source badges, terminal-style input data, clickable source links, content analysis verdicts, duration, iteration count
 - Timeline chain cards show gold tool badges (`⚙ web_search`) for tool-augmented requests
 - **Live throughput chart**: Overview page renders a canvas-based real-time telemetry graph polling `/metrics` every 3 seconds; shows req/s (gold line), allowed (green fill), blocked (red fill), animated pulse dot on latest point; 60-point buffer (3 min history); live counters below (req/s, tokens/s, % allowed, total); `ThroughputChart` class manages lifecycle (starts on overview, stops on navigation)
 - **Execution record `model_id`/`provider` fields**: `build_execution_record()` in `hasher.py` accepts `model_id` and `provider` params; stored alongside `model_attestation_id` so lineage queries show actual model names; `list_sessions` SQL uses `COALESCE(model_id, model_attestation_id)` for backward compat with older records
