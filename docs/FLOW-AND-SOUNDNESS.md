@@ -589,8 +589,7 @@ flowchart TD
     CHAIN -- Yes --> APPLY_CHAIN[await _apply_session_chain]
 
     APPLY_CHAIN --> GET_NEXT[await session_chain\n.next_chain_values\nsession_id]
-    GET_NEXT --> COMPUTE_HASH[compute_record_hash\nSHA3-512 over:\nexecution_id + policy_version\n+ policy_result + prev_hash\n+ seq_num + timestamp]
-    COMPUTE_HASH --> ATTACH[record.sequence_number = seq_num\nrecord.previous_record_hash = prev_hash\nrecord.record_hash = hash_val]
+    GET_NEXT --> ATTACH[record.sequence_number = seq_num\nrecord.previous_record_id = prev_record_id\nrecord.record_id = UUIDv7 from hasher]
 
     SKIP_CHAIN --> STORE
     ATTACH --> STORE
@@ -605,10 +604,10 @@ flowchart TD
     SET_EXEC_ID --> TOOL_EVENTS[_write_tool_events\nfor each ToolInteraction]
 
     TOOL_EVENTS --> TOOL_LOOP[For each interaction:\nbuild first-class tool event record\noptional content analysis on output\nwrite to Walacor or WAL]
-    TOOL_LOOP --> CHAIN_UPDATE{session_id AND\nsession_chain AND\nrecord_hash_val set?}
+    TOOL_LOOP --> CHAIN_UPDATE{session_id AND\nsession_chain AND\napply_chain returned True?}
 
     CHAIN_UPDATE -- No --> DONE
-    CHAIN_UPDATE -- Yes --> UPDATE[await session_chain.update\nsession_id, seq_num, record_hash\nfor in-memory: update dict\nfor Redis: HSET hash + EXPIRE]
+    CHAIN_UPDATE -- Yes --> UPDATE[await session_chain.update\nsession_id, seq_num, record_id\nfor in-memory: update dict\nfor Redis: HSET record_id + EXPIRE]
     UPDATE --> DONE([Record committed])
 
     style DONE fill:#2d8a4e,color:#fff
@@ -626,30 +625,29 @@ flowchart TD
 
     WHICH -- In-Memory --> IM_LOCK[Acquire threading.Lock]
     IM_LOCK --> IM_LOOKUP{state in _sessions?}
-    IM_LOOKUP -- No --> IM_GENESIS[Return\n0, GENESIS_HASH\nseq starts at ZERO]
-    IM_LOOKUP -- Yes --> IM_RETURN[Return\nstate.seq + 1\nstate.last_record_hash]
+    IM_LOOKUP -- No --> IM_GENESIS[Return ChainValues\nseq=0, prev_record_id=None]
+    IM_LOOKUP -- Yes --> IM_RETURN[Return ChainValues\nseq+1, state.last_record_id]
 
     WHICH -- Redis --> REDIS_KEY[key = gateway:session:session_id]
     REDIS_KEY --> REDIS_PIPE[Open MULTI transaction pipeline]
     REDIS_PIPE --> HINCRBY[HINCRBY key 'seq' 1\natomic increment\nreturns NEW value]
-    HINCRBY --> HGET[HGET key 'hash'\nreturns current hash\nBEFORE this call's update]
+    HINCRBY --> HGET[HGET key 'record_id'\nreturns current id\nBEFORE this call's update]
     HGET --> EXPIRE[EXPIRE key ttl]
     EXPIRE --> EXEC_PIPE[Execute pipeline atomically]
     EXEC_PIPE --> SEQ_RESULT[seq_num = int returned\nfrom HINCRBY]
-    SEQ_RESULT --> HASH_RESULT{raw_hash returned\nfrom HGET?}
-    HASH_RESULT -- No data\nfirst call --> REDIS_GENESIS[Return\nseq=1, GENESIS_HASH\nseq starts at ONE]
-    HASH_RESULT -- Has data --> REDIS_RETURN[Return\nseq=HINCRBY result\ndecoded hash string]
+    SEQ_RESULT --> ID_RESULT{record_id returned\nfrom HGET?}
+    ID_RESULT -- No data\nfirst call --> REDIS_GENESIS[Return ChainValues\nseq=1, prev_record_id=None]
+    ID_RESULT -- Has data --> REDIS_RETURN[Return ChainValues\nseq=HINCRBY result\nprev_record_id=decoded string]
 
-    IM_GENESIS --> NOTE1[⚠️ In-memory first record: seq=0]
-    REDIS_GENESIS --> NOTE2[⚠️ Redis first record: seq=1\nInconsistent with in-memory!]
     IM_RETURN --> AFTER_NEXT
     REDIS_RETURN --> AFTER_NEXT
+    IM_GENESIS --> AFTER_NEXT
+    REDIS_GENESIS --> AFTER_NEXT
 
-    AFTER_NEXT([seq_num and prev_hash\nreturned to caller]) --> COMPUTE[compute_record_hash\nattach to record]
-    COMPUTE --> WHICH2{Which tracker\nfor update?}
+    AFTER_NEXT([ChainValues returned to caller\nseq_num and prev_record_id]) --> WHICH2{Which tracker\nfor update?}
 
-    WHICH2 -- In-Memory --> IM_UPDATE[Acquire threading.Lock\nsessions\[session_id\] = SessionState\nseq=n, hash=record_hash\nevict if over max_sessions]
-    WHICH2 -- Redis --> REDIS_UPDATE[Open MULTI pipeline\nHSET key 'hash' record_hash\nEXPIRE key ttl\nExecute]
+    WHICH2 -- In-Memory --> IM_UPDATE[sessions\[session_id\] = SessionState\nseq=n, last_record_id=record_id\nevict if over max_sessions]
+    WHICH2 -- Redis --> REDIS_UPDATE[Open MULTI pipeline\nHSET key 'record_id' record_id\nEXPIRE key ttl\nExecute]
 
     IM_UPDATE --> DONE([Chain updated])
     REDIS_UPDATE --> DONE
