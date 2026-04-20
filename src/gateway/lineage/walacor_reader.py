@@ -205,6 +205,7 @@ class WalacorLineageReader:
         try:
             rows = await self._client.query_complex(self._exec_etid, pipeline)
         except Exception:
+            logger.warning("User-record metadata query failed (non-fatal)", exc_info=True)
             return {}
 
         # Group by session: use last user question, but OR-merge boolean flags
