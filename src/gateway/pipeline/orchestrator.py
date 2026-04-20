@@ -1670,7 +1670,7 @@ async def _build_and_write_record(
             )
             await _intel_worker.enqueue(job)
         except Exception:
-            pass  # Truly fire-and-forget
+            logger.debug("Intelligence enqueue failed (non-fatal)", exc_info=True)
 
     # ── Phase 25 Task 13: harvester dispatch (fire-and-forget) ──────
     # Emits one HarvesterSignal per ONNX model that participated in the
