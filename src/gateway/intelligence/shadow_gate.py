@@ -161,7 +161,7 @@ async def process_candidate(
                 from gateway.metrics.prometheus import model_promoted_total
                 model_promoted_total.labels(model=metrics.model_name).inc()
             except Exception:
-                pass
+                logger.debug("model_promoted_total metric failed", exc_info=True)
             logger.info(
                 "auto-promoted %s candidate %s (approver=%s)",
                 metrics.model_name, metrics.candidate_version, approver,
@@ -202,7 +202,7 @@ async def process_candidate(
                     reason=f"gate:{reason_key}",
                 ).inc()
             except Exception:
-                pass
+                logger.debug("candidate_rejected_total metric failed", exc_info=True)
 
     return GateResult(
         passed=gate.passed,
