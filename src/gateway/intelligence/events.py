@@ -15,7 +15,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 # Finite set of rejection stages. Typed so callers catch typos at type-check time
 # rather than corrupting the audit stream with misspelled stage labels.
@@ -24,6 +24,42 @@ RejectionStage = Literal["load", "sanity", "shadow", "manual"]
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class _TrainingFingerprintPayload(TypedDict):
+    model_name: str
+    row_ids: list[int]
+    content_hash: str
+    dataset_hash: str
+
+
+class _CandidateCreatedPayload(TypedDict):
+    model_name: str
+    candidate_version: str
+    dataset_hash: str
+    training_sample_count: int
+
+
+class _ShadowValidationPayload(TypedDict):
+    model_name: str
+    candidate_version: str
+    metrics: dict[str, Any]
+    passed: bool
+
+
+class _PromotionPayload(TypedDict):
+    model_name: str
+    candidate_version: str
+    dataset_hash: str
+    shadow_metrics: dict[str, Any]
+    approver: str
+
+
+class _RejectionPayload(TypedDict):
+    model_name: str
+    candidate_version: str
+    reason: str
+    stage: RejectionStage
 
 
 class EventType(str, Enum):
@@ -65,72 +101,62 @@ def _dataset_hash(row_ids: list[int], content_hash: str) -> str:
 def build_training_fingerprint(
     *, model_name: str, row_ids: list[int], content_hash: str
 ) -> LifecycleEvent:
-    return LifecycleEvent(
-        event_type=EventType.TRAINING_DATASET_FINGERPRINT,
-        payload={
-            "model_name": model_name,
-            "row_ids": sorted(row_ids),
-            "content_hash": content_hash,
-            "dataset_hash": _dataset_hash(row_ids, content_hash),
-        },
-    )
+    payload: _TrainingFingerprintPayload = {
+        "model_name": model_name,
+        "row_ids": sorted(row_ids),
+        "content_hash": content_hash,
+        "dataset_hash": _dataset_hash(row_ids, content_hash),
+    }
+    return LifecycleEvent(event_type=EventType.TRAINING_DATASET_FINGERPRINT, payload=payload)
 
 
 def build_candidate_created(
     *, model_name: str, candidate_version: str, dataset_hash: str,
     training_sample_count: int,
 ) -> LifecycleEvent:
-    return LifecycleEvent(
-        event_type=EventType.CANDIDATE_CREATED,
-        payload={
-            "model_name": model_name,
-            "candidate_version": candidate_version,
-            "dataset_hash": dataset_hash,
-            "training_sample_count": training_sample_count,
-        },
-    )
+    payload: _CandidateCreatedPayload = {
+        "model_name": model_name,
+        "candidate_version": candidate_version,
+        "dataset_hash": dataset_hash,
+        "training_sample_count": training_sample_count,
+    }
+    return LifecycleEvent(event_type=EventType.CANDIDATE_CREATED, payload=payload)
 
 
 def build_shadow_validation_complete(
     *, model_name: str, candidate_version: str,
     metrics: dict[str, Any], passed: bool,
 ) -> LifecycleEvent:
-    return LifecycleEvent(
-        event_type=EventType.SHADOW_VALIDATION_COMPLETE,
-        payload={
-            "model_name": model_name,
-            "candidate_version": candidate_version,
-            "metrics": metrics,
-            "passed": passed,
-        },
-    )
+    payload: _ShadowValidationPayload = {
+        "model_name": model_name,
+        "candidate_version": candidate_version,
+        "metrics": metrics,
+        "passed": passed,
+    }
+    return LifecycleEvent(event_type=EventType.SHADOW_VALIDATION_COMPLETE, payload=payload)
 
 
 def build_promotion_event(
     *, model_name: str, candidate_version: str, dataset_hash: str,
     shadow_metrics: dict[str, Any], approver: str,
 ) -> LifecycleEvent:
-    return LifecycleEvent(
-        event_type=EventType.MODEL_PROMOTED,
-        payload={
-            "model_name": model_name,
-            "candidate_version": candidate_version,
-            "dataset_hash": dataset_hash,
-            "shadow_metrics": shadow_metrics,
-            "approver": approver,
-        },
-    )
+    payload: _PromotionPayload = {
+        "model_name": model_name,
+        "candidate_version": candidate_version,
+        "dataset_hash": dataset_hash,
+        "shadow_metrics": shadow_metrics,
+        "approver": approver,
+    }
+    return LifecycleEvent(event_type=EventType.MODEL_PROMOTED, payload=payload)
 
 
 def build_model_rejected(
     *, model_name: str, candidate_version: str, reason: str, stage: RejectionStage,
 ) -> LifecycleEvent:
-    return LifecycleEvent(
-        event_type=EventType.MODEL_REJECTED,
-        payload={
-            "model_name": model_name,
-            "candidate_version": candidate_version,
-            "reason": reason,
-            "stage": stage,
-        },
-    )
+    payload: _RejectionPayload = {
+        "model_name": model_name,
+        "candidate_version": candidate_version,
+        "reason": reason,
+        "stage": stage,
+    }
+    return LifecycleEvent(event_type=EventType.MODEL_REJECTED, payload=payload)
