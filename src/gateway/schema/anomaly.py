@@ -20,9 +20,30 @@ import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+# Finite set of deterministic anomaly codes. Statistical codes (e.g.
+# "latency_3.2sigma") are free-form strings appended by _check_stats.
+AnomalyCode = Literal[
+    "empty_response",
+    "token_sum_mismatch",
+    "latency_extreme",
+    "missing_execution_id",
+    "response_after_deny",
+]
+
+WarningCode = Literal[
+    "prompt_tokens_zero",
+    "token_ratio_low",
+    "token_ratio_high",
+    "latency_suspiciously_fast",
+    "missing_session_id",
+    "missing_model_id",
+    "chain_hash_missing",
+    "content_after_error_finish",
+]
 
 
 @dataclass
