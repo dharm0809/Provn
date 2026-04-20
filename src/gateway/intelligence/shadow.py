@@ -37,6 +37,13 @@ from gateway.intelligence.registry import ALLOWED_MODEL_NAMES, Candidate
 
 logger = logging.getLogger(__name__)
 
+# Strong references to in-flight shadow tasks. Without this, the GC can
+# collect a pending Task whose coroutine is still running, silently
+# dropping the shadow verdict and emitting "Exception was never retrieved"
+# warnings. Mirror the pattern in completeness._pending_attempt_writes
+# and intelligence.api._retrain_tasks.
+_IN_FLIGHT_TASKS: set[asyncio.Task[Any]] = set()
+
 
 class ShadowRunner:
     """Owns candidate `InferenceSession` caching + shadow_comparisons writes.
@@ -173,7 +180,7 @@ def maybe_fire_shadow(
     if cand is None:
         return
     try:
-        asyncio.create_task(
+        task = asyncio.create_task(
             fire_shadow_text(
                 runner,
                 model=model_name,
@@ -185,6 +192,8 @@ def maybe_fire_shadow(
             ),
             name=f"shadow-{model_name}-{cand.version}",
         )
+        _IN_FLIGHT_TASKS.add(task)
+        task.add_done_callback(_IN_FLIGHT_TASKS.discard)
     except RuntimeError:
         # `asyncio.create_task` raises `RuntimeError` when no loop is
         # running (e.g. sync-test call sites). Skip rather than break.
