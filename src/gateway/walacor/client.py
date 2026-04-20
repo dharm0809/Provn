@@ -209,8 +209,9 @@ class WalacorClient:
         # Token usage
         "prompt_tokens", "completion_tokens", "total_tokens",
         "cached_tokens", "cache_creation_tokens", "cache_hit", "latency_ms",
-        # Session chain (Merkle integrity)
-        "sequence_number", "record_hash", "previous_record_hash", "record_signature",
+        # Session chain — ID-pointer chain (new) + Merkle hash chain (legacy transition)
+        "sequence_number", "record_id", "previous_record_id",
+        "record_hash", "previous_record_hash", "record_signature",
         # Tool awareness
         "tool_strategy", "tool_count",
         # Routing

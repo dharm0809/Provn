@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 
 from gateway.adapters.base import ModelCall, ModelResponse
+from gateway.util.ids import uuid7_str
 
 
 def build_execution_record(
@@ -35,6 +36,7 @@ def build_execution_record(
     usage = model_response.usage or {}
     return {
         "execution_id": str(uuid.uuid4()),
+        "record_id": uuid7_str(),
         "model_attestation_id": attestation_id,
         "model_id": model_id or call.model_id,
         "provider": provider,

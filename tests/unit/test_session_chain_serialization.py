@@ -47,7 +47,8 @@ async def test_session_lock_serializes_chain_transactions():
 
     async def one_request(exec_id: str) -> None:
         async with tracker.session_lock(session_id):
-            seq, prev = await tracker.next_chain_values(session_id)
+            cv = await tracker.next_chain_values(session_id)
+            seq, prev = cv.sequence_number, cv.previous_record_hash
             # Simulate record write work so the race window is wide.
             await asyncio.sleep(0.01)
             rec_hash = _record_hash(exec_id, prev, seq)

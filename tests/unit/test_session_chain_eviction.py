@@ -16,8 +16,8 @@ async def test_eviction_removes_oldest():
         await tracker.update(f"s{i}", i, f"hash{i}")
     assert tracker.active_session_count() == 3
     # s0 was oldest, should be evicted — next_chain_values creates fresh state at seq=0
-    seq, prev = await tracker.next_chain_values("s0")
-    assert seq == 0
+    cv = await tracker.next_chain_values("s0")
+    assert cv.sequence_number == 0
 
 
 @pytest.mark.anyio
@@ -33,5 +33,5 @@ async def test_access_refreshes_lru_order():
     await tracker.update("s3", 0, "h3")
     assert tracker.active_session_count() == 3
     # s0 still alive; previous next_chain_values reserved seq=1, this one gets seq=2
-    seq, _ = await tracker.next_chain_values("s0")
-    assert seq == 2  # s0 still has state (seq was 0 → 1 → 2)
+    cv = await tracker.next_chain_values("s0")
+    assert cv.sequence_number == 2  # s0 still has state (seq was 0 → 1 → 2)
