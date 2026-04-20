@@ -216,13 +216,12 @@ def test_mcp_fetch():
 
     if events:
         te = events[0]
-        # SHA3-512 hashes
-        ih = te.get("input_hash", "")
-        oh = te.get("output_hash", "")
-        check("Fetch tool event has SHA3-512 input_hash",
-              len(ih) == 128, f"{len(ih)} chars")
-        check("Fetch tool event has SHA3-512 output_hash",
-              len(oh) == 128, f"{len(oh)} chars")
+        # input_data / output_data stored (Walacor backend hashes on ingest)
+        has_input = te.get("input_data") is not None
+        has_output = te.get("output_data") is not None or te.get("sources") is not None
+        check("Fetch tool event has input_data", has_input, str(te.get("input_data", "missing")))
+        check("Fetch tool event has output_data or sources", has_output,
+              f"output_data={te.get('output_data') is not None}, sources={te.get('sources') is not None}")
 
         # Tool name recorded
         check("Tool name is 'fetch'",
@@ -276,11 +275,11 @@ def test_mcp_time():
               te.get("tool_name") == "get_current_time",
               f"tool_name={te.get('tool_name')}")
 
-        ih = te.get("input_hash", "")
-        oh = te.get("output_hash", "")
-        check("Time tool event has SHA3-512 hashes",
-              len(ih) == 128 and len(oh) == 128,
-              f"input_hash={len(ih)}c, output_hash={len(oh)}c")
+        has_input = te.get("input_data") is not None
+        has_output = te.get("output_data") is not None
+        check("Time tool event has input_data and output_data",
+              has_input and has_output,
+              f"input_data={has_input}, output_data={has_output}")
     else:
         # Model chose not to call the tool (thinking model behavior)
         skip("Time tool invocation",
