@@ -236,9 +236,7 @@ class SchemaIntelligence:
             except Exception as e:
                 logger.warning("SchemaIntelligence: ONNX load failed: %s", e)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 1. PROMPT EXTRACTION — the biggest data quality fix
-    # ═══════════════════════════════════════════════════════════════════════
+    # 1. PROMPT EXTRACTION
 
     def extract_prompt(self, messages: list[dict]) -> PromptExtraction:
         """Extract the user's actual question from a conversation message array.
@@ -336,9 +334,7 @@ class SchemaIntelligence:
             return "\n".join(parts)
         return str(content) if content is not None else ""
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 2. INTENT CLASSIFICATION — keeps working 2-tier approach
-    # ═══════════════════════════════════════════════════════════════════════
+    # 2. INTENT CLASSIFICATION
 
     def classify_intent(
         self,
@@ -485,9 +481,7 @@ class SchemaIntelligence:
             "attention_mask": np.array([[1] * min(len(text), 128) + [0] * max(0, 128 - len(text))], dtype=np.int64),
         }
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 3. RESPONSE NORMALIZATION — provider-aware with auto-detection
-    # ═══════════════════════════════════════════════════════════════════════
+    # 3. RESPONSE NORMALIZATION
 
     def normalize_response(
         self,
@@ -562,9 +556,7 @@ class SchemaIntelligence:
         )
         return normalized, report
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 4. SCHEMA VALIDATION — enforce types before Walacor write
-    # ═══════════════════════════════════════════════════════════════════════
+    # 4. SCHEMA VALIDATION
 
     def validate_execution(self, record: dict[str, Any]) -> tuple[dict[str, Any], ValidationReport]:
         """Validate an execution record before Walacor write."""
@@ -637,9 +629,7 @@ class SchemaIntelligence:
 
         return cleaned, report
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 5. PROMPT QUALITY — build proper prompt_text and user_question
-    # ═══════════════════════════════════════════════════════════════════════
+    # 5. PROMPT QUALITY
 
     def build_prompt_fields(self, messages: list[dict]) -> dict[str, Any]:
         """Build all prompt-related fields for the execution record.
@@ -668,9 +658,7 @@ class SchemaIntelligence:
             "extraction_method": extraction.extraction_method,
         }
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 6. FULL PIPELINE — process a complete request-response pair
-    # ═══════════════════════════════════════════════════════════════════════
+    # 6. FULL PIPELINE
 
     def process_request(
         self,
@@ -738,9 +726,7 @@ class SchemaIntelligence:
         """
         return self.normalize_response(response, provider)
 
-    # ═══════════════════════════════════════════════════════════════════════
     # ONNX model loading
-    # ═══════════════════════════════════════════════════════════════════════
 
     def _load_onnx(self, path: str) -> None:
         """Load ONNX intent model + label map."""
