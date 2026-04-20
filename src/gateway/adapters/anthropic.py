@@ -20,9 +20,12 @@ Phase 24 additions: OpenAI ↔ Anthropic protocol bridge
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 import gateway.util.json_utils as json
 
@@ -1099,8 +1102,14 @@ class AnthropicAdapter(ProviderAdapter):
     def parse_response(self, response: httpx.Response) -> ModelResponse:
         try:
             data = response.json()
-        except Exception:
-            return ModelResponse(content="", usage=None, raw_body=response.content)
+        except Exception as exc:
+            preview = (response.content or b"")[:256]
+            logger.warning(
+                "Anthropic parse_response JSON decode failed "
+                "(status=%s len=%d preview=%r): %s",
+                response.status_code, len(response.content or b""), preview, exc,
+            )
+            raise ValueError("Anthropic response body is not valid JSON") from exc
 
         text_parts: list[str] = []
         thinking_parts: list[str] = []
