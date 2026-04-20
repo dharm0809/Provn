@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from gateway.config import get_settings
+from gateway.control.models import AttestationUpsert, BudgetUpsert, PolicyCreate, PolicyUpdate
 from gateway.pipeline.context import get_pipeline_context
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -132,10 +133,12 @@ async def control_upsert_attestation(request: Request) -> JSONResponse:
     if store is None:
         return JSONResponse({"error": "Control plane not available"}, status_code=503)
     try:
-        body = await request.json()
+        raw = await request.json()
         settings = get_settings()
-        if "tenant_id" not in body:
-            body["tenant_id"] = settings.gateway_tenant_id or ""
+        if "tenant_id" not in raw or not raw["tenant_id"]:
+            raw["tenant_id"] = settings.gateway_tenant_id or ""
+        parsed = AttestationUpsert.model_validate(raw)
+        body = parsed.model_dump(exclude_none=False)
         result = store.upsert_attestation(body)
         _refresh_attestation_cache()
         return JSONResponse(result, status_code=200)
@@ -204,10 +207,12 @@ async def control_create_policy(request: Request) -> JSONResponse:
     if store is None:
         return JSONResponse({"error": "Control plane not available"}, status_code=503)
     try:
-        body = await request.json()
+        raw = await request.json()
         settings = get_settings()
-        if "tenant_id" not in body:
-            body["tenant_id"] = settings.gateway_tenant_id or ""
+        if "tenant_id" not in raw or not raw["tenant_id"]:
+            raw["tenant_id"] = settings.gateway_tenant_id or ""
+        parsed = PolicyCreate.model_validate(raw)
+        body = parsed.model_dump(exclude_none=False)
         result = store.create_policy(body)
         _refresh_policy_cache()
         return JSONResponse(result, status_code=201)
@@ -222,7 +227,9 @@ async def control_update_policy(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Control plane not available"}, status_code=503)
     policy_id = request.path_params["id"]
     try:
-        body = await request.json()
+        raw = await request.json()
+        parsed = PolicyUpdate.model_validate(raw)
+        body = parsed.model_dump(exclude_none=True)
         updated = store.update_policy(policy_id, body)
         if updated:
             _refresh_policy_cache()
@@ -267,10 +274,12 @@ async def control_upsert_budget(request: Request) -> JSONResponse:
     if store is None:
         return JSONResponse({"error": "Control plane not available"}, status_code=503)
     try:
-        body = await request.json()
+        raw = await request.json()
         settings = get_settings()
-        if "tenant_id" not in body:
-            body["tenant_id"] = settings.gateway_tenant_id or ""
+        if "tenant_id" not in raw or not raw["tenant_id"]:
+            raw["tenant_id"] = settings.gateway_tenant_id or ""
+        parsed = BudgetUpsert.model_validate(raw)
+        body = parsed.model_dump(exclude_none=True)
         result = store.upsert_budget(body)
         _refresh_budget_tracker()
         return JSONResponse(result, status_code=200)
