@@ -623,13 +623,11 @@ async def test_build_and_write_record_session_chain_update_matches_embedded_valu
 
     # Verify the embedded chain fields are consistent
     assert record["sequence_number"] == 7
-    assert record["previous_record_hash"] == "prev-hash-xyz"
-    assert "record_hash" in record
+    assert "previous_record_id" in record  # ID-pointer chain replaces hash chain
 
-    # session_chain.update must be called with the same values that were embedded
+    # session_chain.update must be called with record_id (no longer hash)
     mock_chain.update.assert_awaited_once_with(
         "sess-abc",
         record["sequence_number"],
-        record["record_hash"],
         record_id=record.get("record_id"),
     )

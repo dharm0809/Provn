@@ -39,7 +39,6 @@ from gateway.pipeline.model_resolver import resolve_attestation
 from gateway.pipeline.policy_evaluator import evaluate_pre_inference
 from gateway.pipeline.response_evaluator import analyze_text, evaluate_post_inference
 from gateway.pipeline.hasher import build_execution_record
-from gateway.pipeline.session_chain import compute_record_hash
 from gateway.metrics.prometheus import (
     requests_total, pipeline_duration, response_policy_total,
     token_usage_total, budget_exceeded_total,
@@ -542,15 +541,17 @@ async def _session_chain_lock(ctx, session_id: str | None):
         yield
 
 
-async def _apply_session_chain(record, session_id: str | None, ctx, settings) -> str | None:
-    """Compute and attach session chain fields to record. Returns record_hash or None.
+async def _apply_session_chain(record, session_id: str | None, ctx, settings) -> bool:
+    """Attach session chain fields to record. Returns True on success, False if skipped.
 
-    On Redis error, skips chain fields and returns None so the execution record
-    is still written without chain data — preferable to forging (0, GENESIS_HASH)
-    for an established session, which would silently corrupt the Merkle chain.
+    Gateway no longer computes SHA3-512 record_hash; Walacor backend hashes on
+    ingest and returns DH as the tamper-evident checkpoint. Chain integrity is
+    now maintained via UUIDv7 record_id / previous_record_id pointers.
+
+    On failure, skips chain fields so the execution record is still written.
     """
     if not (session_id and ctx.session_chain and settings.session_chain_enabled):
-        return None
+        return False
     try:
         chain_vals = await ctx.session_chain.next_chain_values(session_id)
     except Exception:
@@ -558,21 +559,9 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
             "Session chain next_chain_values failed — skipping chain fields: session_id=%s",
             session_id, exc_info=True,
         )
-        return None
+        return False
     seq_num = chain_vals.sequence_number
-    prev_hash = chain_vals.previous_record_hash
-    record_hash_val = compute_record_hash(
-        execution_id=record["execution_id"],
-        policy_version=record["policy_version"],
-        policy_result=record["policy_result"],
-        previous_record_hash=prev_hash,
-        sequence_number=seq_num,
-        timestamp=record["timestamp"],
-    )
     record["sequence_number"] = seq_num
-    record["previous_record_hash"] = prev_hash
-    record["record_hash"] = record_hash_val
-    # New ID-pointer chain fields (additive alongside legacy hash chain)
     record["previous_record_id"] = chain_vals.previous_record_id
 
     # Ed25519 signing over canonical ID string (fail-open)
@@ -591,7 +580,7 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
     except Exception:
         pass  # fail-open: never block record writing
 
-    return record_hash_val
+    return True
 
 
 async def _store_execution(record, request: Request, ctx) -> None:
@@ -759,8 +748,8 @@ async def _after_stream_record(
                 if result.succeeded:
                     execution_id_var.set(record["execution_id"])
             await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
-            if session_id and ctx.session_chain and record_hash_val is not None:
-                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val, record_id=record.get("record_id"))
+            if session_id and ctx.session_chain and record_hash_val:
+                await ctx.session_chain.update(session_id, record["sequence_number"], record_id=record.get("record_id"))
         # Phase 23: populate governance_meta for SSE event injection
         if governance_meta is not None:
             governance_meta["execution_id"] = record.get("execution_id")
@@ -1621,9 +1610,9 @@ async def _build_and_write_record(
         # Expose governance metadata for response headers (Phase 23)
         request.state.walacor_chain_seq = record.get("sequence_number")
         await _write_tool_events(params.tool_interactions, record["execution_id"], call, params.tool_strategy, ctx, settings)
-        if session_id and ctx.session_chain and record_hash_val is not None:
+        if session_id and ctx.session_chain and record_hash_val:
             try:
-                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val, record_id=record.get("record_id"))
+                await ctx.session_chain.update(session_id, record["sequence_number"], record_id=record.get("record_id"))
             except Exception:
                 logger.error(
                     "Session chain update failed — chain state may be stale: session_id=%s seq_num=%d",
