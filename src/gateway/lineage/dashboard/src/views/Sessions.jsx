@@ -476,7 +476,7 @@ function SessionTimelineView({ session, onBack }) {
         <div className="ses-timeline-head-right">
           <div className="ses-verify-card">
             <div className="ses-verify-eyebrow mono">CRYPTOGRAPHIC VERIFICATION</div>
-            <div className="ses-verify-algo mono">SHA3-512 + ED25519 · Walacor chain</div>
+            <div className="ses-verify-algo mono">ID chain · ED25519 · Walacor sealed</div>
             <button
               className="btn-wal btn-primary"
               onClick={handleVerify}
