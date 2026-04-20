@@ -204,7 +204,7 @@ def test_caller_identity():
     ar = requests.get(f"{LINEAGE_URL}/attempts", timeout=60)
     check("Attempts endpoint → 200", ar.status_code == 200)
     if ar.status_code == 200:
-        items = ar.json().get("items", [])
+        items = ar.json().get("attempts", ar.json().get("items", []))
         user_found = any(
             a.get("user") == user_id or user_id in str(a)
             for a in items[:20]
@@ -247,8 +247,10 @@ def test_pii_detection():
                 has_analysis = (
                     rec.get("content_analysis") is not None
                     or rec.get("analyzer_decisions") is not None
+                    or rec.get("policy_result") is not None
                     or meta.get("analyzer_decisions") is not None
                     or meta.get("content_analysis") is not None
+                    or meta.get("response_policy_result") is not None
                     or rec.get("response_policy_decisions") is not None
                 )
                 check("Content analysis ran on response",
@@ -310,16 +312,22 @@ def test_streaming_audit():
 def test_multi_model():
     """Send requests to different models and verify both produce audit records."""
     models_to_test = [TOOL_MODEL]
-    # Check if qwen3:4b is available too
-    try:
-        r = requests.post(f"http://localhost:11434/v1/chat/completions", json={
-            "model": "qwen3:4b", "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 5,
-        }, timeout=30)
-        if r.status_code == 200:
-            models_to_test.append("qwen3:4b")
-    except Exception:
-        pass
+    # Add the other cloud model (whichever wasn't specified as TOOL_MODEL)
+    if TOOL_MODEL.startswith("gpt-"):
+        models_to_test.append("claude-haiku-4-5-20251001")
+    elif TOOL_MODEL.startswith("claude-"):
+        models_to_test.append("gpt-4o-mini")
+    else:
+        # Fall back to Ollama qwen3:4b if available
+        try:
+            r = requests.post(f"http://localhost:11434/v1/chat/completions", json={
+                "model": "qwen3:4b", "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 5,
+            }, timeout=30)
+            if r.status_code == 200:
+                models_to_test.append("qwen3:4b")
+        except Exception:
+            pass
 
     check("Multiple models available", len(models_to_test) >= 2,
           f"models: {models_to_test}")

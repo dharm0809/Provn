@@ -559,13 +559,8 @@ async def execute_tools(
 # ── Audit helpers ───────────────────────────────────────────────────────────
 
 def _serialize_tool_interaction(t: ToolInteraction, source: str) -> dict[str, Any]:
-    """Serialize one ToolInteraction to audit metadata dict (hashes input/output)."""
-    from gateway.core import compute_sha3_512_string
+    """Serialize one ToolInteraction to audit metadata dict."""
     d: dict[str, Any] = {"tool_id": t.tool_id, "tool_type": t.tool_type, "tool_name": t.tool_name, "source": source}
-    if t.input_data is not None:
-        d["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
-    if t.output_data is not None:
-        d["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
     if t.sources:
         d["sources"] = t.sources
     if t.metadata:
@@ -599,8 +594,7 @@ def _build_tool_event_record(
     tenant_id: str,
     gateway_id: str,
 ) -> dict[str, Any]:
-    """Build a tool event record for storage (Walacor ETId 9000003 / WAL)."""
-    from gateway.core import compute_sha3_512_string
+    """Build a tool event record for storage (Walacor ETId 9000023 / WAL)."""
     record: dict[str, Any] = {
         "event_id": str(uuid.uuid4()),
         "execution_id": execution_id,
@@ -619,6 +613,7 @@ def _build_tool_event_record(
         record["input_data"] = t.input_data
         record["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
     if t.output_data is not None:
+        record["output_data"] = t.output_data
         record["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
     elif t.sources:
         record["output_hash"] = compute_sha3_512_string(json.dumps(t.sources, default=str, sort_keys=True))

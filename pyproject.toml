@@ -21,6 +21,13 @@ dependencies = [
   "orjson>=3.9",
   "cachetools>=5.3",
   "ddgs>=7.0",
+  # Intent classifier is default-ON (advertised as "99.5% accuracy" two-tier
+  # in the README). The ONNX tier needs numpy + onnxruntime at runtime;
+  # without them the classifier silently falls back to deterministic rules
+  # only. Keep these in core so a plain `pip install -e .` ships the full
+  # advertised behaviour.
+  "numpy>=1.24",
+  "onnxruntime>=1.16",
 ]
 
 [project.optional-dependencies]
@@ -36,27 +43,28 @@ search = ["ddgs>=7.0"]
 ocr = ["pytesseract>=0.3", "Pillow>=9.0"]
 signing = ["cryptography>=42.0"]
 compliance = ["weasyprint>=62.0", "jinja2>=3.1"]
+# Intelligence layer — training and shadow-metric stats (Phase 25 self-learning
+# distillation). Inference-time deps (numpy, onnxruntime) live in core; this
+# extra adds what's only needed when users train or replace ONNX models.
+intelligence = ["scikit-learn>=1.3", "skl2onnx>=1.15", "scipy>=1.11"]
 dev = [
   "pytest>=8",
   "anyio[trio]>=4.0",
   "pytest-asyncio>=0.24",
-  # Runtime deps the test suite requires — pulled in under `dev` so
-  # `uv pip install -e .[dev]` on a fresh checkout yields a green run.
-  # Kept separate from the narrower feature extras (auth/telemetry/etc.)
-  # which are for end-user install.
-  "numpy>=1.24",
+  "hypothesis>=6.100",
+  "pytest-xdist>=3.5",
+  # Feature-extra deps mirrored here so `pip install -e .[dev]` on a fresh
+  # checkout produces a green test run without needing to also request each
+  # feature extra individually.
   "scikit-learn>=1.3",
   "skl2onnx>=1.15",
   "scipy>=1.11",
-  "onnxruntime>=1.16",
   "opentelemetry-sdk>=1.30",
   "opentelemetry-exporter-otlp-proto-grpc>=1.30",
   "pyjwt[crypto]>=2.8",
   "cryptography>=42.0",
   "jinja2>=3.1",
   "weasyprint>=62.0",
-  "hypothesis>=6.100",
-  "pytest-xdist>=3.5",
 ]
 
 [tool.pytest.ini_options]

@@ -314,12 +314,6 @@ export default function Overview({ navigate, health }) {
     return () => { cancelled = true; };
   }, [range, applySummary]);
 
-  if (loading) return <Skeleton />;
-  if (error)   return <div className="error-card">Error: {error}</div>;
-
-  const allowed = attStats.allowed || 0;
-  const pctAllowedReq = attTotal > 0 ? (allowed / attTotal * 100).toFixed(1) : '100';
-  const totalRequests = counters.total > 0 ? Math.round(counters.total) : attTotal;
   // Memoized so the palette object reference is stable across renders while
   // isLight is unchanged. Prevents spurious style-prop updates on the legend
   // swatches (which would otherwise receive a new `{background: ...}` object
@@ -330,6 +324,13 @@ export default function Overview({ navigate, health }) {
       : { gold: '#c9a84c', green: '#34d399', red: '#ef4444', blue: '#60a5fa' },
     [isLight],
   );
+
+  if (loading) return <Skeleton />;
+  if (error)   return <div className="error-card">Error: {error}</div>;
+
+  const allowed = attStats.allowed || 0;
+  const pctAllowedReq = attTotal > 0 ? (allowed / attTotal * 100).toFixed(1) : '100';
+  const totalRequests = counters.total > 0 ? Math.round(counters.total) : attTotal;
 
   return (
     <div className="fade-child">
