@@ -432,7 +432,7 @@ async def test_s5_active_tool_loop_with_real_qwen3():
     """
     from gateway.adapters.ollama import OllamaAdapter
     from gateway.mcp.registry import ToolRegistry
-    from gateway.pipeline.orchestrator import _inject_tools_into_call, _run_active_tool_loop
+    from gateway.pipeline.tool_executor import _inject_tools_into_call, _run_active_tool_loop
     from gateway.pipeline.context import get_pipeline_context
     from gateway.config import get_settings
 
