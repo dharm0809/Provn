@@ -14,7 +14,7 @@ A drop-in proxy that sits between your application and any LLM provider. No code
 | **G2 — Full-fidelity Audit** | Prompt, response, thinking content, provider request ID, and model hash are persisted to Walacor blockchain-backed storage with envelope proof (EId, BlockId, TransId, DataHash). |
 | **G3 — Pre-inference Policy** | Requests are evaluated against active policy rules before forwarding. Stale policies fail closed. |
 | **G4 — Content Gate** | Responses pass through pluggable analyzers (PII, toxicity, Llama Guard, DLP, Prompt Guard) before reaching the caller. |
-| **G5 — Session Chain** | Conversation turns are linked via SHA3-512 Merkle chain for tamper detection. |
+| **G5 — Session Chain** | Conversation turns are linked via UUIDv7 ID-pointer chain (`record_id` → `previous_record_id`) for tamper detection. Walacor returns a `DH` blockchain checkpoint on ingest. |
 
 **Completeness invariant:** Every request produces exactly one audit row — allowed, denied, or errored.
 
@@ -148,10 +148,10 @@ Thinking models (qwen3) produce `<think>` blocks which the gateway strips from t
 
 **Audit & Compliance**
 - **Walacor blockchain storage** — every record gets EId, BlockId, TransactionId, DataHash envelope proof
-- SHA3-512 Merkle session chains with client-side verification
+- UUIDv7 ID-pointer session chains with server-side verification; Walacor DH as blockchain checkpoint
 - Thinking content stored separately from response in execution records
 - Tool event audit trail with full search results, sources, and duration
-- File/attachment tracking — inline images hashed (SHA3-512), OpenWebUI files captured
+- File/attachment tracking — inline images and OpenWebUI files captured
 - Content analysis results stored per-request for compliance replay
 - Audit content classifier separates user question from conversation noise
 - Compliance export API — EU AI Act, NIST AI RMF, SOC 2 (JSON/CSV/PDF)
@@ -212,7 +212,7 @@ The gateway serves a built-in React dashboard at `/lineage/` with:
 - **Playground** — interactive prompt testing with governance readout and model comparison
 
 Per-session drill-down includes:
-- **Chain Verification** — client-side SHA3-512 recomputation (no server trust required)
+- **Chain Verification** — server-side ID-pointer walk (`/v1/lineage/verify/{session_id}`)
 - **Blockchain Proof** — Walacor EId, Block ID, Transaction ID, Data Hash displayed per execution
 - **Pipeline Trace** — canvas waterfall showing time spent in each governance step
 - **System Tasks** — OpenWebUI follow-ups/tags in collapsible section (not polluting main timeline)
