@@ -28,9 +28,20 @@ import abc
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping, TypedDict
 
 logger = logging.getLogger(__name__)
+
+# Finite set of ONNX model identifiers that can be emitted in a HarvesterSignal.
+HarvesterModelName = Literal["intent", "schema_mapper", "safety"]
+
+
+class HarvesterContext(TypedDict):
+    """Common per-request shortcuts carried in every HarvesterSignal.context."""
+
+    session_id: str
+    prompt: str
+    response: str
 
 
 @dataclass(frozen=True)
@@ -62,10 +73,10 @@ class HarvesterSignal:
         don't have to grovel through the metadata dict for common keys.
     """
     request_id: str | None
-    model_name: str
+    model_name: HarvesterModelName
     prediction: str
     response_payload: Any
-    context: Mapping[str, Any]
+    context: HarvesterContext
 
 
 class Harvester(abc.ABC):
