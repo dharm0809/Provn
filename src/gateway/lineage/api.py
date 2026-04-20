@@ -2,16 +2,65 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
-from typing import Any
+import time
+from typing import Any, Callable
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
+
+import gateway.util.json_utils as _json
 
 from gateway.pipeline.context import get_pipeline_context
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TTL + single-flight cache for analytics endpoints.
+#
+# The dashboard polls /v1/lineage/metrics and /token-latency every 3s. At N
+# open dashboard tabs this fans out to N concurrent identical SQL aggregations
+# every 3s — redundant work, since the underlying data doesn't update that
+# fast in practice. We memoize the JSON result per (endpoint, range_key) for
+# a short TTL, and an asyncio.Lock coalesces concurrent misses so only ONE
+# worker hits SQLite even during a stampede.
+#
+# TTL is deliberately short (below the dashboard's own poll cadence) so users
+# still see ~3s freshness on Overview. Cache is invalidated implicitly by TTL
+# expiry; no invalidation hooks required.
+# ─────────────────────────────────────────────────────────────────────────────
+_ANALYTICS_CACHE_TTL_S = 2.5
+_analytics_cache: dict[str, tuple[float, Any]] = {}
+_analytics_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _cached_analytics(key: str, compute: Callable[[], Any]) -> Any:
+    """Return cached value for *key* or call *compute* once under a per-key lock.
+
+    *compute* is an async zero-arg callable (typically a thin wrapper around
+    `_call(reader.method, range_key)`). Concurrent callers during a miss all
+    await the same Lock, so the SQL query runs once and the result is shared.
+    """
+    now = time.monotonic()
+    entry = _analytics_cache.get(key)
+    if entry and (now - entry[0]) < _ANALYTICS_CACHE_TTL_S:
+        return entry[1]
+    lock = _analytics_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _analytics_locks[key] = lock
+    async with lock:
+        # Re-check after acquiring the lock: another coroutine may have
+        # populated the cache while we were waiting.
+        entry = _analytics_cache.get(key)
+        if entry and (time.monotonic() - entry[0]) < _ANALYTICS_CACHE_TTL_S:
+            return entry[1]
+        value = await compute()
+        _analytics_cache[key] = (time.monotonic(), value)
+        return value
 
 
 async def _call(method, *args, **kwargs) -> Any:
@@ -118,7 +167,12 @@ async def lineage_session_timeline(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     session_id = request.path_params["session_id"]
     try:
-        records = await _call(reader.get_session_timeline, session_id)
+        try:
+            limit = int(request.query_params.get("limit", 500))
+        except (TypeError, ValueError):
+            limit = 500
+        limit = max(1, min(limit, 5000))
+        records = await _call(reader.get_session_timeline, session_id, limit)
         if not records:
             return JSONResponse({"error": "Session not found", "session_id": session_id}, status_code=404)
         records = [_enrich_execution_record(r) for r in records]
@@ -214,7 +268,10 @@ async def lineage_metrics_history(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
     try:
-        data = await _call(reader.get_metrics_history, range_key)
+        data = await _cached_analytics(
+            f"metrics:{range_key}",
+            lambda: _call(reader.get_metrics_history, range_key),
+        )
         return JSONResponse(data)
     except Exception as e:
         logger.error("lineage_metrics_history error: %s", e, exc_info=True)
@@ -228,11 +285,77 @@ async def lineage_token_latency_history(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
     try:
-        data = await _call(reader.get_token_latency_history, range_key)
+        data = await _cached_analytics(
+            f"token_latency:{range_key}",
+            lambda: _call(reader.get_token_latency_history, range_key),
+        )
         return JSONResponse(data)
     except Exception as e:
         logger.error("lineage_token_latency_history error: %s", e, exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def lineage_metrics_stream(request: Request) -> StreamingResponse:
+    """GET /v1/lineage/metrics/stream?range=1h — server-sent events live metrics.
+
+    Additive alternative to polling /v1/lineage/metrics every 3s. Emits the
+    same JSON payload as the REST endpoint on a fixed cadence so the dashboard
+    can replace N setIntervals with one open EventSource. Unlike polling, all
+    connected browsers share a single computation per tick via the same
+    _cached_analytics single-flight cache, so fan-out is O(1) regardless of
+    viewer count.
+
+    Fail-open: if the reader is unavailable OR the client disconnects, the
+    generator ends cleanly and the HTTP response closes. Clients that don't
+    support SSE (or for which this endpoint returns 503) fall back to polling
+    the REST endpoint — nothing in the existing flow changes.
+    """
+    reader = _reader_or_503()
+    if reader is None:
+        return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
+    range_key = request.query_params.get("range", "1h")
+    # Tick just above the cache TTL so each emission usually hits a fresh
+    # value without forcing more DB work than the cached REST endpoint.
+    tick_seconds = 3.0
+
+    async def event_source():
+        # Retry hint for browser reconnect: if the pipe drops, EventSource
+        # will reconnect after this many milliseconds. Matches our tick so
+        # the dashboard doesn't hammer on transient network blips.
+        yield b"retry: 3000\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    data = await _cached_analytics(
+                        f"metrics:{range_key}",
+                        lambda: _call(reader.get_metrics_history, range_key),
+                    )
+                    payload = _json.dumps_bytes(data)
+                    yield b"data: " + payload + b"\n\n"
+                except Exception:
+                    logger.warning("metrics_stream tick failed", exc_info=True)
+                    # Emit a comment line to keep the connection alive even if
+                    # one tick hits an error — keeps the browser from
+                    # reconnecting unnecessarily.
+                    yield b": error\n\n"
+                await asyncio.sleep(tick_seconds)
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            # Disable buffering in any reverse proxy sitting in front of us
+            # (nginx honors this header); without it, chunks are held until
+            # the proxy flushes and SSE loses its real-time property.
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 async def lineage_trace(request: Request) -> JSONResponse:

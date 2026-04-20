@@ -408,6 +408,21 @@ class ControlPlaneStore:
             ("*", "walacor.toxicity.v1", "child_safety", "block"),
             ("*", "walacor.toxicity.v1", "self_harm", "warn"),
             ("*", "walacor.toxicity.v1", "violence", "warn"),
+            # DLP (financial/health/secrets/infrastructure)
+            ("*", "walacor.dlp.v1", "financial", "warn"),
+            ("*", "walacor.dlp.v1", "health", "block"),
+            ("*", "walacor.dlp.v1", "secrets", "block"),
+            ("*", "walacor.dlp.v1", "infrastructure", "warn"),
+            # Presidio NER PII — high-risk financial identifiers block
+            ("*", "walacor.presidio_pii.v1", "CREDIT_CARD", "block"),
+            ("*", "walacor.presidio_pii.v1", "US_SSN", "block"),
+            ("*", "walacor.presidio_pii.v1", "US_BANK_NUMBER", "block"),
+            ("*", "walacor.presidio_pii.v1", "IBAN_CODE", "block"),
+            ("*", "walacor.presidio_pii.v1", "CRYPTO", "block"),
+            ("*", "walacor.presidio_pii.v1", "EMAIL_ADDRESS", "warn"),
+            ("*", "walacor.presidio_pii.v1", "PHONE_NUMBER", "warn"),
+            ("*", "walacor.presidio_pii.v1", "IP_ADDRESS", "warn"),
+            ("*", "walacor.presidio_pii.v1", "PERSON", "warn"),
         ]
         for tenant, analyzer, category, action in defaults:
             self.upsert_content_policy(tenant, analyzer, category, action)

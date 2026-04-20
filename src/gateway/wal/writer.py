@@ -82,6 +82,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         ("wal_records", "parent_execution_id", "TEXT"),
         ("wal_records", "tool_name", "TEXT"),
         ("wal_records", "tool_type", "TEXT"),
+        # Phase 25: hot metadata fields promoted to columns so the sessions-list
+        # query (_SESSIONS_AGG_SUBQUERY in lineage/reader.py) stops calling
+        # json_extract() 6x per row on a large record_json blob.
+        ("wal_records", "request_type", "TEXT"),
     ]
     for table, col, col_type in _add_columns:
         try:
@@ -107,6 +111,12 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_wal_model"
         " ON wal_records (model_id, provider)"
+        " WHERE event_type = 'execution'"
+    )
+    # Speeds up the sessions-list GROUP BY over non-system-task rows.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_session_request_type"
+        " ON wal_records (session_id, request_type)"
         " WHERE event_type = 'execution'"
     )
 
@@ -144,7 +154,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
                     ELSE NULL
                 END,
                 tool_name = json_extract(record_json, '$.tool_name'),
-                tool_type = json_extract(record_json, '$.tool_type')
+                tool_type = json_extract(record_json, '$.tool_type'),
+                request_type = COALESCE(
+                    json_extract(record_json, '$.metadata.request_type'),
+                    'user_message'
+                )
             WHERE timestamp IS NULL
         """)
         conn.commit()
@@ -229,7 +243,11 @@ class WALWriter:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self._path)
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=FULL")
+            # synchronous=NORMAL in WAL mode is crash-safe (atomicity preserved;
+            # only the last in-flight transaction can be lost on power failure,
+            # and never database corruption). Saves one fsync per commit batch,
+            # which at 50 writes/10ms → ~5-15ms per batch under sustained load.
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA secure_delete=ON")
             db_path = Path(self._path)
@@ -400,7 +418,9 @@ class WALWriter:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self._path, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=FULL")
+            # NORMAL is crash-safe in WAL mode (see matching comment in
+            # _ensure_thread_conn above).
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA secure_delete=ON")
             db_path = Path(self._path)
@@ -419,21 +439,23 @@ class WALWriter:
         record_json = json.dumps(data)
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
+        request_type = (data.get("metadata") or {}).get("request_type") or "user_message"
         conn.execute(
             """INSERT OR REPLACE INTO wal_records
                (execution_id, record_json, created_at, delivered,
                 event_type, session_id, timestamp, model_id, provider, user,
                 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                sequence_number, policy_result)
+                sequence_number, policy_result, request_type)
                VALUES (?, ?, ?, 0,
                        'execution', ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?)""",
             (execution_id, record_json, now,
              data.get("session_id"), data.get("timestamp") or now,
              data.get("model_id"), data.get("provider"), data.get("user"),
              data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
              data.get("total_tokens") or 0, data.get("latency_ms"),
-             data.get("sequence_number"), data.get("policy_result")),
+             data.get("sequence_number"), data.get("policy_result"),
+             request_type),
         )
         conn.commit()
         logger.debug("WAL write execution_id=%s", execution_id)
@@ -449,6 +471,7 @@ class WALWriter:
             is_tool = data.get("event_type") == "tool_call"
             pk = data.get("event_id", "") if is_tool else data.get("execution_id", "")
             record_json = json.dumps(data)
+            req_type = None if is_tool else ((data.get("metadata") or {}).get("request_type") or "user_message")
             rows.append((
                 pk, record_json, now, 0,
                 "tool_call" if is_tool else "execution",
@@ -466,6 +489,7 @@ class WALWriter:
                 data.get("execution_id") if is_tool else None,
                 data.get("tool_name"),
                 data.get("tool_type"),
+                req_type,
             ))
         conn.executemany(
             """INSERT OR REPLACE INTO wal_records
@@ -473,8 +497,8 @@ class WALWriter:
                 event_type, session_id, timestamp, model_id, provider, user,
                 prompt_tokens, completion_tokens, total_tokens, latency_ms,
                 sequence_number, policy_result, parent_execution_id,
-                tool_name, tool_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tool_name, tool_type, request_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         conn.commit()

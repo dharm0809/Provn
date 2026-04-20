@@ -342,9 +342,17 @@ class SafetyClassifier(ContentAnalyzer):
         return decision
 
     def configure(self, policies: list[dict]) -> None:
-        """Accept content policy configuration (hot-reload from control plane)."""
-        # Future: allow per-category BLOCK/WARN/PASS override from control plane
-        pass
+        """Intentional no-op: ONNX safety verdicts are observer-only.
+
+        SafetyClassifier is an ML/ONNX analyzer. Per the project's observer-identity
+        invariant, ML verdicts always observe + log and never act unilaterally; any
+        enforcement action must flow through declarative policies elsewhere in the
+        pipeline. Accepting (and ignoring) `policies` keeps this class conformant
+        with the ContentAnalyzer protocol without allowing the control plane to
+        promote ONNX verdicts to BLOCK. Do not replace with real overrides without
+        revisiting EU AI Act compliance implications (static thresholds are preferred).
+        """
+        return None
 
     def reload(self) -> None:
         """Rebuild the `InferenceSession` from the registry's production path.

@@ -15,43 +15,33 @@ from gateway.pipeline.session_chain import GENESIS_HASH
 
 logger = logging.getLogger(__name__)
 
+# request_type is an indexed column (see wal/writer.py); the six-way repeated
+# json_extract() in earlier revisions triggered a full scan of record_json for
+# every row. A single CASE over the column short-circuits all of that.
 _SESSIONS_AGG_SUBQUERY = """
                 SELECT
                     session_id,
                     COUNT(*) AS record_count,
-                    SUM(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) NOT LIKE 'system_task%' THEN 1 ELSE 0 END) AS user_message_count,
+                    SUM(CASE WHEN COALESCE(request_type, 'user_message')
+                        NOT LIKE 'system_task%' THEN 1 ELSE 0 END) AS user_message_count,
                     MAX(timestamp) AS last_activity,
                     model_id AS model,
                     user,
-                    -- Pick user_question from the last USER record, not system tasks
-                    MAX(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) NOT LIKE 'system_task%'
-                    THEN json_extract(record_json, '$.metadata.walacor_audit.user_question')
-                    ELSE NULL END) AS user_question,
-                    MAX(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) NOT LIKE 'system_task%'
-                    THEN json_extract(record_json, '$.metadata.walacor_audit.has_rag_context')
-                    ELSE NULL END) AS has_rag_context,
-                    MAX(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) NOT LIKE 'system_task%'
-                    THEN json_extract(record_json, '$.metadata.walacor_audit.has_files')
-                    ELSE NULL END) AS has_files,
-                    MAX(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) NOT LIKE 'system_task%'
-                    THEN json_extract(record_json, '$.metadata.walacor_audit.has_images')
-                    ELSE NULL END) AS has_images,
-                    MAX(CASE WHEN COALESCE(
-                        json_extract(record_json, '$.metadata.request_type'), 'user_message'
-                    ) NOT LIKE 'system_task%'
-                    THEN json_extract(record_json, '$.metadata.request_type')
-                    ELSE NULL END) AS request_type,
-                    -- Fallback tool info from execution metadata (always present)
+                    MAX(CASE WHEN COALESCE(request_type, 'user_message') NOT LIKE 'system_task%'
+                        THEN json_extract(record_json, '$.metadata.walacor_audit.user_question')
+                        ELSE NULL END) AS user_question,
+                    MAX(CASE WHEN COALESCE(request_type, 'user_message') NOT LIKE 'system_task%'
+                        THEN json_extract(record_json, '$.metadata.walacor_audit.has_rag_context')
+                        ELSE NULL END) AS has_rag_context,
+                    MAX(CASE WHEN COALESCE(request_type, 'user_message') NOT LIKE 'system_task%'
+                        THEN json_extract(record_json, '$.metadata.walacor_audit.has_files')
+                        ELSE NULL END) AS has_files,
+                    MAX(CASE WHEN COALESCE(request_type, 'user_message') NOT LIKE 'system_task%'
+                        THEN json_extract(record_json, '$.metadata.walacor_audit.has_images')
+                        ELSE NULL END) AS has_images,
+                    MAX(CASE WHEN COALESCE(request_type, 'user_message') NOT LIKE 'system_task%'
+                        THEN request_type
+                        ELSE NULL END) AS request_type,
                     MAX(json_extract(record_json, '$.metadata.tool_strategy')) AS meta_tool_strategy,
                     MAX(json_extract(record_json, '$.metadata.tool_interaction_count')) AS meta_tool_count
                 FROM wal_records
@@ -234,51 +224,75 @@ class LineageReader:
             """
         conn = self._ensure_conn()
         cur = conn.execute(sql, (*extra_params, limit, offset))
+        rows = [dict(row) for row in cur.fetchall()]
+
+        # Batched fallback: one IN-query for ALL sessions that need metadata fallback,
+        # instead of one query per session (previously N+1 with up to `limit` roundtrips).
+        fallback_ids = [
+            r["session_id"] for r in rows
+            if not r.get("tool_names")
+            and r.get("meta_tool_count") and r.get("meta_tool_count") > 0
+        ]
+        fallback_map = self._batch_extract_tool_names_from_metadata(fallback_ids)
+
         results = []
-        for row in cur.fetchall():
-            d = dict(row)
-            # Fallback: if tool JOIN returned empty but metadata says tools were used,
-            # fetch tool names from the execution record's metadata JSON
-            if not d.get("tool_names") and d.get("meta_tool_count") and d.get("meta_tool_count") > 0:
-                d["tool_names"], d["tool_details"] = self._extract_tool_names_from_metadata(
-                    d["session_id"]
-                )
+        for d in rows:
+            if d["session_id"] in fallback_map:
+                d["tool_names"], d["tool_details"] = fallback_map[d["session_id"]]
             d.pop("meta_tool_strategy", None)
             d.pop("meta_tool_count", None)
             results.append(d)
         return results
 
-    def _extract_tool_names_from_metadata(self, session_id: str) -> tuple[str, str]:
-        """Fallback: extract tool names from execution record metadata JSON.
+    def _batch_extract_tool_names_from_metadata(
+        self, session_ids: list[str],
+    ) -> dict[str, tuple[str, str]]:
+        """Fallback: extract tool names from execution metadata JSON for many sessions.
 
-        Used when the tool events JOIN returns empty (tool_call records missing)
-        but the execution metadata says tools were used.
+        Runs a single query with `session_id IN (…)` instead of one query per
+        session. Used when `tool_call` rows are missing from the WAL (older data
+        or `_write_tool_events` failed) but the execution metadata indicates tools
+        ran. Returns `{session_id: (names_csv, details_csv)}` — sessions with no
+        extractable data are omitted.
         """
+        if not session_ids:
+            return {}
         conn = self._ensure_conn()
+        placeholders = ",".join("?" for _ in session_ids)
         cur = conn.execute(
-            """SELECT json_extract(record_json, '$.metadata.tool_interactions') AS ti
-               FROM wal_records
-               WHERE session_id = ? AND event_type = 'execution'
-                 AND json_extract(record_json, '$.metadata.tool_interaction_count') > 0
-               LIMIT 1""",
-            (session_id,),
+            f"""SELECT session_id,
+                       json_extract(record_json, '$.metadata.tool_interactions') AS ti
+                FROM wal_records
+                WHERE event_type = 'execution'
+                  AND session_id IN ({placeholders})
+                  AND json_extract(record_json, '$.metadata.tool_interaction_count') > 0
+                ORDER BY timestamp ASC""",
+            tuple(session_ids),
         )
-        row = cur.fetchone()
-        if not row or not row["ti"]:
-            return "", ""
-        try:
-            interactions = json.loads(row["ti"])
-            names = set()
-            details = set()
+        # Aggregate across all execution records per session (a session may have
+        # multiple tool-augmented turns).
+        agg: dict[str, tuple[set, set]] = {}
+        for row in cur.fetchall():
+            sid = row["session_id"]
+            raw = row["ti"]
+            if not raw:
+                continue
+            try:
+                interactions = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            names, details = agg.setdefault(sid, (set(), set()))
             for ti in interactions:
                 name = ti.get("tool_name") or ti.get("name") or ""
                 source = ti.get("source") or ti.get("tool_type") or "unknown"
                 if name:
                     names.add(name)
                     details.add(f"{name}:{source}")
-            return ",".join(sorted(names)), ",".join(sorted(details))
-        except (json.JSONDecodeError, TypeError):
-            return "", ""
+        return {
+            sid: (",".join(sorted(names)), ",".join(sorted(details)))
+            for sid, (names, details) in agg.items()
+            if names
+        }
 
     def count_sessions(self, search: str | None = None) -> int:
         """Count sessions matching the same filters as list_sessions (excluding limit/offset)."""
@@ -295,8 +309,14 @@ class LineageReader:
         cur = conn.execute(sql, extra_params)
         return int(cur.fetchone()[0] or 0)
 
-    def get_session_timeline(self, session_id: str) -> list[dict]:
-        """Return all execution records for a session, ordered by sequence_number."""
+    def get_session_timeline(self, session_id: str, limit: int = 500) -> list[dict]:
+        """Return execution records for a session, ordered by sequence_number.
+
+        *limit* caps the result set so a runaway session (thousands of executions)
+        can't exhaust dashboard memory or wire bandwidth. The dashboard timeline
+        view only renders a paged subset; 500 is well above the practical display
+        budget. Callers that need the full history can pass a larger value.
+        """
         conn = self._ensure_conn()
         cur = conn.execute(
             """
@@ -306,8 +326,9 @@ class LineageReader:
               AND event_type = 'execution'
             ORDER BY sequence_number ASC,
                      created_at ASC
+            LIMIT ?
             """,
-            (session_id,),
+            (session_id, int(limit)),
         )
         results = []
         for row in cur.fetchall():
@@ -745,15 +766,16 @@ class LineageReader:
         rows = conn.execute(
             """
             SELECT
-                json_extract(record, '$.model_id')                   AS model_id,
-                json_extract(record, '$.metadata.ab_variant')        AS ab_variant,
-                json_extract(record, '$.metadata.ab_original_model') AS original_model,
-                COUNT(*)                                             AS request_count,
-                AVG(json_extract(record, '$.latency_ms'))            AS avg_latency_ms,
-                SUM(json_extract(record, '$.total_tokens'))          AS total_tokens,
-                AVG(json_extract(record, '$.total_tokens'))          AS avg_tokens
-            FROM gateway_executions
-            WHERE json_extract(record, '$.metadata.ab_variant') = ?
+                model_id                                                   AS model_id,
+                json_extract(record_json, '$.metadata.ab_variant')         AS ab_variant,
+                json_extract(record_json, '$.metadata.ab_original_model')  AS original_model,
+                COUNT(*)                                                   AS request_count,
+                AVG(latency_ms)                                            AS avg_latency_ms,
+                SUM(total_tokens)                                          AS total_tokens,
+                AVG(total_tokens)                                          AS avg_tokens
+            FROM wal_records
+            WHERE event_type = 'execution'
+              AND json_extract(record_json, '$.metadata.ab_variant') = ?
             GROUP BY model_id
             ORDER BY request_count DESC
             """,

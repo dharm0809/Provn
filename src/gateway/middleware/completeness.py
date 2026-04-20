@@ -21,6 +21,28 @@ from gateway.metrics.prometheus import gateway_attempts_total
 
 logger = logging.getLogger(__name__)
 
+# Hold strong refs to in-flight background writes so the event loop can't GC
+# them mid-await. Tasks self-discard on completion.
+_pending_attempt_writes: set[asyncio.Task] = set()
+
+
+async def _write_attempt_bg(storage, record: dict, timeout: float) -> None:
+    """Background task: write one attempt record without blocking the response.
+
+    Completeness is a best-effort invariant (failures already log and continue).
+    Running this off the request critical path removes the slow Walacor HTTP POST
+    from tail latency — WAL backend already returns in microseconds via enqueue,
+    and the HTTP-backed Walacor backend can take hundreds of ms under load.
+    """
+    try:
+        await asyncio.wait_for(storage.write_attempt(record), timeout=timeout)
+        disp = record.get("disposition", "unknown")
+        gateway_attempts_total.labels(disposition=disp).inc()
+    except asyncio.TimeoutError:
+        logger.warning("write_attempt timed out after %.1fs — skipping", timeout)
+    except Exception as e:
+        logger.warning("Failed to write gateway_attempt: %s", e)
+
 
 async def completeness_middleware(request: Request, call_next) -> Response:
     """Run first: set request_id and default disposition. In finally: write one gateway_attempts row."""
@@ -46,24 +68,25 @@ async def completeness_middleware(request: Request, call_next) -> Response:
             execution_id = getattr(request.state, "walacor_execution_id", execution_id_var.get())
             user_id = getattr(request.state, "walacor_user_id", None)
             reason = getattr(request.state, "walacor_reason", None)
-            try:
-                await asyncio.wait_for(
-                    ctx.storage.write_attempt({
-                        "request_id": rid,
-                        "tenant_id": tenant_id,
-                        "path": request.url.path,
-                        "disposition": disposition,
-                        "status_code": status_code,
-                        "provider": provider,
-                        "model_id": model_id,
-                        "execution_id": execution_id,
-                        "user": user_id,
-                        "reason": reason,
-                    }),
-                    timeout=settings.completeness_timeout,
-                )
-                gateway_attempts_total.labels(disposition=disposition).inc()
-            except asyncio.TimeoutError:
-                logger.warning("write_attempt timed out after %.1fs — skipping", settings.completeness_timeout)
-            except Exception as e:
-                logger.warning("Failed to write gateway_attempt: %s", e)
+            record = {
+                "request_id": rid,
+                "tenant_id": tenant_id,
+                "path": request.url.path,
+                "disposition": disposition,
+                "status_code": status_code,
+                "provider": provider,
+                "model_id": model_id,
+                "execution_id": execution_id,
+                "user": user_id,
+                "reason": reason,
+            }
+            # Fire-and-forget: response is already queued to the client by the
+            # time this runs (we're in the `finally` after `return response`).
+            # Spawning a task here moves the Walacor HTTP round-trip off the
+            # request tail. Tracked in a module set so the event loop keeps
+            # strong refs until completion.
+            task = asyncio.create_task(
+                _write_attempt_bg(ctx.storage, record, settings.completeness_timeout)
+            )
+            _pending_attempt_writes.add(task)
+            task.add_done_callback(_pending_attempt_writes.discard)
