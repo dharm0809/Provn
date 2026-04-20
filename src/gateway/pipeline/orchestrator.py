@@ -157,7 +157,6 @@ async def _forward_with_resilience(adapter, call, request):
                 {"error": {"message": "Service unavailable (circuit open, no fallback)", "type": "server_error"}},
                 status_code=503,
             ), ModelResponse(content="", usage=None, raw_body=b"", provider_request_id="", model_hash=""), True
-        # TODO: route to fallback endpoint (requires adapter URL override)
         logger.info("Circuit open fallback available: %s", fb.url)
 
     # Try primary forward with retry
