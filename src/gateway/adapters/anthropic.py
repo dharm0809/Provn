@@ -60,6 +60,7 @@ def _parse_data_url(url: str) -> tuple[str | None, str | None]:
         # `;base64` presence indicates b64-encoded payload; we always assume base64
         return media_type, data
     except Exception:
+        logger.debug("_parse_data_url failed on url prefix %r", url[:40], exc_info=True)
         return None, None
 
 
