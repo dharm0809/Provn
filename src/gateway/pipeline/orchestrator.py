@@ -552,13 +552,15 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
     if not (session_id and ctx.session_chain and settings.session_chain_enabled):
         return None
     try:
-        seq_num, prev_hash = await ctx.session_chain.next_chain_values(session_id)
+        chain_vals = await ctx.session_chain.next_chain_values(session_id)
     except Exception:
         logger.error(
             "Session chain next_chain_values failed — skipping chain fields: session_id=%s",
             session_id, exc_info=True,
         )
         return None
+    seq_num = chain_vals.sequence_number
+    prev_hash = chain_vals.previous_record_hash
     record_hash_val = compute_record_hash(
         execution_id=record["execution_id"],
         policy_version=record["policy_version"],
@@ -570,6 +572,8 @@ async def _apply_session_chain(record, session_id: str | None, ctx, settings) ->
     record["sequence_number"] = seq_num
     record["previous_record_hash"] = prev_hash
     record["record_hash"] = record_hash_val
+    # New ID-pointer chain fields (additive alongside legacy hash chain)
+    record["previous_record_id"] = chain_vals.previous_record_id
 
     # Phase 26: Ed25519 record signing (fail-open)
     if record_hash_val:
@@ -751,7 +755,7 @@ async def _after_stream_record(
                     execution_id_var.set(record["execution_id"])
             await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
             if session_id and ctx.session_chain and record_hash_val is not None:
-                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
+                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val, record_id=record.get("record_id"))
         # Phase 23: populate governance_meta for SSE event injection
         if governance_meta is not None:
             governance_meta["execution_id"] = record.get("execution_id")
@@ -1614,7 +1618,7 @@ async def _build_and_write_record(
         await _write_tool_events(params.tool_interactions, record["execution_id"], call, params.tool_strategy, ctx, settings)
         if session_id and ctx.session_chain and record_hash_val is not None:
             try:
-                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)
+                await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val, record_id=record.get("record_id"))
             except Exception:
                 logger.error(
                     "Session chain update failed — chain state may be stale: session_id=%s seq_num=%d",

@@ -51,29 +51,30 @@ def _mock_budget_redis():
 @pytest.mark.anyio
 async def test_redis_session_next_chain_values_first_call_returns_genesis():
     client, pipe = _mock_redis()
-    # First call: HINCRBY on non-existent key returns 1, HGET hash returns None
-    pipe.execute = AsyncMock(return_value=[1, None, True])
+    # First call: HINCRBY on non-existent key returns 1, HGET hash returns None, HGET record_id returns None
+    pipe.execute = AsyncMock(return_value=[1, None, None, True])
 
     tracker = RedisSessionChainTracker(client, ttl=3600)
-    seq, prev = await tracker.next_chain_values("sess-abc")
+    cv = await tracker.next_chain_values("sess-abc")
 
     # First record should be seq=0 (HINCRBY returns 1, minus 1 = 0)
-    assert seq == 0
-    assert prev == GENESIS_HASH
+    assert cv.sequence_number == 0
+    assert cv.previous_record_hash == GENESIS_HASH
+    assert cv.previous_record_id is None
 
 
 @pytest.mark.anyio
 async def test_redis_session_next_chain_values_subsequent_call_returns_stored_hash():
     client, pipe = _mock_redis()
     stored_hash = "a" * 128
-    # HINCRBY increments to 3, HGET returns stored hash
-    pipe.execute = AsyncMock(return_value=[3, stored_hash.encode(), True])
+    # HINCRBY increments to 3, HGET returns stored hash, HGET record_id returns None
+    pipe.execute = AsyncMock(return_value=[3, stored_hash.encode(), None, True])
 
     tracker = RedisSessionChainTracker(client, ttl=3600)
-    seq, prev = await tracker.next_chain_values("sess-abc")
+    cv = await tracker.next_chain_values("sess-abc")
 
-    assert seq == 2
-    assert prev == stored_hash
+    assert cv.sequence_number == 2
+    assert cv.previous_record_hash == stored_hash
 
 
 @pytest.mark.anyio
@@ -322,15 +323,15 @@ def test_make_budget_tracker_with_redis_returns_redis_tracker():
 @pytest.mark.anyio
 async def test_in_memory_session_chain_async_interface():
     tracker = SessionChainTracker(max_sessions=100, ttl_seconds=3600)
-    seq, prev = await tracker.next_chain_values("s1")
-    assert seq == 0
-    assert prev == GENESIS_HASH
+    cv = await tracker.next_chain_values("s1")
+    assert cv.sequence_number == 0
+    assert cv.previous_record_hash == GENESIS_HASH
 
     await tracker.update("s1", 0, "hash-abc")
 
-    seq2, prev2 = await tracker.next_chain_values("s1")
-    assert seq2 == 1
-    assert prev2 == "hash-abc"
+    cv2 = await tracker.next_chain_values("s1")
+    assert cv2.sequence_number == 1
+    assert cv2.previous_record_hash == "hash-abc"
 
 
 @pytest.mark.anyio
@@ -348,13 +349,13 @@ async def test_in_memory_session_chain_eviction_by_max_sessions():
     assert tracker.active_session_count() == 2
 
     # s1 was evicted: next_chain_values returns genesis (new session)
-    seq, prev = await tracker.next_chain_values("s1")
-    assert seq == 0
-    assert prev == GENESIS_HASH
+    cv = await tracker.next_chain_values("s1")
+    assert cv.sequence_number == 0
+    assert cv.previous_record_hash == GENESIS_HASH
 
     # s2 and s3 are still tracked
-    seq2, _ = await tracker.next_chain_values("s2")
-    assert seq2 == 1  # continues from stored state
+    cv2 = await tracker.next_chain_values("s2")
+    assert cv2.sequence_number == 1  # continues from stored state
 
 
 @pytest.mark.anyio
@@ -490,14 +491,14 @@ async def test_redis_session_next_chain_values_str_hash_decoded_correctly():
     """prev_hash is returned correctly whether Redis returns bytes or str."""
     client, pipe = _mock_redis()
     stored_hash = "b" * 128
-    # HINCRBY returns 4 (incremented), HGET returns str hash (decode_responses=True)
-    pipe.execute = AsyncMock(return_value=[4, stored_hash, True])
+    # HINCRBY returns 4 (incremented), HGET returns str hash (decode_responses=True), HGET record_id None
+    pipe.execute = AsyncMock(return_value=[4, stored_hash, None, True])
 
     tracker = RedisSessionChainTracker(client, ttl=3600)
-    seq, prev = await tracker.next_chain_values("sess-str")
+    cv = await tracker.next_chain_values("sess-str")
 
-    assert seq == 3
-    assert prev == stored_hash
+    assert cv.sequence_number == 3
+    assert cv.previous_record_hash == stored_hash
 
 
 # ---------------------------------------------------------------------------
@@ -565,8 +566,11 @@ async def test_build_and_write_record_session_chain_update_matches_embedded_valu
     from gateway.pipeline.orchestrator import _build_and_write_record, _AuditParams
 
     # Session chain mock: returns seq=7 and a known previous hash
+    from gateway.pipeline.session_chain import ChainValues
     mock_chain = MagicMock()
-    mock_chain.next_chain_values = AsyncMock(return_value=(7, "prev-hash-xyz"))
+    mock_chain.next_chain_values = AsyncMock(return_value=ChainValues(
+        sequence_number=7, previous_record_hash="prev-hash-xyz", previous_record_id=None
+    ))
     mock_chain.update = AsyncMock()
 
     ctx = MagicMock()
@@ -627,4 +631,5 @@ async def test_build_and_write_record_session_chain_update_matches_embedded_valu
         "sess-abc",
         record["sequence_number"],
         record["record_hash"],
+        record_id=record.get("record_id"),
     )
