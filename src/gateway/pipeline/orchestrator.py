@@ -661,6 +661,11 @@ async def _after_stream_record(
             model_hash = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
             if model_hash:
                 model_response = dataclasses.replace(model_response, model_hash=model_hash)
+                if ctx.control_store:
+                    ctx.control_store.update_model_hash(
+                        adapter.get_provider_name(), call.model_id,
+                        settings.gateway_tenant_id, model_hash,
+                    )
 
         # Use unified SchemaIntelligence for streaming response normalization
         try:
@@ -1259,6 +1264,11 @@ async def _maybe_fetch_ollama_hash(
     if isinstance(adapter, OllamaAdapter) and call.model_id:
         mh = await adapter.fetch_model_hash(call.model_id, ctx.http_client)
         if mh:
+            if ctx.control_store:
+                ctx.control_store.update_model_hash(
+                    adapter.get_provider_name(), call.model_id,
+                    get_settings().gateway_tenant_id, mh,
+                )
             return cast(ModelResponse, dataclasses.replace(model_response, model_hash=mh))
     return model_response
 

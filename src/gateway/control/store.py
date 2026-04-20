@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS attestations (
     verification_level TEXT NOT NULL DEFAULT 'admin_attested',
     tenant_id TEXT NOT NULL,
     notes TEXT DEFAULT '',
+    model_hash TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(tenant_id, provider, model_id)
@@ -120,6 +121,12 @@ class ControlPlaneStore:
             self._conn.execute("PRAGMA synchronous=FULL")
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA_SQL)
+            # Migrate existing DBs that predate the model_hash column
+            try:
+                self._conn.execute("ALTER TABLE attestations ADD COLUMN model_hash TEXT DEFAULT ''")
+                self._conn.commit()
+            except Exception:
+                pass  # column already exists
         return self._conn
 
     def close(self) -> None:
@@ -175,6 +182,7 @@ class ControlPlaneStore:
         status = data.get("status", "active")
         verification_level = data.get("verification_level", "admin_attested")
         notes = data.get("notes", "")
+        model_hash = data.get("model_hash", "") or ""
 
         if explicit_id:
             existing = conn.execute(
@@ -201,16 +209,17 @@ class ControlPlaneStore:
         conn.execute(
             """INSERT INTO attestations
                    (attestation_id, model_id, provider, status, verification_level,
-                    tenant_id, notes, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tenant_id, notes, model_hash, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tenant_id, provider, model_id) DO UPDATE SET
                    status = excluded.status,
                    verification_level = excluded.verification_level,
                    notes = excluded.notes,
+                   model_hash = CASE WHEN excluded.model_hash != '' THEN excluded.model_hash ELSE model_hash END,
                    updated_at = excluded.updated_at
             """,
             (attestation_id, model_id, provider, status, verification_level,
-             tenant_id, notes, now, now),
+             tenant_id, notes, model_hash, now, now),
         )
         conn.commit()
         # Return the actual row (may have existing attestation_id on conflict)
@@ -545,8 +554,23 @@ class ControlPlaneStore:
                 "status": r["status"],
                 "verification_level": r["verification_level"],
                 "tenant_id": r["tenant_id"],
+                "model_hash": r.get("model_hash") or "",
             })
         return proofs
+
+    def update_model_hash(self, provider: str, model_id: str, tenant_id: str, model_hash: str) -> None:
+        """Backfill model_hash into an attestation that was created without one.
+
+        Only writes if the existing model_hash is empty — never overwrites a known hash.
+        """
+        conn = self._ensure_conn()
+        conn.execute(
+            "UPDATE attestations SET model_hash = ?, updated_at = ? "
+            "WHERE provider = ? AND model_id = ? AND tenant_id = ? "
+            "AND (model_hash IS NULL OR model_hash = '')",
+            (model_hash, self._now(), provider, model_id, tenant_id),
+        )
+        conn.commit()
 
     def get_active_policies(self, tenant_id: str) -> list[dict[str, Any]]:
         """Format active policies matching SyncClient expectation."""

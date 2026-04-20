@@ -1,4 +1,4 @@
-"""OpenWebUI event receiver — writes all plugin events to a JSONL text file."""
+"""OpenWebUI event receiver — writes plugin events to JSONL and runs governance."""
 
 from __future__ import annotations
 
@@ -49,7 +49,27 @@ async def openwebui_events_receive(request: Request) -> JSONResponse:
         body.get("chat_id", ""),
         body.get("user", {}).get("id", ""),
     )
-    return JSONResponse({"status": "ok", "log_file": str(log_path)})
+
+    # Run governance pipeline (attestation, policy, session chain, WAL/Walacor write).
+    # Runs in both full-governance and skip_governance modes — ctx.storage is
+    # initialized in both paths (main.py).  When governance caches are absent
+    # (skip_governance), attestation/policy steps are skipped but the execution
+    # record is still written so plugin chats appear in Walacor and lineage.
+    governance_result: dict = {}
+    settings = get_settings()
+    if settings.plugin_event_governance_enabled:
+        try:
+            from gateway.openwebui.governance import process_plugin_event
+
+            governance_result = await process_plugin_event(body)
+        except Exception:
+            logger.warning("Plugin event governance failed", exc_info=True)
+
+    return JSONResponse({
+        "status": "ok",
+        "log_file": str(log_path),
+        "governance": governance_result,
+    })
 
 
 async def openwebui_events_list(request: Request) -> JSONResponse:

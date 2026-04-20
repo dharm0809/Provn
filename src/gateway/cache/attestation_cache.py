@@ -23,6 +23,7 @@ class CachedAttestation:
     tenant_id: str = ""
     verification_level: str = "self_reported"
     last_verified_at: str | None = None
+    model_hash: str | None = None
 
     @property
     def is_expired(self) -> bool:
@@ -64,6 +65,7 @@ class AttestationCache:
             tenant_id=proof.get("tenant_id") or "",
             verification_level=proof.get("verification_level") or "self_reported",
             last_verified_at=proof.get("last_verified_at"),
+            model_hash=proof.get("model_hash") or None,
         )
         self.set(entry)
 

@@ -64,7 +64,11 @@ async def _discover_ollama(base_url: str, http_client: Any) -> list[dict]:
         for m in data.get("models", []):
             name = m.get("name", "")
             if name and not name.lower().startswith(_INTERNAL_MODEL_PREFIXES):
-                result.append({"model_id": name, "provider": "ollama", "source": "ollama_tags"})
+                entry: dict = {"model_id": name, "provider": "ollama", "source": "ollama_tags"}
+                digest = m.get("digest", "")
+                if digest:
+                    entry["digest"] = digest
+                result.append(entry)
         logger.info("Ollama discovery: found %d models", len(result))
         return result
     except Exception as e:

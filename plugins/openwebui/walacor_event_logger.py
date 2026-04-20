@@ -48,7 +48,7 @@ class Filter:
             description="Enable event logging to gateway",
         )
         log_stream_chunks: bool = Field(
-            default=True,
+            default=False,
             description="Buffer individual stream chunks and include them in the outlet event",
         )
         max_response_chars: int = Field(
@@ -279,6 +279,20 @@ class Filter:
                         resp.status_code,
                         resp.text[:200],
                     )
+                else:
+                    try:
+                        result = resp.json()
+                        gov = result.get("governance") or {}
+                        gov_status = gov.get("governance_status")
+                        if gov_status:
+                            logger.info(
+                                "Gateway governance: status=%s event=%s execution=%s",
+                                gov_status,
+                                event.get("event_type", ""),
+                                gov.get("execution_id", ""),
+                            )
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning("Gateway event log error: %s", e)
 

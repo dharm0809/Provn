@@ -99,3 +99,6 @@ proxy/proxy
 *.jsonl
 CLAUDE.md
 .worktrees/
+
+# --- Open WebUI (separate project, runs locally only) ---
+/open-webui/
