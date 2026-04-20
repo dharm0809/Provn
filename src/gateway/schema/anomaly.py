@@ -143,23 +143,33 @@ class _ModelStats:
     ema: float = 0.0
     emv: float = 0.0  # exponential moving variance
     count: int = 0
+    _last_delta: float = 0.0
 
-    def update(self, value: float, alpha: float = 0.05) -> float:
-        """Update EMA/EMV and return z-score."""
+    def observe(self, value: float, alpha: float = 0.05) -> None:
+        """Update EMA/EMV with a new observation."""
         if self.count == 0:
             self.ema = value
             self.emv = 0.0
+            self._last_delta = 0.0
             self.count = 1
-            return 0.0
+            return
 
         self.count += 1
-        delta = value - self.ema
+        self._last_delta = value - self.ema
         self.ema = alpha * value + (1 - alpha) * self.ema
-        self.emv = alpha * (delta ** 2) + (1 - alpha) * self.emv
+        self.emv = alpha * (self._last_delta ** 2) + (1 - alpha) * self.emv
 
+    def z_score(self) -> float:
+        """Return z-score of the last observation relative to the running baseline."""
+        if self.count <= 1:
+            return 0.0
         std = math.sqrt(self.emv) if self.emv > 0 else 1.0
-        z = delta / std if std > 0.001 else 0.0
-        return z
+        return self._last_delta / std if std > 0.001 else 0.0
+
+    def update(self, value: float, alpha: float = 0.05) -> float:
+        """Observe and return z-score (convenience wrapper kept for compatibility)."""
+        self.observe(value, alpha)
+        return self.z_score()
 
 
 class AnomalyDetector:
