@@ -701,64 +701,60 @@ class LineageReader:
         return attachments
 
     def verify_chain(self, session_id: str) -> dict:
-        """Verify Merkle chain integrity for a session.
+        """Verify chain integrity for a session by walking record_id pointers.
 
-        Recomputes record_hash for each record and checks previous_record_hash linkage.
-        Returns {valid: bool, record_count: int, errors: list[str]}.
+        Checks: sequence numbers are contiguous, each record's previous_record_id
+        matches the prior record's record_id. Returns Walacor attestation fields
+        per record so callers can surface blockchain provenance.
         """
         records = self.get_session_timeline(session_id)
         if not records:
-            return {"valid": True, "record_count": 0, "errors": [], "session_id": session_id}
+            return {
+                "valid": True,
+                "records_checked": 0,
+                "errors": [],
+                "session_id": session_id,
+                "walacor_attestation": [],
+            }
 
         errors: list[str] = []
-        prev_hash = GENESIS_HASH
+        # Seed from first record so legacy chains (previous_record_id = "legacy:000...")
+        # validate correctly alongside new chains (previous_record_id = None for seq 0).
+        expected_prev_id: str | None = records[0].get("previous_record_id") if records else None
 
         for i, rec in enumerate(records):
             seq = rec.get("sequence_number")
-            rec_hash = rec.get("record_hash")
-            rec_prev = rec.get("previous_record_hash")
+            rec_id = rec.get("record_id")
+            prev_id = rec.get("previous_record_id")
             execution_id = rec.get("execution_id", "")
 
-            # Check sequence_number ordering
             if seq is not None and seq != i:
                 errors.append(
-                    f"Record {i}: expected sequence_number={i}, got {seq} (execution_id={execution_id})"
+                    f"sequence gap at record {i}: expected {i}, got {seq} (execution_id={execution_id})"
                 )
 
-            # Check previous_record_hash linkage
-            if rec_prev is not None and rec_prev != prev_hash:
+            if prev_id != expected_prev_id:
                 errors.append(
-                    f"Record {i}: previous_record_hash mismatch "
-                    f"(expected={prev_hash[:16]}..., got={rec_prev[:16]}..., execution_id={execution_id})"
+                    f"id pointer mismatch at sequence {i}: "
+                    f"expected previous_record_id={expected_prev_id!r}, got {prev_id!r} (execution_id={execution_id})"
                 )
 
-            # Recompute record_hash
-            if rec_hash is not None:
-                computed = compute_sha3_512_string("|".join([
-                    execution_id,
-                    str(rec.get("policy_version", "")),
-                    str(rec.get("policy_result", "")),
-                    str(rec.get("previous_record_hash", "")),
-                    str(seq if seq is not None else ""),
-                    str(rec.get("timestamp", "")),
-                ]))
-                if computed != rec_hash:
-                    errors.append(
-                        f"Record {i}: record_hash mismatch "
-                        f"(computed={computed[:16]}..., stored={rec_hash[:16]}..., execution_id={execution_id})"
-                    )
-                prev_hash = rec_hash
-            else:
-                # Record has no chain fields (e.g. unchained legacy record)
-                errors.append(
-                    f"Record {i}: missing record_hash (execution_id={execution_id})"
-                )
+            expected_prev_id = rec_id
 
         return {
             "valid": len(errors) == 0,
-            "record_count": len(records),
+            "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
+            "walacor_attestation": [
+                {
+                    "record_id": r.get("record_id"),
+                    "walacor_block_id": r.get("walacor_block_id"),
+                    "walacor_trans_id": r.get("walacor_trans_id"),
+                    "walacor_dh": r.get("walacor_dh"),
+                }
+                for r in records
+            ],
         }
 
     def get_ab_test_results(self, test_name: str) -> dict:

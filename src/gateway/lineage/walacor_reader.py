@@ -525,46 +525,58 @@ class WalacorLineageReader:
     # ── Chain verification ────────────────────────────────────────────────
 
     async def verify_chain(self, session_id: str) -> dict:
-        """Verify Merkle chain integrity for a session."""
-        from gateway.core import compute_sha3_512_string
-        from gateway.pipeline.session_chain import GENESIS_HASH
+        """Verify chain integrity for a session by walking record_id pointers.
 
+        Checks: sequence numbers are contiguous, each record's previous_record_id
+        matches the prior record's record_id. Returns Walacor attestation fields
+        per record (DH, BlockId, TransId) surfaced by the envelope join.
+        """
         records = await self.get_session_timeline(session_id)
+        if not records:
+            return {
+                "valid": True,
+                "records_checked": 0,
+                "errors": [],
+                "session_id": session_id,
+                "walacor_attestation": [],
+            }
+
         errors: list[str] = []
-        prev_hash = GENESIS_HASH
+        expected_prev_id: str | None = records[0].get("previous_record_id") if records else None
 
         for i, r in enumerate(records):
             seq = r.get("sequence_number", i)
-            stored_prev = r.get("previous_record_hash", "")
-            stored_hash = r.get("record_hash", "")
+            rec_id = r.get("record_id")
+            prev_id = r.get("previous_record_id")
+            execution_id = r.get("execution_id", "")
 
-            if stored_prev != prev_hash:
+            if seq != i:
                 errors.append(
-                    f"Record seq={seq}: previous_record_hash mismatch "
-                    f"(expected {prev_hash[:16]}…, got {stored_prev[:16]}…)"
+                    f"sequence gap at record {i}: expected {i}, got {seq} (execution_id={execution_id})"
                 )
 
-            canonical = "|".join([
-                r.get("execution_id", ""),
-                str(r.get("policy_version", "")),
-                r.get("policy_result", ""),
-                stored_prev,
-                str(seq),
-                r.get("timestamp", ""),
-            ])
-            computed = compute_sha3_512_string(canonical)
-            if computed != stored_hash:
+            if prev_id != expected_prev_id:
                 errors.append(
-                    f"Record seq={seq}: record_hash mismatch "
-                    f"(computed {computed[:16]}…, got {stored_hash[:16]}…)"
+                    f"id pointer mismatch at sequence {i}: "
+                    f"expected previous_record_id={expected_prev_id!r}, got {prev_id!r} (execution_id={execution_id})"
                 )
-            prev_hash = stored_hash
+
+            expected_prev_id = rec_id
 
         return {
             "valid": len(errors) == 0,
-            "record_count": len(records),
+            "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
+            "walacor_attestation": [
+                {
+                    "record_id": r.get("record_id"),
+                    "walacor_block_id": r.get("walacor_block_id"),
+                    "walacor_trans_id": r.get("walacor_trans_id"),
+                    "walacor_dh": r.get("walacor_dh"),
+                }
+                for r in records
+            ],
         }
 
     # ── Compliance queries ────────────────────────────────────────────────
