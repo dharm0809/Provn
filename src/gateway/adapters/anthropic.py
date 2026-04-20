@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from enum import Enum, auto
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -466,6 +467,13 @@ def translate_anthropic_error_to_oai(raw_body: bytes) -> bytes:
     return json.dumps_bytes(out)
 
 
+class _SSEState(Enum):
+    """Explicit FSM states for the Anthropic→OpenAI SSE translator."""
+    INIT = auto()       # Before message_start
+    STREAMING = auto()  # After message_start, before message_stop
+    DONE = auto()       # After message_stop or flush()
+
+
 class _AnthropicToOpenAISSE:
     """Stateful translator: feed Anthropic SSE bytes, get OpenAI SSE bytes.
 
@@ -491,8 +499,7 @@ class _AnthropicToOpenAISSE:
         self._created = int(time.time())
         self._model = model_id
         self._chatcmpl_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        self._role_emitted = False
-        self._done = False
+        self._state = _SSEState.INIT
         self._has_tool_calls = False
         # maps Anthropic content_block index → OpenAI tool_calls array index
         self._tool_index_map: dict[int, int] = {}
@@ -514,9 +521,9 @@ class _AnthropicToOpenAISSE:
 
     def flush(self) -> bytes:
         """Emit final [DONE] marker if not already sent."""
-        if self._done:
+        if self._state is _SSEState.DONE:
             return b""
-        self._done = True
+        self._state = _SSEState.DONE
         return b"data: [DONE]\n\n"
 
     def _make_chunk(self, delta: dict, finish_reason: Any = None) -> bytes:
@@ -554,7 +561,7 @@ class _AnthropicToOpenAISSE:
                 self._chatcmpl_id = msg["id"]
             if msg.get("model"):
                 self._model = msg["model"]
-            self._role_emitted = True
+            self._state = _SSEState.STREAMING
             return self._make_chunk({"role": "assistant", "content": ""})
 
         if ev_type == "content_block_start":
@@ -635,7 +642,7 @@ class _AnthropicToOpenAISSE:
             return self._make_chunk({}, finish_reason=finish)
 
         if ev_type == "message_stop":
-            self._done = True
+            self._state = _SSEState.DONE
             return b"data: [DONE]\n\n"
 
         if ev_type == "error":
