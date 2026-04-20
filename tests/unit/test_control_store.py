@@ -229,7 +229,7 @@ def test_get_attestation_proofs_format(store: ControlPlaneStore):
     proofs = store.get_attestation_proofs("t1")
     assert len(proofs) == 1
     p = proofs[0]
-    assert set(p.keys()) == {"attestation_id", "model_id", "provider", "status", "verification_level", "tenant_id"}
+    assert set(p.keys()) == {"attestation_id", "model_id", "provider", "status", "verification_level", "tenant_id", "model_hash"}
     assert p["model_id"] == "m1"
     assert p["status"] == "active"
 

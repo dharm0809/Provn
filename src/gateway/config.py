@@ -462,6 +462,12 @@ class Settings(BaseSettings):
         description="Enable /lineage/ dashboard and /v1/lineage/* API endpoints.",
     )
 
+    # OpenWebUI plugin governance
+    plugin_event_governance_enabled: bool = Field(
+        default=True,
+        description="Run governance pipeline (attestation, policy, session chain, WAL) on OpenWebUI plugin events.",
+    )
+
     # Phase 17: OpenTelemetry export
     otel_enabled: bool = Field(
         default=False,

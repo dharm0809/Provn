@@ -128,7 +128,7 @@ function ModelsView({ refresh }) {
 
   const registerModel = async (m) => {
     try {
-      await api.createAttestation({ model_id: m.model_id, provider: m.provider, status: 'active', notes: `Discovered from ${m.source}` });
+      await api.createAttestation({ model_id: m.model_id, provider: m.provider, status: 'active', notes: `Discovered from ${m.source}`, model_hash: m.digest || '' });
       // Update discovered list to reflect registration
       setDiscovered(prev => prev ? prev.map(d => d.model_id === m.model_id ? { ...d, registered: true } : d) : prev);
       load();
@@ -142,7 +142,7 @@ function ModelsView({ refresh }) {
     setRegisteringAll(true);
     try {
       for (const m of unregistered) {
-        await api.createAttestation({ model_id: m.model_id, provider: m.provider, status: 'active', notes: `Discovered from ${m.source}` });
+        await api.createAttestation({ model_id: m.model_id, provider: m.provider, status: 'active', notes: `Discovered from ${m.source}`, model_hash: m.digest || '' });
       }
       setDiscovered(prev => prev ? prev.map(d => ({ ...d, registered: true })) : prev);
       load();
@@ -211,7 +211,7 @@ function ModelsView({ refresh }) {
                 <th className="sortable" onClick={() => toggleSort('provider')}>Provider <SortArrow col="provider" sortCol={sortCol} sortDir={sortDir} /></th>
                 <th className="sortable" onClick={() => toggleSort('status')}>Status <SortArrow col="status" sortCol={sortCol} sortDir={sortDir} /></th>
                 <th className="sortable" onClick={() => toggleSort('verification_level')}>Verification <SortArrow col="verification_level" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th>Notes</th><th style={{ textAlign: 'right' }}>Actions</th>
+                <th>Digest</th><th>Notes</th><th style={{ textAlign: 'right' }}>Actions</th>
               </tr></thead>
               <tbody>
                 {sortedAttestations.map(a => (
@@ -220,6 +220,7 @@ function ModelsView({ refresh }) {
                     <td className="mono">{a.provider}</td>
                     <td><span className={`badge ${a.status === 'active' ? 'badge-pass' : a.status === 'revoked' ? 'badge-fail' : 'badge-warn'}`}>{a.status}</span></td>
                     <td><span className="badge badge-muted">{a.verification_level}</span></td>
+                    <td style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }} title={a.model_hash || ''}>{a.model_hash ? a.model_hash.slice(0, 20) + '…' : '-'}</td>
                     <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.notes || '-'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
