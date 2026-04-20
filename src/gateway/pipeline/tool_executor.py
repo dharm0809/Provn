@@ -611,12 +611,8 @@ def _build_tool_event_record(
     }
     if t.input_data is not None:
         record["input_data"] = t.input_data
-        record["input_hash"] = compute_sha3_512_string(json.dumps(t.input_data, default=str, sort_keys=True))
     if t.output_data is not None:
         record["output_data"] = t.output_data
-        record["output_hash"] = compute_sha3_512_string(json.dumps(t.output_data, default=str, sort_keys=True))
-    elif t.sources:
-        record["output_hash"] = compute_sha3_512_string(json.dumps(t.sources, default=str, sort_keys=True))
     if t.sources:
         record["sources"] = t.sources
     if t.metadata:
