@@ -8,7 +8,8 @@ const METRICS_URL = '/metrics';
 // ─── Lineage API ────────────────────────────────────────────────
 
 async function fetchJSON(url) {
-  const resp = await fetch(url);
+  const key = getControlKey();
+  const resp = await fetch(url, key ? { headers: { 'X-API-Key': key } } : {});
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
@@ -60,11 +61,13 @@ export async function getAttempts(limit = 100, offset = 0, opts = {}) {
 }
 
 export async function getTokenLatency(range) {
-  return fetchJSON(`${API}/token-latency?range=${range}`);
+  const sp = new URLSearchParams({ range: String(range) });
+  return fetchJSON(`${API}/token-latency?${sp.toString()}`);
 }
 
 export async function getThroughputHistory(range) {
-  const data = await fetchJSON(`${API}/metrics?range=${range}`);
+  const sp = new URLSearchParams({ range: String(range) });
+  const data = await fetchJSON(`${API}/metrics?${sp.toString()}`);
   if (data.buckets) {
     data.buckets = data.buckets.map(b => ({ ...b, request_count: b.total }));
   }
@@ -97,7 +100,7 @@ export function subscribeThroughput(range, onData, { pollMs = 3000 } = {}) {
   let es = null;
   let fallbackCleanup = null;
   try {
-    es = new EventSource(`${API}/metrics/stream?range=${range}`);
+    es = new EventSource(`${API}/metrics/stream?${new URLSearchParams({ range: String(range) }).toString()}`);
     es.onmessage = (e) => {
       if (cancelled) return;
       try { onData(normalize(JSON.parse(e.data))); } catch { /* ignore malformed frame */ }
@@ -124,7 +127,7 @@ function _pollFallback(range, onData, normalize, pollMs, isCancelled) {
   const tick = async () => {
     if (isCancelled()) return;
     try {
-      const data = await fetchJSON(`${API}/metrics?range=${range}`);
+      const data = await fetchJSON(`${API}/metrics?${new URLSearchParams({ range: String(range) }).toString()}`);
       if (!isCancelled()) onData(normalize(data));
     } catch { /* swallow; next tick retries */ }
   };
@@ -135,6 +138,33 @@ function _pollFallback(range, onData, normalize, pollMs, isCancelled) {
 
 export async function getTrace(executionId) {
   return fetchJSON(`${API}/trace/${executionId}`);
+}
+
+// Live Walacor envelope for a sealed record.
+// Returns { execution_id, envelope, local, match } — envelope may be null
+// when Walacor is unreachable or the record isn't yet delivered; the UI
+// should render "seal pending" / "unreachable" in those cases based on HTTP
+// status (502 / 503 / 200-with-envelope=null) but we still surface the body.
+export async function getSealEnvelope(executionId) {
+  const key = getControlKey();
+  const resp = await fetch(
+    `${API}/envelope/${encodeURIComponent(executionId)}`,
+    key ? { headers: { 'X-API-Key': key } } : {},
+  );
+  // 502 / 503 still include a body with the fallback local anchor — parse
+  // and return it rather than throwing, so the drawer can degrade gracefully.
+  if (resp.status === 401 || resp.status === 403) {
+    clearControlKey();
+    throw new Error('AUTH');
+  }
+  if (resp.status === 404) {
+    throw new Error('NOT_FOUND');
+  }
+  try {
+    return await resp.json();
+  } catch {
+    throw new Error(`HTTP ${resp.status}`);
+  }
 }
 
 export async function verifySession(sessionId) {
@@ -197,6 +227,26 @@ async function controlFetch(url, options = {}) {
 
 export async function getControlStatus() {
   return fetchControlJSON(`${CTRL_API}/status`);
+}
+
+// ─── Readiness API ──────────────────────────────────────────────
+
+export async function getReadiness({ fresh = false } = {}) {
+  const qs = fresh ? '?fresh=1' : '';
+  const key = getControlKey();
+  const resp = await fetch(`/v1/readiness${qs}`, key ? { headers: { 'X-API-Key': key } } : {});
+  if (resp.status === 401 || resp.status === 403) {
+    clearControlKey();
+    throw new Error('AUTH');
+  }
+  if (resp.status === 503) {
+    throw new Error('DISABLED');
+  }
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+  }
+  return resp.json();
 }
 
 export async function getAttestations() {

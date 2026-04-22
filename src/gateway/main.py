@@ -23,6 +23,7 @@ from gateway.pipeline.orchestrator import handle_request
 from gateway.pipeline.context import get_pipeline_context
 from gateway.health import health_response, metrics_response
 from gateway.auth.api_key import require_api_key_if_configured
+from gateway.readiness.api import readiness_handler
 from gateway.middleware.completeness import completeness_middleware
 from gateway.middleware.ip_rate_limiter import IPRateLimiter
 from gateway.lineage.api import (
@@ -34,6 +35,7 @@ from gateway.lineage.api import (
     lineage_metrics_stream,
     lineage_token_latency_history,
     lineage_trace,
+    lineage_envelope,
     lineage_verify,
     lineage_attachments,
     lineage_ab_test_results,
@@ -182,7 +184,17 @@ async def api_key_middleware(request: Request, call_next):
 
     Supports auth_mode: 'api_key' (default), 'jwt', or 'both'.
     """
-    if request.url.path in ("/", "/health", "/metrics", "/v1/models") or request.url.path.startswith(("/lineage/", "/v1/lineage/", "/v1/compliance")):
+    _always_open = ("/", "/health", "/metrics", "/v1/models")
+    # /lineage/ serves the static dashboard — must load so users can reach the AuthGate.
+    # /v1/lineage/* and /v1/compliance expose JSON data; gated when lineage_auth_required=True.
+    _static_ui = request.url.path.startswith("/lineage/")
+    _lineage_data_paths = ("/v1/lineage/", "/v1/compliance")
+    _lineage_data_open = not get_settings().lineage_auth_required
+    if (
+        request.url.path in _always_open
+        or _static_ui
+        or (_lineage_data_open and request.url.path.startswith(_lineage_data_paths))
+    ):
         return await call_next(request)
 
     # Pre-auth per-IP rate limiting (before any auth check)
@@ -1350,6 +1362,20 @@ async def on_startup() -> None:
     ctx = get_pipeline_context()
 
     try:
+        # Ed25519 record signing — auto-provisions a key on first run and
+        # reuses it on every subsequent restart so historical signatures stay
+        # verifiable. An explicit WALACOR_RECORD_SIGNING_KEY_PATH wins; when
+        # unset we default to a file under wal_path so the key lives next to
+        # the records it authenticates. Fail-open: if key generation fails
+        # (e.g. read-only FS, missing cryptography package), records are
+        # written unsigned and verify_chain reports signatures as "absent".
+        from gateway.crypto.signing import ensure_signing_key
+        import os as _os
+        _key_path = settings.record_signing_key_path or _os.path.join(
+            settings.wal_path, "record-signing.ed25519.pem"
+        )
+        ensure_signing_key(_key_path)
+
         # Walacor storage is mode-independent: init before the skip_governance shortcut
         # so completeness attempts are always written when credentials are configured.
         if settings.walacor_storage_enabled:
@@ -1453,16 +1479,24 @@ async def on_startup() -> None:
                 logger.warning("SECURITY: auth_mode=%s but jwt_audience not set — any JWT audience will be accepted", settings.auth_mode)
             if settings.jwt_secret and len(settings.jwt_secret) < 32:
                 logger.error("SECURITY: jwt_secret is too short (%d chars) — use at least 32 characters for HS256", len(settings.jwt_secret))
-        # Auto-generate API key if control plane is active but no keys configured
+        # Auto-generate API key if control plane is active but no keys configured.
+        # Phase 5: key is persisted to {wal_path}/gateway-bootstrap-key.txt so it
+        # survives restarts and doesn't invalidate session tokens on every boot.
         if settings.control_plane_enabled and not settings.api_keys_list:
-            import secrets
-            auto_key = f"wgk-{secrets.token_urlsafe(32)}"
+            from gateway.auth.bootstrap_key import ensure_bootstrap_key
+            auto_key, stable = ensure_bootstrap_key(settings.wal_path)
             settings.gateway_api_keys = auto_key
-            logger.warning(
-                "SECURITY: Control plane enabled without API keys. "
-                "Auto-generated key: %s — set WALACOR_GATEWAY_API_KEYS to use your own.",
-                auto_key,
-            )
+            if stable:
+                logger.warning(
+                    "SECURITY: Control plane enabled without API keys. "
+                    "Using persisted bootstrap key — set WALACOR_GATEWAY_API_KEYS to rotate.",
+                )
+            else:
+                logger.warning(
+                    "SECURITY: Control plane enabled without API keys. "
+                    "Auto-generated key: %s (not persisted — will rotate on restart).",
+                    auto_key,
+                )
         # Phase 23: Startup probes (provider health, disk, routing)
         if settings.startup_probes_enabled:
             from gateway.adaptive.startup_probes import run_startup_probes
@@ -1888,6 +1922,7 @@ def create_app() -> Starlette:
         Route("/v1/lineage/metrics/stream", lineage_metrics_stream, methods=["GET"]),
         Route("/v1/lineage/token-latency", lineage_token_latency_history, methods=["GET"]),
         Route("/v1/lineage/trace/{execution_id:path}", lineage_trace, methods=["GET"]),
+        Route("/v1/lineage/envelope/{execution_id:path}", lineage_envelope, methods=["GET"]),
         Route("/v1/lineage/verify/{session_id:path}", lineage_verify, methods=["GET"]),
         Route("/v1/lineage/cost", lineage_cost_summary, methods=["GET"]),
         Route("/v1/lineage/attachments", lineage_attachments, methods=["GET"]),
@@ -1944,6 +1979,8 @@ def create_app() -> Starlette:
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
         Route("/v1/compliance/export", compliance_export, methods=["GET"]),
+        # Readiness self-check
+        Route("/v1/readiness", readiness_handler, methods=["GET"]),
         # Attachment tracking webhook
         Route("/v1/attachments/notify", _attachment_notify, methods=["POST"]),
         # Proxy routes

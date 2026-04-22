@@ -374,6 +374,140 @@ async def lineage_trace(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+async def lineage_envelope(request: Request) -> JSONResponse:
+    """GET /v1/lineage/envelope/{execution_id} — raw Walacor envelope for a sealed record.
+
+    Returns the unredacted envelope fields (UID, ORGId, SV, EId, …) by calling
+    walacor_client.query_complex directly. Also returns a `match` block
+    comparing the locally stored anchor fields against what Walacor returned,
+    so the dashboard can prove the seal is still valid right now — not just at
+    write time.
+
+    Shape:
+        {
+          "execution_id": "...",
+          "envelope": { ...raw getcomplex row, NO deserialization stripping... } | null,
+          "local": { "walacor_block_id", "walacor_trans_id", "walacor_dh", "record_hash" },
+          "match": {
+              "dh":       true|false,
+              "block_id": true|false,
+              "trans_id": true|false,
+              "all_ok":   true|false
+          }
+        }
+
+    Errors:
+        404 — execution_id not in local WAL
+        502 — Walacor unreachable or query failed; body includes {fallback: {local...}}
+        503 — Walacor storage not configured (walacor_client is None)
+    """
+    execution_id = request.path_params["execution_id"]
+    ctx = get_pipeline_context()
+
+    # Need both the local reader (for local anchor fields) AND the walacor client
+    # (for the live envelope). Missing either → graceful degradation.
+    reader = _reader_or_503()
+    if reader is None:
+        return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
+
+    # Local view — always available (this is what the session timeline shows).
+    try:
+        local_exec = await _call(reader.get_execution, execution_id)
+    except Exception as e:
+        logger.error("lineage_envelope local lookup error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+    if not local_exec:
+        return JSONResponse(
+            {"error": "Execution not found", "execution_id": execution_id},
+            status_code=404,
+        )
+
+    local_anchor = {
+        "walacor_block_id": local_exec.get("walacor_block_id"),
+        "walacor_trans_id": local_exec.get("walacor_trans_id"),
+        "walacor_dh": local_exec.get("walacor_dh"),
+        "record_hash": local_exec.get("record_hash"),
+    }
+
+    # No Walacor client → local-only response.
+    if ctx.walacor_client is None:
+        return JSONResponse(
+            {
+                "execution_id": execution_id,
+                "envelope": None,
+                "local": local_anchor,
+                "match": None,
+                "warning": "Walacor storage not configured — showing local anchor only",
+            },
+            status_code=503,
+        )
+
+    # Live round-trip. Do NOT run _deserialize_record — we want the envelope
+    # identity fields (_id, UID, ORGId, SV) that deserialization strips.
+    from gateway.config import get_settings
+    settings = get_settings()
+    try:
+        rows = await ctx.walacor_client.query_complex(
+            settings.walacor_executions_etid,
+            [{"$match": {"execution_id": execution_id}}, {"$limit": 1}],
+        )
+    except Exception as e:
+        logger.warning("lineage_envelope live fetch failed: %s", e, exc_info=True)
+        return JSONResponse(
+            {
+                "execution_id": execution_id,
+                "envelope": None,
+                "local": local_anchor,
+                "match": None,
+                "error": f"Walacor unreachable: {e}",
+            },
+            status_code=502,
+        )
+
+    envelope = rows[0] if rows else None
+    if envelope is None:
+        return JSONResponse(
+            {
+                "execution_id": execution_id,
+                "envelope": None,
+                "local": local_anchor,
+                "match": None,
+                "error": "Execution not found on Walacor — sealed locally but not yet delivered",
+            },
+            status_code=200,  # Not an error; the UI renders "seal pending".
+        )
+
+    # Compare local anchor fields against remote envelope. Walacor column names
+    # use PascalCase (BlockId, TransId, DH) in the envelope but snake_case in
+    # the record body — check both just in case the backend surfaces either.
+    def _first(d: dict, *keys: str):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return None
+
+    remote_block = _first(envelope, "BlockId", "walacor_block_id", "block_id")
+    remote_trans = _first(envelope, "TransId", "walacor_trans_id", "trans_id")
+    remote_dh = _first(envelope, "DH", "walacor_dh", "dh")
+
+    match = {
+        "block_id": local_anchor["walacor_block_id"] == remote_block
+                     if local_anchor["walacor_block_id"] and remote_block else None,
+        "trans_id": local_anchor["walacor_trans_id"] == remote_trans
+                     if local_anchor["walacor_trans_id"] and remote_trans else None,
+        "dh": local_anchor["walacor_dh"] == remote_dh
+               if local_anchor["walacor_dh"] and remote_dh else None,
+    }
+    match["all_ok"] = all(v is True for v in (match["block_id"], match["trans_id"], match["dh"]))
+
+    return JSONResponse({
+        "execution_id": execution_id,
+        "envelope": envelope,
+        "local": local_anchor,
+        "match": match,
+    })
+
+
 async def lineage_verify(request: Request) -> JSONResponse:
     """GET /v1/lineage/verify/{session_id} — server-side chain verification."""
     reader = _reader_or_503()
