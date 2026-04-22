@@ -1,6 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { Fragment, useState, useEffect, useCallback } from 'react';
 import { getSession, verifySession } from '../api';
 import { formatSessionId, displayModel, timeAgo, truncHash, getTokenCount, policyBadgeClass, copyToClipboard, fileTypeInfo, formatBytes } from '../utils';
+import SealButton, { sealState } from '../components/SealButton';
+import SealDrawer from '../components/SealDrawer';
+import '../styles/exec-drawer.css';
 
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
@@ -20,6 +23,16 @@ export default function Timeline({ navigate, sessionId }) {
   const [verifyResult, setVerifyResult] = useState(null);
   const [verifying, setVerifying] = useState(false);
   const [nodeResults, setNodeResults] = useState([]);
+  const [openSeals, setOpenSeals] = useState(() => new Set());
+
+  const toggleSeal = useCallback((executionId) => {
+    setOpenSeals(prev => {
+      const next = new Set(prev);
+      if (next.has(executionId)) next.delete(executionId);
+      else next.add(executionId);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -38,17 +51,22 @@ export default function Timeline({ navigate, sessionId }) {
     try {
       const result = await verifySession(sessionId);
       const n = result.records_checked ?? 0;
-      // Animate nodes: valid if no errors for that record (all-or-nothing per session)
-      const nodeOk = result.valid;
+      const perRecord = result.records || [];
       for (let i = 0; i < n; i++) {
         await new Promise(r => setTimeout(r, 180));
+        const pr = perRecord[i];
+        const nodeOk = pr ? (pr.structural_ok && pr.signature !== 'invalid' && pr.anchor !== 'mismatched') : result.valid;
         setNodeResults(prev => [...prev, nodeOk]);
       }
-      if (result.valid) {
-        setVerifyResult({ valid: true, message: `Chain Valid — ${n} record${n !== 1 ? 's' : ''} verified, ID pointers link · Walacor sealed`, attestation: result.walacor_attestation });
-      } else {
-        setVerifyResult({ valid: false, errors: result.errors, message: `Chain Invalid — ${result.errors.length} error${result.errors.length !== 1 ? 's' : ''}`, attestation: result.walacor_attestation });
-      }
+      setVerifyResult({
+        valid: result.valid,
+        errors: result.errors || [],
+        checks: result.checks || null,
+        records: perRecord,
+        message: result.valid
+          ? `Chain Valid — ${n} record${n !== 1 ? 's' : ''} checked`
+          : `Chain Invalid — ${(result.errors || []).length} error${(result.errors || []).length !== 1 ? 's' : ''}`,
+      });
     } catch (e) {
       setVerifyResult({ valid: false, message: `Verification failed: ${e.message}`, errors: [] });
     }
@@ -87,9 +105,70 @@ export default function Timeline({ navigate, sessionId }) {
       </div>
 
       {verifyResult && (
-        <div className={`verify-banner ${verifyResult.valid ? 'pass' : 'fail'}`}>
-          <span style={{ fontSize: 18, lineHeight: 1 }}>{verifyResult.valid ? '✓' : '✗'}</span>
-          {verifyResult.message}
+        <div className={`verify-banner ${verifyResult.valid ? 'pass' : 'fail'}`} style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>{verifyResult.valid ? '✓' : '✗'}</span>
+            <span>{verifyResult.message}</span>
+          </div>
+          {verifyResult.checks && (() => {
+            const c = verifyResult.checks;
+            const sig = c.signatures || {};
+            const anc = c.anchors || {};
+            const str = c.structural || {};
+            const Pill = ({ label, tone, title }) => (
+              <span title={title} style={{
+                fontFamily: 'var(--mono)', fontSize: 11, padding: '2px 8px', borderRadius: 3,
+                background: tone === 'ok' ? 'var(--green-bg, rgba(52,211,153,0.12))'
+                         : tone === 'warn' ? 'var(--amber-bg, rgba(201,168,76,0.14))'
+                         : tone === 'err' ? 'var(--red-bg, rgba(239,68,68,0.14))'
+                         : 'var(--bg-inset)',
+                color: tone === 'ok' ? 'var(--green)'
+                     : tone === 'warn' ? 'var(--amber, var(--gold))'
+                     : tone === 'err' ? 'var(--red)'
+                     : 'var(--text-muted)',
+                border: '1px solid var(--border)',
+              }}>{label}</span>
+            );
+            const sigTone = sig.invalid > 0 ? 'err'
+              : sig.valid > 0 ? 'ok'
+              : sig.unverifiable > 0 ? 'warn'
+              : 'muted';
+            const sigLabel = sig.invalid > 0 ? `signature ${sig.invalid} invalid`
+              : sig.valid > 0 ? `signature ${sig.valid}/${sig.valid + sig.absent + sig.invalid + sig.unverifiable} verified (Ed25519)`
+              : sig.unverifiable > 0 ? `signature present but no verify key loaded (${sig.unverifiable})`
+              : `signature absent on all ${sig.absent} records`;
+            const ancTone = anc.mismatched > 0 ? 'err'
+              : anc.present > 0 && anc.independent_roundtrip ? 'ok'
+              : anc.present > 0 ? 'warn'
+              : 'muted';
+            const ancLabel = anc.mismatched > 0 ? `anchor ${anc.mismatched} mismatched`
+              : anc.independent_roundtrip ? `anchor ${anc.present} round-tripped to Walacor`
+              : anc.present > 0 ? `anchor present on ${anc.present} (no round-trip)`
+              : `anchor absent on all ${anc.absent} records`;
+            const strTone = str.failed > 0 ? 'err' : 'ok';
+            const strLabel = str.failed > 0 ? `structural ${str.failed} failed`
+              : `structural ${str.passed} linked`;
+            return (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, paddingLeft: 26 }}>
+                <Pill label={strLabel} tone={strTone}
+                      title="Sequence number is contiguous and previous_record_id links to prior record_id." />
+                <Pill label={sigLabel} tone={sigTone}
+                      title="Ed25519 signature over (record_id | previous_record_id | sequence_number | execution_id | timestamp)." />
+                <Pill label={ancLabel} tone={ancTone}
+                      title="Walacor envelope BlockId/TransId/DH presence; round-trip re-queries Walacor by EId and compares." />
+              </div>
+            );
+          })()}
+          {verifyResult.errors && verifyResult.errors.length > 0 && (
+            <details style={{ paddingLeft: 26 }}>
+              <summary style={{ cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                {verifyResult.errors.length} error{verifyResult.errors.length !== 1 ? 's' : ''} — details
+              </summary>
+              <ul style={{ margin: '6px 0 0', paddingLeft: 16, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                {verifyResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+              </ul>
+            </details>
+          )}
         </div>
       )}
 
@@ -111,12 +190,15 @@ export default function Timeline({ navigate, sessionId }) {
             const prompt = (r.prompt_text || '').substring(0, 100);
             const response = (r.response_content || r.thinking_content || '').substring(0, 80);
             const tokens = getTokenCount(r);
-            const isLast = i === records.length - 1;
+            const isLast = i === userRecords.length - 1;
             const verified = i < nodeResults.length ? (nodeResults[i] ? 'pass' : 'fail') : null;
             const toolInfo = r.metadata?.tool_interactions || [];
 
+            const ss = sealState(r);
+            const sealOpen = openSeals.has(r.execution_id);
             return (
-              <div key={r.execution_id || i} className="chain-node">
+              <Fragment key={r.execution_id || i}>
+              <div className="chain-node">
                 <div className="chain-marker">
                   <div className={`chain-seq${verified ? ` verified-${verified}` : ''}`}>{seq}</div>
                   {!isLast && <div className={`chain-connector${verified ? ` verified-${verified}` : ''}`} />}
@@ -170,6 +252,11 @@ export default function Timeline({ navigate, sessionId }) {
                         ◆ on-chain
                       </span>
                     )}
+                    <SealButton
+                      state={ss}
+                      isOpen={sealOpen}
+                      onToggle={() => toggleSeal(r.execution_id)}
+                    />
                   </div>
                   {/* File/Image detail */}
                   {r.file_metadata && r.file_metadata.length > 0 && (
@@ -230,6 +317,10 @@ export default function Timeline({ navigate, sessionId }) {
                   )}
                 </div>
               </div>
+              {sealOpen && ss === 'sealed' && (
+                <SealDrawer r={r} sessionId={sessionId} totalInChain={userRecords.length} />
+              )}
+              </Fragment>
             );
           })}
 
