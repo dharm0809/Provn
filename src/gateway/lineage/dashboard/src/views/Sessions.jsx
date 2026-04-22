@@ -1,10 +1,13 @@
 /* Walacor Gateway — Sessions View (from design zip, wired to real API)
    Two-level flow: session list → session timeline drill-down. */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { Fragment, useState, useEffect, useMemo, useCallback } from 'react';
 import { getSessions, getSession, verifySession } from '../api';
 import { timeAgo } from '../utils';
+import SealButton, { sealState } from '../components/SealButton';
+import SealDrawer from '../components/SealDrawer';
 import '../styles/sessions-v2.css';
+import '../styles/exec-drawer.css';
 
 function fmtShortId(id, head = 8, tail = 4) {
   if (!id) return '—';
@@ -163,8 +166,13 @@ const SessionListRow = React.memo(function SessionListRow({ s, onOpen }) {
   );
 }, (prev, next) => {
   const a = prev.s, b = next.s;
-  // Compare the primitive fields the row actually reads; short-circuit on any
-  // change. onOpen is stable via useCallback so reference equality is fine.
+  // Compare the primitive fields the row actually reads. onOpen is stable
+  // via useCallback so reference equality is fine. `tools` is an array that
+  // the backend may rebuild on each poll; last_activity moves whenever a
+  // session gains a tool call, so comparing length + last_activity is a
+  // sufficient canary without the cost of JSON-stringifying the array.
+  const aToolsLen = (a.tools || []).length;
+  const bToolsLen = (b.tools || []).length;
   return prev.onOpen === next.onOpen
     && a.session_id === b.session_id
     && a.last_activity === b.last_activity
@@ -177,8 +185,7 @@ const SessionListRow = React.memo(function SessionListRow({ s, onOpen }) {
     && a.has_files === b.has_files
     && a.has_images === b.has_images
     && a.request_type === b.request_type
-    && a.tool_names === b.tool_names
-    && a.tool_details === b.tool_details;
+    && aToolsLen === bToolsLen;
 });
 
 function SessionsListView({ all, onOpen }) {
@@ -319,7 +326,7 @@ function VerifyBanner({ result }) {
   );
 }
 
-function ChainRecord({ r, isLast, verified, onClick }) {
+function ChainRecord({ r, isLast, verified, onClick, sealOpen, onToggleSeal }) {
   const tools = (r.metadata && r.metadata.tool_interactions) || [];
   const prompt = r.prompt_text || '';
   const response = r.response_content || '';
@@ -395,6 +402,13 @@ function ChainRecord({ r, isLast, verified, onClick }) {
               <span className="ses-proof-hash mono muted">{fmtShortId(r._walacor_eid, 8, 4)}</span></>}
             </div>
           )}
+          <div className="ses-proof-row" style={{ marginTop: 8 }}>
+            <SealButton
+              state={sealState(r)}
+              isOpen={!!sealOpen}
+              onToggle={onToggleSeal}
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -407,6 +421,16 @@ function SessionTimelineView({ session, onBack }) {
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState(null);
   const [nodeResults, setNodeResults] = useState([]);
+  const [openSeals, setOpenSeals] = useState(() => new Set());
+
+  const toggleSeal = useCallback((executionId) => {
+    setOpenSeals(prev => {
+      const next = new Set(prev);
+      if (next.has(executionId)) next.delete(executionId);
+      else next.add(executionId);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -495,14 +519,29 @@ function SessionTimelineView({ session, onBack }) {
         <div className="card"><div className="empty">No records found for this session.</div></div>
       ) : (
         <div className="ses-chain">
-          {records.map((r, i) => (
-            <ChainRecord
-              key={r.execution_id || i}
-              r={r}
-              isLast={i === records.length - 1}
-              verified={i < nodeResults.length ? (nodeResults[i] ? 'pass' : 'fail') : null}
-              onClick={() => {}} />
-          ))}
+          {records.map((r, i) => {
+            const isOpen = r.execution_id && openSeals.has(r.execution_id);
+            const ss = sealState(r);
+            return (
+              <Fragment key={r.execution_id || i}>
+                <ChainRecord
+                  r={r}
+                  isLast={i === records.length - 1}
+                  verified={i < nodeResults.length ? (nodeResults[i] ? 'pass' : 'fail') : null}
+                  onClick={() => {}}
+                  sealOpen={isOpen}
+                  onToggleSeal={() => r.execution_id && toggleSeal(r.execution_id)}
+                />
+                {isOpen && ss === 'sealed' && (
+                  <SealDrawer
+                    r={r}
+                    sessionId={session.session_id}
+                    totalInChain={records.length}
+                  />
+                )}
+              </Fragment>
+            );
+          })}
         </div>
       )}
     </div>
