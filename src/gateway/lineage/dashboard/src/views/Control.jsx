@@ -14,6 +14,7 @@ import {
   getAttestations,
   revokeAttestation,
   removeAttestation,
+  createAttestation,
   getPolicies,
   deletePolicy,
   getBudgets,
@@ -22,6 +23,14 @@ import {
   setControlKey,
   clearControlKey,
   hasControlKey,
+  getContentPolicies,
+  upsertContentPolicy,
+  deleteContentPolicy,
+  getPricing,
+  upsertPricing,
+  deletePricing,
+  listTemplates,
+  applyTemplate,
 } from '../api';
 import { timeAgo } from '../utils';
 import '../styles/control.css';
@@ -293,7 +302,7 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh }) {
   );
 }
 
-function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh }) {
+function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh, cpRows, onRefreshCP, tplRows, onRefreshTpl }) {
   if (!rows) return <Loading />;
 
   const onDelete = async (id) => {
@@ -363,11 +372,270 @@ function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh }) {
           </table>
         )}
       </div>
+
+      <ContentPoliciesSection rows={cpRows} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshCP} />
+      <TemplatesSection rows={tplRows} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshTpl} />
     </>
   );
 }
 
-function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh }) {
+function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh }) {
+  const [form, setForm] = useState(null);
+
+  const startAdd = () => setForm({ analyzer_id: '', category: '', action: 'warn', threshold: '0.5' });
+  const startEdit = (r) => setForm({
+    id: r.id,
+    analyzer_id: r.analyzer_id,
+    category: r.category,
+    action: r.action,
+    threshold: String(r.threshold ?? 0.5),
+  });
+  const onSave = async () => {
+    if (!form?.analyzer_id || !form?.category) return;
+    try {
+      await upsertContentPolicy({
+        id: form.id,
+        analyzer_id: form.analyzer_id.trim(),
+        category: form.category.trim(),
+        action: form.action,
+        threshold: parseFloat(form.threshold) || 0,
+      });
+      setForm(null);
+      onRefresh();
+    } catch (e) { alert(e.message); }
+  };
+  const onDelete = async (id) => {
+    if (!window.confirm(`Delete content policy ${id}?`)) return;
+    try { await deleteContentPolicy(id); onRefresh(); } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <div className="cp-section">
+      <div className="cp-section-head">
+        <div className="cp-section-label"><span className="cp-dia">◆</span>content-analyzer thresholds</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span className="cp-section-meta">{(rows || []).length} rules</span>
+          <button
+            className="cp-btn cp-btn-sm cp-btn-primary"
+            disabled={!canWrite}
+            onClick={!canWrite ? onUnlock : startAdd}
+          >◆ add rule</button>
+        </div>
+      </div>
+
+      {form && (
+        <div className="cp-section" style={{ background: 'var(--bg-inset)', padding: 12, marginBottom: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1.5fr 1fr 0.8fr auto', gap: 8, alignItems: 'center' }}>
+            <input className="cp-modal-input" placeholder="analyzer_id (e.g. walacor.pii.v1)" value={form.analyzer_id}
+              onChange={e => setForm({ ...form, analyzer_id: e.target.value })} />
+            <input className="cp-modal-input" placeholder="category (e.g. ssn, toxicity)" value={form.category}
+              onChange={e => setForm({ ...form, category: e.target.value })} />
+            <select className="cp-modal-input" value={form.action}
+              onChange={e => setForm({ ...form, action: e.target.value })}>
+              <option value="block">block</option>
+              <option value="warn">warn</option>
+              <option value="pass">pass</option>
+            </select>
+            <input className="cp-modal-input" placeholder="threshold" type="number" step="0.01" min="0" max="1" value={form.threshold}
+              onChange={e => setForm({ ...form, threshold: e.target.value })} />
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="cp-btn cp-btn-sm cp-btn-primary" onClick={onSave}>save</button>
+              <button className="cp-btn cp-btn-sm" onClick={() => setForm(null)}>cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(!rows || rows.length === 0) ? (
+        <Empty title="No analyzer thresholds configured" body="Configure BLOCK/WARN/PASS per analyzer and category." />
+      ) : (
+        <table className="cp-table">
+          <thead>
+            <tr>
+              <th>Analyzer</th>
+              <th>Category</th>
+              <th style={{ width: 100 }}>Action</th>
+              <th style={{ width: 110 }}>Threshold</th>
+              <th style={{ width: 140 }}>Updated</th>
+              <th style={{ width: 140 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td><span className="cp-mono">{r.analyzer_id}</span></td>
+                <td><span className="cp-mono cp-muted">{r.category}</span></td>
+                <td><Badge kind={r.action === 'block' ? 'fail' : r.action === 'warn' ? 'warn' : 'ok'}>{r.action}</Badge></td>
+                <td className="cp-mono">{Number(r.threshold ?? 0).toFixed(2)}</td>
+                <td className="cp-mono cp-dim">{r.updated_at ? timeAgo(r.updated_at) : '—'}</td>
+                <td>
+                  <div className="cp-row-actions">
+                    <button className="cp-btn cp-btn-sm" disabled={!canWrite} onClick={() => startEdit(r)}>edit</button>
+                    <button className="cp-btn cp-btn-sm cp-btn-danger" disabled={!canWrite} onClick={() => onDelete(r.id)}>delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function TemplatesSection({ rows, canWrite, onUnlock, onRefresh }) {
+  const onApply = async (name) => {
+    if (!window.confirm(`Apply template "${name}"? This will create the policies it contains.`)) return;
+    try { const res = await applyTemplate(name); alert(`Applied. Created ${res.created_count ?? res.count ?? '?'} policies.`); onRefresh(); }
+    catch (e) { alert(e.message); }
+  };
+
+  return (
+    <div className="cp-section">
+      <div className="cp-section-head">
+        <div className="cp-section-label"><span className="cp-dia">◆</span>available templates</div>
+        <span className="cp-section-meta">{(rows || []).length}</span>
+      </div>
+      {(!rows || rows.length === 0) ? (
+        <Empty title="No templates available" body="Templates ship as JSON files under the gateway's templates directory." />
+      ) : (
+        <table className="cp-table">
+          <thead>
+            <tr>
+              <th>Template</th>
+              <th>Description</th>
+              <th style={{ width: 80 }}>Version</th>
+              <th style={{ width: 90 }}>Policies</th>
+              <th style={{ width: 120 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(t => (
+              <tr key={t.name}>
+                <td>
+                  <div className="cp-cell-stack">
+                    <div className="cp-row-primary">{t.display_name || t.name}</div>
+                    <div className="cp-fingerprint">{t.name}</div>
+                  </div>
+                </td>
+                <td className="cp-muted">{t.description || '—'}</td>
+                <td className="cp-mono">v{t.version || '1.0'}</td>
+                <td className="cp-mono">{t.policy_count ?? '—'}</td>
+                <td>
+                  <div className="cp-row-actions">
+                    <button
+                      className="cp-btn cp-btn-sm cp-btn-primary"
+                      disabled={!canWrite}
+                      onClick={() => canWrite ? onApply(t.name) : onUnlock()}
+                    >apply →</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function PricingSection({ rows, canWrite, onUnlock, onRefresh }) {
+  const [form, setForm] = useState(null); // null | {model_pattern, input_cost_per_1k, output_cost_per_1k}
+
+  const startAdd = () => setForm({ model_pattern: '', input_cost_per_1k: '', output_cost_per_1k: '' });
+  const startEdit = (r) => setForm({
+    pricing_id: r.pricing_id,
+    model_pattern: r.model_pattern,
+    input_cost_per_1k: String(r.input_cost_per_1k ?? ''),
+    output_cost_per_1k: String(r.output_cost_per_1k ?? ''),
+  });
+  const onSave = async () => {
+    if (!form?.model_pattern) return;
+    try {
+      await upsertPricing({
+        pricing_id: form.pricing_id,
+        model_pattern: form.model_pattern.trim(),
+        input_cost_per_1k: parseFloat(form.input_cost_per_1k) || 0,
+        output_cost_per_1k: parseFloat(form.output_cost_per_1k) || 0,
+      });
+      setForm(null);
+      onRefresh();
+    } catch (e) { alert(e.message); }
+  };
+  const onDelete = async (id) => {
+    if (!window.confirm(`Delete pricing for ${id}?`)) return;
+    try { await deletePricing(id); onRefresh(); } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <div className="cp-section">
+      <div className="cp-section-head">
+        <div className="cp-section-label"><span className="cp-dia">◆</span>model pricing</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span className="cp-section-meta">{(rows || []).length} rules</span>
+          <button
+            className="cp-btn cp-btn-sm cp-btn-primary"
+            disabled={!canWrite}
+            onClick={!canWrite ? onUnlock : startAdd}
+          >◆ add pricing</button>
+        </div>
+      </div>
+
+      {form && (
+        <div className="cp-section" style={{ background: 'var(--bg-inset)', padding: 12, marginBottom: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 8, alignItems: 'center' }}>
+            <input className="cp-modal-input" placeholder="model pattern (e.g. gpt-4o-*)" value={form.model_pattern}
+              onChange={e => setForm({ ...form, model_pattern: e.target.value })} />
+            <input className="cp-modal-input" placeholder="in $/1k" type="number" step="0.001" value={form.input_cost_per_1k}
+              onChange={e => setForm({ ...form, input_cost_per_1k: e.target.value })} />
+            <input className="cp-modal-input" placeholder="out $/1k" type="number" step="0.001" value={form.output_cost_per_1k}
+              onChange={e => setForm({ ...form, output_cost_per_1k: e.target.value })} />
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="cp-btn cp-btn-sm cp-btn-primary" onClick={onSave}>save</button>
+              <button className="cp-btn cp-btn-sm" onClick={() => setForm(null)}>cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(!rows || rows.length === 0) ? (
+        <Empty title="No pricing configured" body="Add a rule to convert token usage into USD spend on the budgets table above." />
+      ) : (
+        <table className="cp-table">
+          <thead>
+            <tr>
+              <th>Model pattern</th>
+              <th style={{ width: 130, textAlign: 'right' }}>Input $/1k</th>
+              <th style={{ width: 130, textAlign: 'right' }}>Output $/1k</th>
+              <th style={{ width: 80 }}>Currency</th>
+              <th style={{ width: 140 }}>Updated</th>
+              <th style={{ width: 140 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.pricing_id}>
+                <td><span className="cp-row-primary cp-mono">{r.model_pattern}</span></td>
+                <td className="cp-mono" style={{ textAlign: 'right' }}>${Number(r.input_cost_per_1k).toFixed(3)}</td>
+                <td className="cp-mono" style={{ textAlign: 'right' }}>${Number(r.output_cost_per_1k).toFixed(3)}</td>
+                <td className="cp-mono cp-muted">{r.currency || 'USD'}</td>
+                <td className="cp-mono cp-dim">{r.updated_at ? timeAgo(r.updated_at) : '—'}</td>
+                <td>
+                  <div className="cp-row-actions">
+                    <button className="cp-btn cp-btn-sm" disabled={!canWrite} onClick={() => startEdit(r)}>edit</button>
+                    <button className="cp-btn cp-btn-sm cp-btn-danger" disabled={!canWrite} onClick={() => onDelete(r.pricing_id)}>delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshPricing }) {
   if (!rows) return <Loading />;
 
   const onDelete = async (id) => {
@@ -455,6 +723,8 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh }) {
           </table>
         )}
       </div>
+
+      <PricingSection rows={pricing} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshPricing} />
     </>
   );
 }
@@ -468,6 +738,25 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
 
   const onDiscover = async () => {
     try { await discoverModels(); onRefresh(); } catch (e) { alert(e.message); }
+  };
+
+  const onAttestOne = async (m) => {
+    try {
+      await createAttestation({ model_id: m.id, provider: m.provider, status: 'active' });
+      onRefresh();
+    } catch (e) { alert(e.message); }
+  };
+
+  const onAttestAll = async () => {
+    if (!pendingModels.length) return;
+    if (!window.confirm(`Register all ${pendingModels.length} discovered models?`)) return;
+    try {
+      await Promise.all(pendingModels.map(m =>
+        createAttestation({ model_id: m.id, provider: m.provider, status: 'active' })
+          .catch(e => ({ error: String(e?.message || e), id: m.id }))
+      ));
+      onRefresh();
+    } catch (e) { alert(e.message); }
   };
 
   return (
@@ -528,7 +817,16 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
       <div className="cp-section">
         <div className="cp-section-head">
           <div className="cp-section-label"><span className="cp-dia">◆</span>newly discovered models · not yet attested</div>
-          <span className="cp-section-meta">{pendingModels.length} pending</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="cp-section-meta">{pendingModels.length} pending</span>
+            {pendingModels.length > 0 && (
+              <button
+                className="cp-btn cp-btn-sm cp-btn-primary"
+                disabled={!canWrite}
+                onClick={!canWrite ? onUnlock : onAttestAll}
+              >register all →</button>
+            )}
+          </div>
         </div>
         {pendingModels.length === 0 ? (
           <Empty title="Nothing pending" body="All discovered models are attested." />
@@ -552,7 +850,11 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
                   <td className="cp-mono cp-dim">{m.seen_at ? timeAgo(m.seen_at) : '—'}</td>
                   <td>
                     <div className="cp-row-actions">
-                      <button className="cp-btn cp-btn-sm cp-btn-primary" disabled={!canWrite}>attest →</button>
+                      <button
+                        className="cp-btn cp-btn-sm cp-btn-primary"
+                        disabled={!canWrite}
+                        onClick={!canWrite ? onUnlock : () => onAttestOne(m)}
+                      >attest →</button>
                     </div>
                   </td>
                 </tr>
@@ -578,6 +880,9 @@ export default function Control() {
   const [policies, setPolicies] = useState(null);
   const [budgets, setBudgets] = useState(null);
   const [providers, setProviders] = useState(null);
+  const [contentPolicies, setContentPolicies] = useState(null);
+  const [pricing, setPricing] = useState(null);
+  const [templates, setTemplates] = useState(null);
 
   // ── Adapters: real backend shapes → panel-expected shapes ────────
   //
@@ -733,13 +1038,36 @@ export default function Control() {
     } catch { setProviders({ providers: [], discovered_models: [] }); }
   }, []);
 
+  // New nested sections: content policies + pricing + templates.
+  const loadContentPolicies = useCallback(async () => {
+    try { const d = await getContentPolicies(); setContentPolicies(d.policies || d.rows || d || []); }
+    catch { setContentPolicies([]); }
+  }, []);
+  const loadPricing = useCallback(async () => {
+    try { const d = await getPricing(); setPricing(d.pricing || d.rows || d || []); }
+    catch { setPricing([]); }
+  }, []);
+  const loadTemplates = useCallback(async () => {
+    try { const d = await listTemplates(); setTemplates(d.templates || d.rows || d || []); }
+    catch { setTemplates([]); }
+  }, []);
+
   useEffect(() => { loadStatus(); }, [loadStatus]);
   useEffect(() => {
     if (tab === 'attestations' && attestations == null) loadAttestations();
-    if (tab === 'policies' && policies == null) loadPolicies();
-    if (tab === 'budgets' && budgets == null) loadBudgets();
+    if (tab === 'policies') {
+      if (policies == null) loadPolicies();
+      if (contentPolicies == null) loadContentPolicies();
+      if (templates == null) loadTemplates();
+    }
+    if (tab === 'budgets') {
+      if (budgets == null) loadBudgets();
+      if (pricing == null) loadPricing();
+    }
     if (tab === 'providers' && providers == null) loadProviders();
-  }, [tab, attestations, policies, budgets, providers, loadAttestations, loadPolicies, loadBudgets, loadProviders]);
+  }, [tab, attestations, policies, budgets, providers, contentPolicies, pricing, templates,
+      loadAttestations, loadPolicies, loadBudgets, loadProviders,
+      loadContentPolicies, loadPricing, loadTemplates]);
 
   const onUnlock = () => setModal(true);
   const onSubmitKey = (key) => {
@@ -789,8 +1117,13 @@ export default function Control() {
       <div className="cp-tab-panel">
         {tab === 'status' && <StatusPanel status={status} events={events} />}
         {tab === 'attestations' && <AttestationsPanel rows={attestations} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadAttestations} />}
-        {tab === 'policies' && <PoliciesPanel rows={policies} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadPolicies} />}
-        {tab === 'budgets' && <BudgetsPanel rows={budgets} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadBudgets} />}
+        {tab === 'policies' && <PoliciesPanel
+          rows={policies} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadPolicies}
+          cpRows={contentPolicies} onRefreshCP={loadContentPolicies}
+          tplRows={templates} onRefreshTpl={loadTemplates} />}
+        {tab === 'budgets' && <BudgetsPanel
+          rows={budgets} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadBudgets}
+          pricing={pricing} onRefreshPricing={loadPricing} />}
         {tab === 'providers' && <ProvidersPanel data={providers} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadProviders} />}
       </div>
 

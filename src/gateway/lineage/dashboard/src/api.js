@@ -297,6 +297,44 @@ export async function deleteBudget(id) {
   return controlFetch(`${CTRL_API}/budgets/${id}`, { method: 'DELETE' });
 }
 
+// ─── Content policies (analyzer thresholds) ──────────────────────
+
+export async function getContentPolicies() {
+  return fetchControlJSON(`${CTRL_API}/content-policies`);
+}
+
+export async function upsertContentPolicy(data) {
+  return controlFetch(`${CTRL_API}/content-policies`, { method: 'POST', body: JSON.stringify(data) });
+}
+
+export async function deleteContentPolicy(id) {
+  return controlFetch(`${CTRL_API}/content-policies/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ─── Model pricing ───────────────────────────────────────────────
+
+export async function getPricing() {
+  return fetchControlJSON(`${CTRL_API}/pricing`);
+}
+
+export async function upsertPricing(data) {
+  return controlFetch(`${CTRL_API}/pricing`, { method: 'POST', body: JSON.stringify(data) });
+}
+
+export async function deletePricing(id) {
+  return controlFetch(`${CTRL_API}/pricing/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ─── Policy templates ────────────────────────────────────────────
+
+export async function listTemplates() {
+  return fetchControlJSON(`${CTRL_API}/templates`);
+}
+
+export async function applyTemplate(name) {
+  return controlFetch(`${CTRL_API}/templates/${encodeURIComponent(name)}/apply`, { method: 'POST' });
+}
+
 // ─── Intelligence API (Phase 25) ───────────────────────────────
 
 const INTEL_API = `${CTRL_API}/intelligence`;
