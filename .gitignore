@@ -3,11 +3,18 @@
 .env.gateway
 .env.local
 .env.*.local
+.env.local-*
 *.key
 *.pem
 *.csv
 AWS/
 secrets/
+
+# --- Local-only runtime / scratch directories ---
+# Engineers install from git; these are operator-local artifacts only.
+backups/
+data/
+python_vs_hybrid_pipeline_speed.html
 
 # --- Python ---
 __pycache__/
