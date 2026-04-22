@@ -607,6 +607,10 @@ class Settings(BaseSettings):
     teacher_llm_url: str = Field(default="", description="URL for teacher LLM used in distillation (empty = disabled)")
     teacher_llm_sample_rate: float = Field(default=0.01, ge=0.0, le=1.0, description="Fraction of requests sampled for teacher LLM labeling (0.0–1.0)")
 
+    # ── Phase 26: Readiness self-check ───────────────────────────────────────
+    readiness_enabled: bool = Field(default=True, description="Enable GET /v1/readiness endpoint")
+    lineage_auth_required: bool = Field(default=True, description="Require API key on /v1/lineage/* endpoints")
+
     @property
     def auto_promote_models_list(self) -> list[str]:
         return [m.strip() for m in self.auto_promote_models.split(",") if m.strip()]

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import * as api from '../api';
 import { formatNumber, formatTime, formatUptime } from '../utils';
 import Intelligence from './Intelligence';
+import Readiness from './Readiness';
 
 function SortArrow({ col, sortCol, sortDir }) {
   return (
@@ -68,10 +69,11 @@ function ConfirmDialog({ title, message, item, onConfirm, onCancel }) {
 
 function ModelsView({ refresh }) {
   const [attestations, setAttestations] = useState([]);
-  const [modelCaps, setModelCaps] = useState({});
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ model_id: '', provider: 'ollama', endpoint: '', notes: '' });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [discovered, setDiscovered] = useState(null);
   const [discovering, setDiscovering] = useState(false);
   const [registeringAll, setRegisteringAll] = useState(false);
@@ -82,10 +84,13 @@ function ModelsView({ refresh }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [attData, health] = await Promise.all([api.getAttestations(), api.getHealth()]);
+      const attData = await api.getAttestations();
       setAttestations(attData.attestations || []);
-      setModelCaps(health.model_capabilities || {});
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+      setLoadError(null);
+    } catch (e) {
+      if (e.message === 'AUTH') refresh();
+      else setLoadError(e.message);
+    }
     finally { setLoading(false); }
   }, [refresh]);
 
@@ -120,6 +125,14 @@ function ModelsView({ refresh }) {
     return String(notes).replace(/(?:^|\n)\s*endpoint:\s*.+\s*$/i, '').trim();
   };
 
+  const handleActionError = (e) => {
+    if (e.message === 'AUTH') refresh();
+    else {
+      setActionError(e.message);
+      setTimeout(() => setActionError(null), 5000);
+    }
+  };
+
   const submit = async () => {
     if (!form.model_id.trim() || !form.endpoint.trim()) return;
     try {
@@ -128,7 +141,7 @@ function ModelsView({ refresh }) {
         : `endpoint: ${form.endpoint.trim()}`;
       await api.createAttestation({ model_id: form.model_id, provider: form.provider, status: 'active', notes: mergedNotes });
       setShowForm(false); setForm({ model_id: '', provider: 'ollama', endpoint: '', notes: '' }); load();
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+    } catch (e) { handleActionError(e); }
   };
 
   const runDiscovery = async () => {
@@ -136,7 +149,7 @@ function ModelsView({ refresh }) {
     try {
       const data = await api.discoverModels();
       setDiscovered(data.models || []);
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+    } catch (e) { handleActionError(e); }
     finally { setDiscovering(false); }
   };
 
@@ -146,7 +159,7 @@ function ModelsView({ refresh }) {
       // Update discovered list to reflect registration
       setDiscovered(prev => prev ? prev.map(d => d.model_id === m.model_id ? { ...d, registered: true } : d) : prev);
       load();
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+    } catch (e) { handleActionError(e); }
   };
 
   const registerAllUnregistered = async () => {
@@ -160,7 +173,7 @@ function ModelsView({ refresh }) {
       }
       setDiscovered(prev => prev ? prev.map(d => ({ ...d, registered: true })) : prev);
       load();
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+    } catch (e) { handleActionError(e); }
     finally { setRegisteringAll(false); }
   };
 
@@ -171,6 +184,16 @@ function ModelsView({ refresh }) {
 
   return (
     <>
+      {loadError && (
+        <div className="card" style={{ padding: 14, marginBottom: 12, borderLeft: '3px solid var(--red)', color: 'var(--red)', fontSize: 13 }}>
+          Failed to load attestations: {loadError}
+        </div>
+      )}
+      {actionError && (
+        <div className="card" style={{ padding: 14, marginBottom: 12, borderLeft: '3px solid var(--amber)', color: 'var(--amber)', fontSize: 13 }}>
+          Action failed: {actionError}
+        </div>
+      )}
       <div className="card">
         <div className="card-head">
           <span className="card-title">Model Attestations ({attestations.length})</span>
@@ -248,8 +271,8 @@ function ModelsView({ refresh }) {
                     <td>
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                         {a.status === 'active'
-                          ? <button className="btn-ghost btn-sm" onClick={async () => { try { await api.revokeAttestation(a.attestation_id); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Revoke</button>
-                          : <button className="btn-ghost btn-sm" onClick={async () => { try { await api.approveAttestation({ model_id: a.model_id, provider: a.provider, status: 'active' }); load(); } catch (e) { if (e.message === 'AUTH') refresh(); } }}>Approve</button>
+                          ? <button className="btn-ghost btn-sm" onClick={async () => { try { await api.revokeAttestation(a.attestation_id); load(); } catch (e) { handleActionError(e); } }}>Revoke</button>
+                          : <button className="btn-ghost btn-sm" onClick={async () => { try { await api.approveAttestation({ model_id: a.model_id, provider: a.provider, status: 'active' }); load(); } catch (e) { handleActionError(e); } }}>Approve</button>
                         }
                         <button className="btn-danger btn-sm" onClick={() => setConfirmRemove(a)}>Remove</button>
                       </div>
@@ -316,7 +339,7 @@ function ModelsView({ refresh }) {
           onCancel={() => setConfirmRemove(null)}
           onConfirm={async () => {
             try { await api.removeAttestation(confirmRemove.attestation_id); setConfirmRemove(null); load(); }
-            catch (e) { if (e.message === 'AUTH') refresh(); }
+            catch (e) { setConfirmRemove(null); handleActionError(e); }
           }}
         />
       )}
@@ -332,16 +355,29 @@ function PoliciesView({ refresh }) {
   const [form, setForm] = useState({ policy_name: '', enforcement_level: 'blocking', description: '' });
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [sortCol, setSortCol] = useState('policy_name');
   const [sortDir, setSortDir] = useState('asc');
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { const data = await api.getPolicies(); setPolicies(data.policies || []); }
-    catch (e) { if (e.message === 'AUTH') refresh(); }
+    try { const data = await api.getPolicies(); setPolicies(data.policies || []); setLoadError(null); }
+    catch (e) {
+      if (e.message === 'AUTH') refresh();
+      else setLoadError(e.message);
+    }
     finally { setLoading(false); }
   }, [refresh]);
+
+  const handleActionError = (e) => {
+    if (e.message === 'AUTH') refresh();
+    else {
+      setActionError(e.message);
+      setTimeout(() => setActionError(null), 5000);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -372,13 +408,23 @@ function PoliciesView({ refresh }) {
     try {
       await api.createPolicy({ ...form, rules: rules.filter(r => r.field && r.value) });
       setShowForm(false); setForm({ policy_name: '', enforcement_level: 'blocking', description: '' }); setRules([]); load();
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+    } catch (e) { handleActionError(e); }
   };
 
   if (loading) return <div className="skeleton-block" style={{ height: 200 }} />;
 
   return (
     <div className="card">
+      {loadError && (
+        <div style={{ padding: 12, margin: '0 0 12px', borderLeft: '3px solid var(--red)', color: 'var(--red)', fontSize: 13 }}>
+          Failed to load policies: {loadError}
+        </div>
+      )}
+      {actionError && (
+        <div style={{ padding: 12, margin: '0 0 12px', borderLeft: '3px solid var(--amber)', color: 'var(--amber)', fontSize: 13 }}>
+          Action failed: {actionError}
+        </div>
+      )}
       <div className="card-head">
         <span className="card-title">Policies ({policies.length})</span>
         <button className="btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Add Policy</button>
@@ -466,7 +512,7 @@ function PoliciesView({ refresh }) {
           onCancel={() => setConfirmDelete(null)}
           onConfirm={async () => {
             try { await api.deletePolicy(confirmDelete.policy_id); setConfirmDelete(null); load(); }
-            catch (e) { if (e.message === 'AUTH') refresh(); }
+            catch (e) { setConfirmDelete(null); handleActionError(e); }
           }}
         />
       )}
@@ -481,16 +527,29 @@ function BudgetsView({ refresh, health }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ tenant_id: '', user: '', period: 'monthly', max_tokens: '' });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [sortCol, setSortCol] = useState('tenant_id');
   const [sortDir, setSortDir] = useState('asc');
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { const data = await api.getBudgets(); setBudgets(data.budgets || []); }
-    catch (e) { if (e.message === 'AUTH') refresh(); }
+    try { const data = await api.getBudgets(); setBudgets(data.budgets || []); setLoadError(null); }
+    catch (e) {
+      if (e.message === 'AUTH') refresh();
+      else setLoadError(e.message);
+    }
     finally { setLoading(false); }
   }, [refresh]);
+
+  const handleActionError = (e) => {
+    if (e.message === 'AUTH') refresh();
+    else {
+      setActionError(e.message);
+      setTimeout(() => setActionError(null), 5000);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -519,7 +578,7 @@ function BudgetsView({ refresh, health }) {
     try {
       await api.createBudget({ tenant_id: form.tenant_id, user: form.user, period: form.period, max_tokens: max });
       setShowForm(false); setForm({ tenant_id: '', user: '', period: 'monthly', max_tokens: '' }); load();
-    } catch (e) { if (e.message === 'AUTH') refresh(); }
+    } catch (e) { handleActionError(e); }
   };
 
   if (loading) return <div className="skeleton-block" style={{ height: 200 }} />;
@@ -530,6 +589,16 @@ function BudgetsView({ refresh, health }) {
 
   return (
     <>
+      {loadError && (
+        <div className="card" style={{ padding: 14, marginBottom: 12, borderLeft: '3px solid var(--red)', color: 'var(--red)', fontSize: 13 }}>
+          Failed to load budgets: {loadError}
+        </div>
+      )}
+      {actionError && (
+        <div className="card" style={{ padding: 14, marginBottom: 12, borderLeft: '3px solid var(--amber)', color: 'var(--amber)', fontSize: 13 }}>
+          Action failed: {actionError}
+        </div>
+      )}
       <div className="card">
         <div className="card-head">
           <span className="card-title">Token Budgets ({budgets.length})</span>
@@ -619,7 +688,7 @@ function BudgetsView({ refresh, health }) {
           onCancel={() => setConfirmDelete(null)}
           onConfirm={async () => {
             try { await api.deleteBudget(confirmDelete.budget_id); setConfirmDelete(null); load(); }
-            catch (e) { if (e.message === 'AUTH') refresh(); }
+            catch (e) { setConfirmDelete(null); handleActionError(e); }
           }}
         />
       )}
@@ -837,7 +906,7 @@ export default function Control({ navigate, params = {}, health }) {
 
   if (!authed) return <AuthGate onAuth={() => setAuthed(true)} />;
 
-  const subTabs = ['models', 'governance', 'intelligence', 'status'];
+  const subTabs = ['models', 'governance', 'intelligence', 'readiness', 'status'];
   const subLabel = (t) => {
     if (t === 'governance') return 'Policies & Budgets';
     return t.charAt(0).toUpperCase() + t.slice(1);
@@ -860,6 +929,7 @@ export default function Control({ navigate, params = {}, health }) {
         </div>
       )}
       {sub === 'intelligence' && <Intelligence refresh={refresh} />}
+      {sub === 'readiness' && <Readiness refresh={refresh} />}
       {sub === 'status' && <StatusView refresh={refresh} health={health} />}
     </div>
   );
