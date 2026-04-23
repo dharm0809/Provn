@@ -179,7 +179,6 @@ class WalacorClient:
         if not recent:
             return {
                 "success_rate_60s": 1.0,
-                "pending_writes": 0,
                 "last_failure": None,
                 "last_success_ts": None,
                 "time_since_last_success_s": None,
@@ -187,12 +186,11 @@ class WalacorClient:
         oks = [e for e in recent if e[2]]
         last_success = max((e[0] for e in self._delivery_log if e[2]), default=None)
         last_failure_entry = next(
-            ((e[0], e[1], e[3]) for e in reversed(self._delivery_log) if not e[2]),
+            ((e[0], e[1], e[3]) for e in reversed(recent) if not e[2]),
             None,
         )
         return {
             "success_rate_60s": len(oks) / len(recent),
-            "pending_writes": 0,
             "last_failure": {
                 "ts": _iso8601(last_failure_entry[0]),
                 "op": last_failure_entry[1],

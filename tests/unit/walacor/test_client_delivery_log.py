@@ -20,7 +20,6 @@ async def test_delivery_snapshot_empty_when_no_activity(anyio_backend):
     snap = client.delivery_snapshot()
     assert snap == {
         "success_rate_60s": 1.0,
-        "pending_writes": 0,
         "last_failure": None,
         "last_success_ts": None,
         "time_since_last_success_s": None,
@@ -36,4 +35,24 @@ async def test_delivery_snapshot_records_outcomes(anyio_backend):
     snap = client.delivery_snapshot()
     assert snap["success_rate_60s"] == pytest.approx(2 / 3, rel=1e-3)
     assert snap["last_failure"]["detail"] == "HTTP 502"
+    assert snap["last_success_ts"] is not None
+
+
+@pytest.mark.anyio
+async def test_delivery_snapshot_last_failure_scoped_to_window(anyio_backend, monkeypatch):
+    import time as _time
+    client = WalacorClient(server="http://localhost:9999", username="x", password="y")
+
+    # An ancient failure (older than 60s)
+    monkeypatch.setattr(_time, "time", lambda: 1000.0)
+    client._record_delivery("write_execution", ok=False, detail="ancient-fail")
+
+    # Recent successes inside the 60s window
+    monkeypatch.setattr(_time, "time", lambda: 1100.0)  # now; ancient is 100s old
+    client._record_delivery("write_execution", ok=True, detail=None)
+    client._record_delivery("write_execution", ok=True, detail=None)
+
+    snap = client.delivery_snapshot()
+    assert snap["success_rate_60s"] == 1.0
+    assert snap["last_failure"] is None   # ancient failure must NOT surface
     assert snap["last_success_ts"] is not None
