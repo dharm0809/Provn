@@ -541,7 +541,8 @@ async def execute_tools(
                 adapter, call, request, model_response,
                 ctx, settings, provider, original_streaming,
             )
-        except Exception:
+        except Exception as exc:
+            record_tool_exception(tool="tool_loop", error=str(exc) or type(exc).__name__)
             logger.error("Active tool loop failed — falling back to original response", exc_info=True)
             return ToolExecResult(
                 call=call, model_response=model_response,
@@ -574,7 +575,8 @@ async def execute_tools(
                 stream_buffer=[],  # no parsing needed — see synthetic_stream flag
                 synthetic_stream=True,
             )
-        except Exception:
+        except Exception as exc:
+            record_tool_exception(tool="stream_synthesize", error=str(exc) or type(exc).__name__)
             logger.warning(
                 "Failed to synthesize streaming response — returning non-streaming",
                 exc_info=True,
@@ -688,6 +690,10 @@ async def write_tool_events(
                 from gateway.classifier.unified import validate_tool_event as _sv_te
                 record, _ = _sv_te(record)
         except Exception as _val_err:
+            record_tool_exception(
+                tool=getattr(t, "tool_name", "unknown") or "unknown",
+                error=str(_val_err) or type(_val_err).__name__,
+            )
             logger.error("Tool event schema validation failed: %s", _val_err)
         if ctx.storage:
             await ctx.storage.write_tool_event(record)
