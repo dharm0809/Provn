@@ -19,6 +19,7 @@ import hashlib
 import logging
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,9 +31,32 @@ from gateway.mcp.client import ToolResult as MCPToolResult
 from gateway.metrics.prometheus import tool_calls_total, tool_loop_iterations
 from gateway.pipeline.forwarder import forward, stream_with_tee
 from gateway.pipeline.response_evaluator import analyze_text
+from gateway.walacor.client import _iso8601
 import gateway.util.json_utils as json
 
 logger = logging.getLogger(__name__)
+
+
+# ── Swallowed-exception instrumentation (for /v1/connections) ───────────────
+
+_tool_exception_log: deque = deque(maxlen=50)  # (ts, tool, error)
+
+
+def record_tool_exception(*, tool: str, error: str) -> None:
+    _tool_exception_log.append((time.time(), tool, error))
+
+
+def tool_exceptions_snapshot() -> dict:
+    now = time.time()
+    recent = [e for e in _tool_exception_log if now - e[0] <= 60.0]
+    last = recent[-1] if recent else None
+    return {
+        "exceptions_60s": len(recent),
+        "last_exception": (
+            {"ts": _iso8601(last[0]), "tool": last[1], "error": last[2]}
+            if last else None
+        ),
+    }
 
 
 # ── Result types ────────────────────────────────────────────────────────────
@@ -100,7 +124,8 @@ def strip_tools_from_call(call: ModelCall) -> ModelCall:
         body.pop("tool_choice", None)
         new_body = json.dumps_bytes(body)
         return dataclasses.replace(call, raw_body=new_body)
-    except Exception:
+    except Exception as exc:
+        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
         logger.warning(
             "strip_tools_from_call: failed for model=%s — sending original",
             call.model_id, exc_info=True,
@@ -122,7 +147,8 @@ def _inject_tools_into_call(call: ModelCall, tool_definitions: list[dict]) -> Mo
                 prompt_text=call.prompt_text, raw_body=new_body,
                 is_streaming=call.is_streaming, metadata=call.metadata,
             )
-    except Exception:
+    except Exception as exc:
+        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
         logger.warning(
             "Failed to inject tool definitions: model=%s", call.model_id,
             exc_info=True,
@@ -136,7 +162,8 @@ def _force_non_streaming(call: ModelCall) -> ModelCall:
         body = json.loads(call.raw_body)
         body["stream"] = False
         return dataclasses.replace(call, is_streaming=False, raw_body=json.dumps_bytes(body))
-    except Exception:
+    except Exception as exc:
+        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
         logger.warning("Failed to override stream=false for tool loop", exc_info=True)
         return call
 
@@ -147,7 +174,8 @@ def _restore_streaming(call: ModelCall) -> ModelCall:
         body = json.loads(call.raw_body)
         body["stream"] = True
         return dataclasses.replace(call, is_streaming=True, raw_body=json.dumps_bytes(body))
-    except Exception:
+    except Exception as exc:
+        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
         logger.warning("Failed to restore streaming for final answer", exc_info=True)
         return call
 
@@ -328,7 +356,8 @@ async def _execute_one_tool(
 
     try:
         tool_calls_total.labels(provider=provider, tool_type=tc.tool_type, source="gateway").inc()
-    except Exception:
+    except Exception as exc:
+        record_tool_exception(tool=tc.tool_name or "unknown", error=str(exc) or type(exc).__name__)
         logger.debug("Metric increment failed (tool_calls_total)", exc_info=True)
 
     # Content analysis BEFORE feeding back to LLM
@@ -425,7 +454,8 @@ async def _run_active_tool_loop(
     if iterations > 0:
         try:
             tool_loop_iterations.labels(provider=provider).observe(iterations)
-        except Exception:
+        except Exception as exc:
+            record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
             logger.debug("Metric increment failed (tool_loop_iterations)", exc_info=True)
 
     # If original request was streaming and the model is done calling tools,
@@ -447,7 +477,8 @@ async def _run_active_tool_loop(
                 streaming_response=streaming_resp,
                 stream_buffer=buf,
             )
-        except Exception:
+        except Exception as exc:
+            record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
             logger.warning("Failed to stream final tool answer — using non-streaming response", exc_info=True)
 
     return ToolExecResult(
