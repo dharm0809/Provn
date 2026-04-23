@@ -110,6 +110,7 @@ class PresidioPIIAnalyzer(ContentAnalyzer):
     async def analyze(self, text: str) -> Decision:
         """Analyze text for PII entities using Presidio NER."""
         if not self._available or not self._engine:
+            self._record_fail_open("unavailable")
             return Decision(
                 verdict=Verdict.PASS,
                 confidence=0.0,
