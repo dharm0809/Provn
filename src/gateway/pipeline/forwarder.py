@@ -6,6 +6,7 @@ import asyncio
 import json as _json_mod
 import logging
 import time
+from collections import deque
 import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -16,8 +17,30 @@ from gateway.config import get_settings
 from gateway.content.stream_safety import check_stream_pii, check_stream_safety
 from gateway.pipeline.context import get_pipeline_context
 from gateway.metrics.prometheus import forward_duration
+from gateway.util.time import iso8601_utc
 
 logger = logging.getLogger(__name__)
+
+_stream_interruption_log: deque = deque(maxlen=50)  # (ts, provider, detail)
+
+
+def record_stream_interruption(*, provider: str, detail: str) -> None:
+    cleaned = (detail or "").strip() or "interruption"
+    _stream_interruption_log.append((time.time(), provider, cleaned))
+
+
+def stream_interruptions_snapshot() -> dict:
+    now = time.time()
+    recent = [e for e in _stream_interruption_log if now - e[0] <= 60.0]
+    last = recent[-1] if recent else None
+    return {
+        "interruptions_60s": len(recent),
+        "last_interruption": (
+            {"ts": iso8601_utc(last[0]), "provider": last[1], "detail": last[2]}
+            if last
+            else None
+        ),
+    }
 
 
 def _normalize_responses_to_chat_completions(
@@ -433,6 +456,10 @@ async def stream_with_tee(
                     yield tail
         except BaseException as e:
             _exc = e
+            record_stream_interruption(
+                provider=adapter.get_provider_name(),
+                detail=str(e) or type(e).__name__,
+            )
             logger.warning(
                 "Upstream stream interrupted: provider=%s error=%s",
                 adapter.get_provider_name(), e, exc_info=True,
@@ -452,7 +479,11 @@ async def stream_with_tee(
             if background_task is not None:
                 try:
                     await background_task()
-                except Exception:
+                except Exception as bg_exc:
+                    record_stream_interruption(
+                        provider=adapter.get_provider_name(),
+                        detail=str(bg_exc) or type(bg_exc).__name__,
+                    )
                     logger.error(
                         "Stream background task failed: provider=%s",
                         adapter.get_provider_name(), exc_info=True,
