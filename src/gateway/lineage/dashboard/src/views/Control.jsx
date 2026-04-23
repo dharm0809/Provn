@@ -16,8 +16,11 @@ import {
   removeAttestation,
   createAttestation,
   getPolicies,
+  createPolicy,
+  updatePolicy,
   deletePolicy,
   getBudgets,
+  createBudget,
   deleteBudget,
   discoverModels,
   setControlKey,
@@ -53,6 +56,42 @@ function fmtUptime(sec) {
 function pct(a, b) {
   if (!b) return 0;
   return Math.min(100, Math.round((a / b) * 100));
+}
+
+/** Recent-activity feed for the status tab (last 72h) from store timestamps. */
+function buildSyntheticControlEvents(attestationRows, policyRows, budgetRows, contentPolicyRows) {
+  const cutoff = Date.now() - 72 * 3600 * 1000;
+  const out = [];
+  const rowMs = (row) => {
+    const raw = row.updated_at || row.created_at;
+    if (!raw) return null;
+    const t = Date.parse(raw);
+    return Number.isNaN(t) ? null : t;
+  };
+  const push = (t, kind, actor, label) => {
+    if (t == null || t < cutoff) return;
+    out.push({ kind, t, actor, label });
+  };
+  for (const a of attestationRows) {
+    const t = rowMs(a);
+    const st = (a.status || 'active').toLowerCase();
+    push(t, `attestation.${st}`, 'embedded store', `${a.model_id || '—'} · ${a.provider || 'ollama'}`);
+  }
+  for (const p of policyRows) {
+    const t = rowMs(p);
+    push(t, 'policy.updated', 'embedded store', String(p.policy_name || p.policy_id || 'policy'));
+  }
+  for (const b of budgetRows) {
+    const t = rowMs(b);
+    const who = b.user ? `user ${b.user}` : 'tenant-wide';
+    push(t, 'budget.updated', 'embedded store', `${b.period || 'monthly'} · ${who}`);
+  }
+  for (const c of contentPolicyRows) {
+    const t = rowMs(c);
+    push(t, 'policy.content', 'embedded store', `${c.analyzer_id || '—'} · ${c.category || '—'}`);
+  }
+  out.sort((a, b) => b.t - a.t);
+  return out.slice(0, 50).map((e) => ({ ...e, t: new Date(e.t).toISOString() }));
 }
 
 // ─── small building blocks ─────────────────────────────────────
@@ -141,7 +180,7 @@ function Empty({ icon = '◇', title, body }) {
 
 // ─── panels ────────────────────────────────────────────────────
 
-function StatusPanel({ status, events }) {
+function StatusPanel({ status, events, onOpenAuditLog }) {
   if (!status) return <Loading />;
 
   const stats = [
@@ -199,7 +238,7 @@ function StatusPanel({ status, events }) {
               const tone = ev.kind.endsWith('.revoke') ? 'down' : ev.kind.endsWith('.breach') ? 'warn' : '';
               const icon =
                 ev.kind.startsWith('attestation') ? '◆' :
-                ev.kind.startsWith('policy') ? '§' :
+                ev.kind.startsWith('policy') ? '◈' :
                 ev.kind.startsWith('budget') ? '$' :
                 ev.kind.startsWith('provider') ? '⟶' : '·';
               return (
@@ -218,22 +257,125 @@ function StatusPanel({ status, events }) {
         ) : (
           <Empty title="No recent control events" body="Config changes over the last 72 hours appear here." />
         )}
-        <div className="cp-section-foot"><a>view full audit log →</a></div>
+        <div className="cp-section-foot">
+          {onOpenAuditLog ? (
+            <button type="button" className="cp-link-like" onClick={onOpenAuditLog}>view full audit log →</button>
+          ) : (
+            <span className="cp-muted">view full audit log →</span>
+          )}
+        </div>
       </div>
     </>
   );
 }
 
-function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh }) {
+function AttestationViewModal({ row, onClose }) {
+  if (!row) return null;
+  const r = row._raw || row;
+  return (
+    <div className="cp-modal-wrap" onClick={onClose}>
+      <div className="cp-modal cp-modal-wide" onClick={(e) => e.stopPropagation()}>
+        <div className="cp-modal-eyebrow">◆ attestation</div>
+        <h3>{row.model}</h3>
+        <p>Read-only snapshot from the control-plane store.</p>
+        <dl className="cp-detail-dl">
+          <dt>ID</dt><dd>{r.attestation_id || row.id}</dd>
+          <dt>Model</dt><dd>{r.model_id || row.model}</dd>
+          <dt>Provider</dt><dd>{r.provider || row.purpose}</dd>
+          <dt>Status</dt><dd>{r.status || row.status}</dd>
+          <dt>Verification</dt><dd>{r.verification_level || row.signer}</dd>
+          <dt>Created</dt><dd>{r.created_at || '—'}</dd>
+          <dt>Updated</dt><dd>{r.updated_at || '—'}</dd>
+          <dt>Notes</dt><dd>{r.notes || row.notes || '—'}</dd>
+        </dl>
+        <div className="cp-modal-row">
+          <button type="button" className="cp-btn cp-btn-sm" onClick={onClose}>close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AttestationCreateModal({ tenantId, onClose, onCreated }) {
+  const [modelId, setModelId] = useState('');
+  const [provider, setProvider] = useState('ollama');
+  const [verificationLevel, setVerificationLevel] = useState('admin_attested');
+  const [notes, setNotes] = useState('');
+
+  const submit = async () => {
+    if (!modelId.trim()) return;
+    try {
+      await createAttestation({
+        model_id: modelId.trim(),
+        provider: (provider || 'ollama').trim(),
+        verification_level: verificationLevel,
+        status: 'active',
+        tenant_id: tenantId || '',
+        notes: notes.trim(),
+      });
+      onCreated();
+      onClose();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  return (
+    <div className="cp-modal-wrap" onClick={onClose}>
+      <div className="cp-modal cp-modal-wide" onClick={(e) => e.stopPropagation()}>
+        <div className="cp-modal-eyebrow">◆ new attestation</div>
+        <h3>Register a model attestation</h3>
+        <p>Creates or updates the row for (tenant × provider × model). Requires a valid control-plane API key.</p>
+        <input
+          className="cp-modal-input"
+          autoFocus
+          placeholder="model_id (e.g. llama3.1:8b)"
+          value={modelId}
+          onChange={(e) => setModelId(e.target.value)}
+        />
+        <input
+          className="cp-modal-input"
+          placeholder="provider (default ollama)"
+          value={provider}
+          onChange={(e) => setProvider(e.target.value)}
+        />
+        <select
+          className="cp-modal-input"
+          value={verificationLevel}
+          onChange={(e) => setVerificationLevel(e.target.value)}
+        >
+          <option value="admin_attested">admin_attested</option>
+          <option value="self_attested">self_attested</option>
+        </select>
+        <input
+          className="cp-modal-input"
+          placeholder="notes (optional)"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+        <div className="cp-modal-row">
+          <button type="button" className="cp-btn cp-btn-sm" onClick={onClose}>cancel</button>
+          <button type="button" className="cp-btn cp-btn-primary cp-btn-sm" onClick={submit} disabled={!modelId.trim()}>create</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh, onMutate, tenantId }) {
+  const [viewRow, setViewRow] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
+
   if (!rows) return <Loading />;
 
   const onRevoke = async (id) => {
     if (!window.confirm(`Revoke attestation ${id}?`)) return;
-    try { await revokeAttestation(id); onRefresh(); } catch (e) { alert(e.message); }
+    try { await revokeAttestation(id); await onRefresh(); onMutate?.(); } catch (e) { alert(e.message); }
   };
   const onRemove = async (id) => {
-    if (!window.confirm(`Permanently remove ${id}?`)) return;
-    try { await removeAttestation(id); onRefresh(); } catch (e) { alert(e.message); }
+    if (!window.confirm(`Permanently delete attestation ${id}? This cannot be undone.`)) return;
+    if (!window.confirm('Confirm permanent delete (second step).')) return;
+    try { await removeAttestation(id); await onRefresh(); onMutate?.(); } catch (e) { alert(e.message); }
   };
 
   return (
@@ -244,9 +386,10 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh }) {
           <p>Signed bindings of (model × purpose). Requests without a matching active attestation are denied.</p>
         </div>
         <button
+          type="button"
           className="cp-btn cp-btn-primary"
           disabled={!canWrite}
-          onClick={!canWrite ? onUnlock : undefined}
+          onClick={!canWrite ? onUnlock : () => setCreateOpen(true)}
         >◆ new attestation</button>
       </div>
 
@@ -264,7 +407,7 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh }) {
                 <th>Signed</th>
                 <th>Expires</th>
                 <th style={{ width: 100 }}>Status</th>
-                <th style={{ width: 170 }}></th>
+                <th style={{ width: 220 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -284,12 +427,19 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh }) {
                   <td><Badge kind={a.status}>{a.status}</Badge></td>
                   <td>
                     <div className="cp-row-actions">
-                      <button className="cp-btn cp-btn-sm">view</button>
+                      <button type="button" className="cp-btn cp-btn-sm" onClick={() => setViewRow(a)}>view</button>
                       <button
-                        className="cp-btn cp-btn-sm cp-btn-danger"
+                        type="button"
+                        className="cp-btn cp-btn-sm"
                         disabled={!canWrite || a.status === 'revoked'}
                         onClick={() => onRevoke(a.id)}
                       >revoke</button>
+                      <button
+                        type="button"
+                        className="cp-btn cp-btn-sm cp-btn-danger"
+                        disabled={!canWrite}
+                        onClick={() => onRemove(a.id)}
+                      >delete</button>
                     </div>
                   </td>
                 </tr>
@@ -298,16 +448,108 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh }) {
           </table>
         )}
       </div>
+
+      {viewRow && <AttestationViewModal row={viewRow} onClose={() => setViewRow(null)} />}
+      {createOpen && (
+        <AttestationCreateModal
+          tenantId={tenantId}
+          onClose={() => setCreateOpen(false)}
+          onCreated={() => { onRefresh(); onMutate?.(); }}
+        />
+      )}
     </>
   );
 }
 
-function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh, cpRows, onRefreshCP, tplRows, onRefreshTpl }) {
+function PolicyEditorModal({ tenantId, mode, row, onClose, onSaved }) {
+  const isCreate = mode === 'create';
+  const [name, setName] = useState(row?.name || '');
+  const [enforcement, setEnforcement] = useState(
+    row ? (row.mode === 'enforce' ? 'blocking' : 'audit_only') : 'blocking',
+  );
+  const [description, setDescription] = useState(
+    row?.applies_to && row.applies_to !== '—' ? row.applies_to : '',
+  );
+
+  const save = async () => {
+    if (!name.trim()) return;
+    try {
+      if (isCreate) {
+        await createPolicy({
+          policy_name: name.trim(),
+          enforcement_level: enforcement,
+          rules: [],
+          tenant_id: tenantId || '',
+          description: description.trim(),
+        });
+      } else {
+        await updatePolicy(row.id, {
+          policy_name: name.trim(),
+          enforcement_level: enforcement,
+          description: description.trim(),
+        });
+      }
+      onSaved();
+      onClose();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  return (
+    <div className="cp-modal-wrap" onClick={onClose}>
+      <div className="cp-modal cp-modal-wide" onClick={(e) => e.stopPropagation()}>
+        <div className="cp-modal-eyebrow">◆ {isCreate ? 'new policy' : 'edit policy'}</div>
+        <h3>{isCreate ? 'Create governance policy' : 'Update policy'}</h3>
+        <p>
+          {isCreate
+            ? 'Creates an empty rule container. Add rules via the API or future editor.'
+            : 'Updates display metadata and enforcement mode. Rule JSON editing can follow via API.'}
+        </p>
+        <input
+          className="cp-modal-input"
+          autoFocus
+          placeholder="policy name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <select
+          className="cp-modal-input"
+          value={enforcement}
+          onChange={(e) => setEnforcement(e.target.value)}
+        >
+          <option value="blocking">blocking (enforce)</option>
+          <option value="audit_only">audit_only (warn)</option>
+        </select>
+        <input
+          className="cp-modal-input"
+          placeholder="description (optional)"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+        <div className="cp-modal-row">
+          <button type="button" className="cp-btn cp-btn-sm" onClick={onClose}>cancel</button>
+          <button type="button" className="cp-btn cp-btn-primary cp-btn-sm" onClick={save} disabled={!name.trim()}>save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PoliciesPanel({
+  rows, canWrite, onUnlock, onRefresh, cpRows, onRefreshCP, tplRows, onRefreshTpl, tenantId, onMutate,
+}) {
+  const [polModal, setPolModal] = useState(null);
+
   if (!rows) return <Loading />;
 
   const onDelete = async (id) => {
     if (!window.confirm(`Delete policy ${id}?`)) return;
-    try { await deletePolicy(id); onRefresh(); } catch (e) { alert(e.message); }
+    try {
+      await deletePolicy(id);
+      await onRefresh();
+      onMutate?.();
+    } catch (e) { alert(e.message); }
   };
 
   return (
@@ -318,9 +560,10 @@ function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh, cpRows, onRefreshC
           <p>Rule sets evaluated on prompts, tool calls and responses. Enforce blocks; warn logs &amp; passes.</p>
         </div>
         <button
+          type="button"
           className="cp-btn cp-btn-primary"
           disabled={!canWrite}
-          onClick={!canWrite ? onUnlock : undefined}
+          onClick={!canWrite ? onUnlock : () => setPolModal({ mode: 'create' })}
         >◆ new policy</button>
       </div>
 
@@ -358,8 +601,14 @@ function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh, cpRows, onRefreshC
                   <td className="cp-mono cp-dim">{p.last_edit ? timeAgo(p.last_edit) : '—'}</td>
                   <td>
                     <div className="cp-row-actions">
-                      <button className="cp-btn cp-btn-sm">edit</button>
                       <button
+                        type="button"
+                        className="cp-btn cp-btn-sm"
+                        disabled={!canWrite}
+                        onClick={() => (canWrite ? setPolModal({ mode: 'edit', row: p }) : onUnlock())}
+                      >edit</button>
+                      <button
+                        type="button"
                         className="cp-btn cp-btn-sm cp-btn-danger"
                         disabled={!canWrite}
                         onClick={() => onDelete(p.id)}
@@ -373,13 +622,24 @@ function PoliciesPanel({ rows, canWrite, onUnlock, onRefresh, cpRows, onRefreshC
         )}
       </div>
 
-      <ContentPoliciesSection rows={cpRows} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshCP} />
-      <TemplatesSection rows={tplRows} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshTpl} />
+      {polModal && (
+        <PolicyEditorModal
+          key={polModal.mode + (polModal.row?.id || 'new')}
+          tenantId={tenantId}
+          mode={polModal.mode}
+          row={polModal.row}
+          onClose={() => setPolModal(null)}
+          onSaved={() => { onRefresh(); onMutate?.(); }}
+        />
+      )}
+
+      <ContentPoliciesSection rows={cpRows} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshCP} onMutate={onMutate} />
+      <TemplatesSection rows={tplRows} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshTpl} onMutate={onMutate} />
     </>
   );
 }
 
-function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh }) {
+function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh, onMutate }) {
   const [form, setForm] = useState(null);
 
   const startAdd = () => setForm({ analyzer_id: '', category: '', action: 'warn', threshold: '0.5' });
@@ -402,18 +662,19 @@ function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh }) {
       });
       setForm(null);
       onRefresh();
+      onMutate?.();
     } catch (e) { alert(e.message); }
   };
   const onDelete = async (id) => {
     if (!window.confirm(`Delete content policy ${id}?`)) return;
-    try { await deleteContentPolicy(id); onRefresh(); } catch (e) { alert(e.message); }
+    try { await deleteContentPolicy(id); onRefresh(); onMutate?.(); } catch (e) { alert(e.message); }
   };
 
   return (
     <div className="cp-section">
       <div className="cp-section-head">
         <div className="cp-section-label"><span className="cp-dia">◆</span>content-analyzer thresholds</div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="cp-section-head-actions">
           <span className="cp-section-meta">{(rows || []).length} rules</span>
           <button
             className="cp-btn cp-btn-sm cp-btn-primary"
@@ -424,8 +685,8 @@ function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh }) {
       </div>
 
       {form && (
-        <div className="cp-section" style={{ background: 'var(--bg-inset)', padding: 12, marginBottom: 12 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1.5fr 1fr 0.8fr auto', gap: 8, alignItems: 'center' }}>
+        <div className="cp-section cp-inline-form">
+          <div className="cp-form-grid-5">
             <input className="cp-modal-input" placeholder="analyzer_id (e.g. walacor.pii.v1)" value={form.analyzer_id}
               onChange={e => setForm({ ...form, analyzer_id: e.target.value })} />
             <input className="cp-modal-input" placeholder="category (e.g. ssn, toxicity)" value={form.category}
@@ -438,9 +699,9 @@ function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh }) {
             </select>
             <input className="cp-modal-input" placeholder="threshold" type="number" step="0.01" min="0" max="1" value={form.threshold}
               onChange={e => setForm({ ...form, threshold: e.target.value })} />
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button className="cp-btn cp-btn-sm cp-btn-primary" onClick={onSave}>save</button>
-              <button className="cp-btn cp-btn-sm" onClick={() => setForm(null)}>cancel</button>
+            <div className="cp-form-actions">
+              <button type="button" className="cp-btn cp-btn-sm cp-btn-primary" onClick={onSave}>save</button>
+              <button type="button" className="cp-btn cp-btn-sm" onClick={() => setForm(null)}>cancel</button>
             </div>
           </div>
         </div>
@@ -483,10 +744,15 @@ function ContentPoliciesSection({ rows, canWrite, onUnlock, onRefresh }) {
   );
 }
 
-function TemplatesSection({ rows, canWrite, onUnlock, onRefresh }) {
+function TemplatesSection({ rows, canWrite, onUnlock, onRefresh, onMutate }) {
   const onApply = async (name) => {
     if (!window.confirm(`Apply template "${name}"? This will create the policies it contains.`)) return;
-    try { const res = await applyTemplate(name); alert(`Applied. Created ${res.created_count ?? res.count ?? '?'} policies.`); onRefresh(); }
+    try {
+      const res = await applyTemplate(name);
+      alert(`Applied. Created ${res.created_count ?? res.count ?? '?'} policies.`);
+      onRefresh();
+      onMutate?.();
+    }
     catch (e) { alert(e.message); }
   };
 
@@ -539,7 +805,7 @@ function TemplatesSection({ rows, canWrite, onUnlock, onRefresh }) {
   );
 }
 
-function PricingSection({ rows, canWrite, onUnlock, onRefresh }) {
+function PricingSection({ rows, canWrite, onUnlock, onRefresh, onMutate }) {
   const [form, setForm] = useState(null); // null | {model_pattern, input_cost_per_1k, output_cost_per_1k}
 
   const startAdd = () => setForm({ model_pattern: '', input_cost_per_1k: '', output_cost_per_1k: '' });
@@ -560,20 +826,22 @@ function PricingSection({ rows, canWrite, onUnlock, onRefresh }) {
       });
       setForm(null);
       onRefresh();
+      onMutate?.();
     } catch (e) { alert(e.message); }
   };
   const onDelete = async (id) => {
     if (!window.confirm(`Delete pricing for ${id}?`)) return;
-    try { await deletePricing(id); onRefresh(); } catch (e) { alert(e.message); }
+    try { await deletePricing(id); onRefresh(); onMutate?.(); } catch (e) { alert(e.message); }
   };
 
   return (
     <div className="cp-section">
       <div className="cp-section-head">
         <div className="cp-section-label"><span className="cp-dia">◆</span>model pricing</div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="cp-section-head-actions">
           <span className="cp-section-meta">{(rows || []).length} rules</span>
           <button
+            type="button"
             className="cp-btn cp-btn-sm cp-btn-primary"
             disabled={!canWrite}
             onClick={!canWrite ? onUnlock : startAdd}
@@ -582,17 +850,17 @@ function PricingSection({ rows, canWrite, onUnlock, onRefresh }) {
       </div>
 
       {form && (
-        <div className="cp-section" style={{ background: 'var(--bg-inset)', padding: 12, marginBottom: 12 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 8, alignItems: 'center' }}>
+        <div className="cp-section cp-inline-form">
+          <div className="cp-form-grid-4">
             <input className="cp-modal-input" placeholder="model pattern (e.g. gpt-4o-*)" value={form.model_pattern}
               onChange={e => setForm({ ...form, model_pattern: e.target.value })} />
             <input className="cp-modal-input" placeholder="in $/1k" type="number" step="0.001" value={form.input_cost_per_1k}
               onChange={e => setForm({ ...form, input_cost_per_1k: e.target.value })} />
             <input className="cp-modal-input" placeholder="out $/1k" type="number" step="0.001" value={form.output_cost_per_1k}
               onChange={e => setForm({ ...form, output_cost_per_1k: e.target.value })} />
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button className="cp-btn cp-btn-sm cp-btn-primary" onClick={onSave}>save</button>
-              <button className="cp-btn cp-btn-sm" onClick={() => setForm(null)}>cancel</button>
+            <div className="cp-form-actions">
+              <button type="button" className="cp-btn cp-btn-sm cp-btn-primary" onClick={onSave}>save</button>
+              <button type="button" className="cp-btn cp-btn-sm" onClick={() => setForm(null)}>cancel</button>
             </div>
           </div>
         </div>
@@ -635,12 +903,77 @@ function PricingSection({ rows, canWrite, onUnlock, onRefresh }) {
   );
 }
 
-function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshPricing }) {
+function BudgetEditorModal({ tenantId, initial, onClose, onSaved }) {
+  const isEdit = Boolean(initial?.budget_id);
+  const [userId, setUserId] = useState(initial?.user_id ?? '');
+  const [period, setPeriod] = useState(initial?.period || 'monthly');
+  const [maxTok, setMaxTok] = useState(String(initial?.max_tokens ?? ''));
+
+  const save = async () => {
+    try {
+      await createBudget({
+        budget_id: initial?.budget_id,
+        tenant_id: tenantId || initial?.tenant_id || '',
+        user_id: userId.trim(),
+        period,
+        max_tokens: parseInt(maxTok, 10) || 0,
+      });
+      onSaved();
+      onClose();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  return (
+    <div className="cp-modal-wrap" onClick={onClose}>
+      <div className="cp-modal cp-modal-wide" onClick={(e) => e.stopPropagation()}>
+        <div className="cp-modal-eyebrow">◆ {isEdit ? 'edit budget' : 'new budget'}</div>
+        <h3>{isEdit ? 'Update token budget' : 'Create token budget'}</h3>
+        <p>
+          Budgets are keyed by (tenant, user scope, period). Leave user blank for a tenant-wide cap.
+        </p>
+        <input
+          className="cp-modal-input"
+          placeholder="user id (optional — blank = tenant-wide)"
+          value={userId}
+          onChange={(e) => setUserId(e.target.value)}
+        />
+        <select className="cp-modal-input" value={period} onChange={(e) => setPeriod(e.target.value)}>
+          <option value="daily">daily</option>
+          <option value="weekly">weekly</option>
+          <option value="monthly">monthly</option>
+          <option value="total">total</option>
+        </select>
+        <input
+          className="cp-modal-input"
+          type="number"
+          min="0"
+          placeholder="max_tokens"
+          value={maxTok}
+          onChange={(e) => setMaxTok(e.target.value)}
+        />
+        <div className="cp-modal-row">
+          <button type="button" className="cp-btn cp-btn-sm" onClick={onClose}>cancel</button>
+          <button type="button" className="cp-btn cp-btn-primary cp-btn-sm" onClick={save}>save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshPricing, tenantId, onMutate }) {
+  const [budgetModal, setBudgetModal] = useState(null);
+
   if (!rows) return <Loading />;
 
   const onDelete = async (id) => {
     if (!window.confirm(`Delete budget ${id}?`)) return;
-    try { await deleteBudget(id); onRefresh(); } catch (e) { alert(e.message); }
+    try {
+      await deleteBudget(id);
+      await onRefresh();
+      onMutate?.();
+    } catch (e) { alert(e.message); }
   };
 
   return (
@@ -651,9 +984,10 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
           <p>USD + token caps. When a budget breaches, the gateway fails-closed for that scope until lifted.</p>
         </div>
         <button
+          type="button"
           className="cp-btn cp-btn-primary"
           disabled={!canWrite}
-          onClick={!canWrite ? onUnlock : undefined}
+          onClick={!canWrite ? onUnlock : () => setBudgetModal({ mode: 'create' })}
         >◆ new budget</button>
       </div>
 
@@ -670,7 +1004,7 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
                 <th style={{ width: 220 }}>Spend</th>
                 <th style={{ width: 220 }}>Tokens</th>
                 <th style={{ width: 90 }}>Status</th>
-                <th style={{ width: 140 }}></th>
+                <th style={{ width: 160 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -708,8 +1042,14 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
                     <td><Badge kind={b.breach}>{b.breach === 'breach' ? 'breach' : b.breach === 'warn' ? 'warn' : 'ok'}</Badge></td>
                     <td>
                       <div className="cp-row-actions">
-                        <button className="cp-btn cp-btn-sm">edit</button>
                         <button
+                          type="button"
+                          className="cp-btn cp-btn-sm"
+                          disabled={!canWrite}
+                          onClick={() => (canWrite ? setBudgetModal({ mode: 'edit', row: b }) : onUnlock())}
+                        >edit</button>
+                        <button
+                          type="button"
                           className="cp-btn cp-btn-sm cp-btn-danger"
                           disabled={!canWrite}
                           onClick={() => onDelete(b.id)}
@@ -724,7 +1064,23 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
         )}
       </div>
 
-      <PricingSection rows={pricing} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshPricing} />
+      {budgetModal && (
+        <BudgetEditorModal
+          key={(budgetModal.row?.id || 'new') + budgetModal.mode}
+          tenantId={tenantId}
+          initial={budgetModal.mode === 'edit' && budgetModal.row?._raw ? {
+            budget_id: budgetModal.row._raw.budget_id,
+            tenant_id: budgetModal.row._raw.tenant_id,
+            user_id: budgetModal.row._raw.user || '',
+            period: budgetModal.row._raw.period,
+            max_tokens: budgetModal.row._raw.max_tokens,
+          } : null}
+          onClose={() => setBudgetModal(null)}
+          onSaved={() => { onRefresh(); onMutate?.(); }}
+        />
+      )}
+
+      <PricingSection rows={pricing} canWrite={canWrite} onUnlock={onUnlock} onRefresh={onRefreshPricing} onMutate={onMutate} />
     </>
   );
 }
@@ -869,10 +1225,11 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
 
 // ─── main view ─────────────────────────────────────────────────
 
-export default function Control() {
+export default function Control({ navigate }) {
   const [tab, setTab] = useState('status');
   const [unlocked, setUnlocked] = useState(hasControlKey());
   const [modal, setModal] = useState(false);
+  const [tenantId, setTenantId] = useState('');
 
   const [status, setStatus] = useState(null);
   const [events, setEvents] = useState(null);
@@ -893,15 +1250,18 @@ export default function Control() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const [s, atts, pols, buds] = await Promise.all([
+      const [s, atts, pols, buds, cpRes] = await Promise.all([
         getControlStatus(),
         getAttestations().catch(() => ({ attestations: [] })),
         getPolicies().catch(() => ({ policies: [] })),
         getBudgets().catch(() => ({ budgets: [] })),
+        getContentPolicies().catch(() => ({ policies: [] })),
       ]);
+      setTenantId(String(s.tenant_id || ''));
       const attRows = s.attestations || atts.attestations || [];
       const polRows = pols.policies || [];
       const budRows = buds.budgets || [];
+      const cpRows = cpRes.policies || [];
       const providerList = Array.isArray(s.providers) ? s.providers : [];
       const analyzerCount = s.content_analyzers?.count
         ?? (Array.isArray(s.content_analyzers) ? s.content_analyzers.length : 0);
@@ -918,8 +1278,12 @@ export default function Control() {
         version: s.gateway_id ? `gw · ${String(s.gateway_id).slice(0, 8)}` : 'gateway',
         last_config_change: s.policy_cache?.last_sync || null,
       });
-      setEvents([]); // no backend event feed yet
-    } catch (e) { setStatus({}); setEvents([]); }
+      setEvents(buildSyntheticControlEvents(attRows, polRows, budRows, cpRows));
+    } catch (e) {
+      setStatus({});
+      setEvents([]);
+      setTenantId('');
+    }
   }, []);
 
   const loadAttestations = useCallback(async () => {
@@ -938,6 +1302,8 @@ export default function Control() {
         signed_at: a.created_at,
         expires_at: a.updated_at,
         status: a.status,
+        notes: a.notes || '',
+        _raw: a,
       })));
     } catch { setAttestations([]); }
   }, []);
@@ -981,6 +1347,7 @@ export default function Control() {
         tokens_cap: b.max_tokens,
         breach: 'ok',
         expires: b.updated_at,
+        _raw: b,
       })));
     } catch { setBudgets([]); }
   }, []);
@@ -1115,15 +1482,49 @@ export default function Control() {
       {!unlocked && tab !== 'status' && <ReadonlyBanner onUnlock={onUnlock} />}
 
       <div className="cp-tab-panel">
-        {tab === 'status' && <StatusPanel status={status} events={events} />}
-        {tab === 'attestations' && <AttestationsPanel rows={attestations} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadAttestations} />}
-        {tab === 'policies' && <PoliciesPanel
-          rows={policies} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadPolicies}
-          cpRows={contentPolicies} onRefreshCP={loadContentPolicies}
-          tplRows={templates} onRefreshTpl={loadTemplates} />}
-        {tab === 'budgets' && <BudgetsPanel
-          rows={budgets} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadBudgets}
-          pricing={pricing} onRefreshPricing={loadPricing} />}
+        {tab === 'status' && (
+          <StatusPanel
+            status={status}
+            events={events}
+            onOpenAuditLog={typeof navigate === 'function' ? () => navigate('attempts') : undefined}
+          />
+        )}
+        {tab === 'attestations' && (
+          <AttestationsPanel
+            rows={attestations}
+            canWrite={unlocked}
+            onUnlock={onUnlock}
+            onRefresh={loadAttestations}
+            onMutate={loadStatus}
+            tenantId={tenantId}
+          />
+        )}
+        {tab === 'policies' && (
+          <PoliciesPanel
+            rows={policies}
+            canWrite={unlocked}
+            onUnlock={onUnlock}
+            onRefresh={loadPolicies}
+            cpRows={contentPolicies}
+            onRefreshCP={loadContentPolicies}
+            tplRows={templates}
+            onRefreshTpl={loadTemplates}
+            tenantId={tenantId}
+            onMutate={loadStatus}
+          />
+        )}
+        {tab === 'budgets' && (
+          <BudgetsPanel
+            rows={budgets}
+            canWrite={unlocked}
+            onUnlock={onUnlock}
+            onRefresh={loadBudgets}
+            pricing={pricing}
+            onRefreshPricing={loadPricing}
+            tenantId={tenantId}
+            onMutate={loadStatus}
+          />
+        )}
         {tab === 'providers' && <ProvidersPanel data={providers} canWrite={unlocked} onUnlock={onUnlock} onRefresh={loadProviders} />}
       </div>
 

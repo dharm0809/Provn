@@ -281,6 +281,13 @@ export async function createPolicy(data) {
   return controlFetch(`${CTRL_API}/policies`, { method: 'POST', body: JSON.stringify(data) });
 }
 
+export async function updatePolicy(id, data) {
+  return controlFetch(`${CTRL_API}/policies/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
 export async function deletePolicy(id) {
   return controlFetch(`${CTRL_API}/policies/${id}`, { method: 'DELETE' });
 }

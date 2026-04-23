@@ -35,6 +35,53 @@ def load_signing_key(key_path: str) -> bool:
         return False
 
 
+def ensure_signing_key(key_path: str) -> bool:
+    """Load the signing key at *key_path*, generating a new one if absent.
+
+    Idempotent across restarts: once generated, the same key is reused so
+    historical signatures remain verifiable. The key file is persisted with
+    mode 0600 (owner read/write only). Fail-open: if key generation or
+    persistence fails, records are written unsigned and ``verify_chain``
+    reports signature status as "unverifiable" instead of failing the chain.
+    """
+    path = Path(key_path)
+    if path.exists():
+        return load_signing_key(str(path))
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PrivateFormat, NoEncryption,
+        )
+    except ImportError:
+        logger.warning("cryptography package not installed — record signing disabled")
+        return False
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        private_key = Ed25519PrivateKey.generate()
+        pem = private_key.private_bytes(
+            encoding=Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=NoEncryption(),
+        )
+        # Write atomically with restrictive permissions so the key is never
+        # briefly visible in world-readable form.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(pem)
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass  # Best-effort on platforms where chmod is meaningless.
+        tmp.replace(path)
+        logger.info("Generated new Ed25519 signing key at %s (first run)", path)
+    except Exception as e:
+        logger.warning("Failed to auto-generate signing key at %s: %s", path, e)
+        return False
+
+    return load_signing_key(str(path))
+
+
 def _canonical_bytes(
     record_id: str | None,
     previous_record_id: str | None,
@@ -101,6 +148,37 @@ def verify_canonical(
         return False
     except Exception:
         return False
+
+
+def signing_key_available() -> bool:
+    """True when a verify key is loaded — i.e. Ed25519 signature checks are possible."""
+    return _verify_key is not None
+
+
+def verify_record_signature(record: dict) -> str:
+    """Classify the signature status for a lineage record.
+
+    Returns one of:
+      - ``"valid"``  — ``record_signature`` verified against the loaded verify key
+      - ``"invalid"`` — signature present but doesn't verify (tampering or key mismatch)
+      - ``"absent"`` — no signature on the record (legacy or signing disabled at write time)
+      - ``"unverifiable"`` — signature present but no verify key loaded in this process,
+        so we can't make a claim either way
+    """
+    sig = record.get("record_signature")
+    if not sig:
+        return "absent"
+    if _verify_key is None:
+        return "unverifiable"
+    ok = verify_canonical(
+        record_id=record.get("record_id"),
+        previous_record_id=record.get("previous_record_id"),
+        sequence_number=int(record.get("sequence_number") or 0),
+        execution_id=str(record.get("execution_id") or ""),
+        timestamp=str(record.get("timestamp") or ""),
+        signature=sig,
+    )
+    return "valid" if ok else "invalid"
 
 
 def sign_hash(record_hash: str) -> str | None:

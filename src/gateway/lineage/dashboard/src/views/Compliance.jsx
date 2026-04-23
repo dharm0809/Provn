@@ -23,16 +23,16 @@ function StubScaffold({ icon, title, subtitle, children }) {
   );
 }
 
+// Placeholder frameworks list. Scores/grades/gaps are intentionally blank
+// because the compliance-scoring pipeline isn't wired up yet — the previous
+// hard-coded values (88/B, 92/A, …) read as real data and that was
+// misleading.
 const FRAMEWORKS = [
-  { id: 'eu_ai_act', label: 'EU AI Act',    score: 88, grade: 'B', gaps: 2 },
-  { id: 'nist',      label: 'NIST AI RMF',  score: 92, grade: 'A', gaps: 1 },
-  { id: 'soc2',      label: 'SOC 2 Type II', score: 95, grade: 'A', gaps: 0 },
-  { id: 'iso42001',  label: 'ISO 42001',    score: 79, grade: 'C', gaps: 4 },
+  { id: 'eu_ai_act', label: 'EU AI Act' },
+  { id: 'nist',      label: 'NIST AI RMF' },
+  { id: 'soc2',      label: 'SOC 2 Type II' },
+  { id: 'iso42001',  label: 'ISO 42001' },
 ];
-
-const gradeColor = (g) => ({
-  A: 'var(--green)', B: 'var(--gold)', C: 'var(--amber)', D: 'var(--red)', F: 'var(--red)',
-})[g] || 'var(--text-muted)';
 
 export default function Compliance() {
   return (
@@ -52,20 +52,18 @@ export default function Compliance() {
               <span className="badge-wal badge-muted mono">{f.id}</span>
             </div>
             <div className="compliance-score">
-              <div className="compliance-score-val" style={{ color: gradeColor(f.grade) }}>{f.score}</div>
-              <div className="compliance-grade" style={{ color: gradeColor(f.grade) }}>{f.grade}</div>
+              <div className="compliance-score-val" style={{ color: 'var(--text-muted)' }}>—</div>
+              <div className="compliance-grade" style={{ color: 'var(--text-muted)' }}>—</div>
             </div>
             <div className="compliance-meta">
-              {f.gaps === 0
-                ? <span style={{ color: 'var(--green)' }}>✓ 0 gaps identified</span>
-                : <span style={{ color: 'var(--amber)' }}>⚠ {f.gaps} gap{f.gaps > 1 ? 's' : ''} to close</span>}
+              <span style={{ color: 'var(--text-muted)' }}>scoring not yet wired up</span>
             </div>
             <div className="compliance-actions">
-              <button className="btn-wal btn-ghost btn-sm">Preview</button>
+              <button className="btn-wal btn-ghost btn-sm" disabled>Preview</button>
               <div className="compliance-downloads">
-                <button className="dl-btn">JSON</button>
-                <button className="dl-btn">CSV</button>
-                <button className="dl-btn">PDF</button>
+                <button className="dl-btn" disabled>JSON</button>
+                <button className="dl-btn" disabled>CSV</button>
+                <button className="dl-btn" disabled>PDF</button>
               </div>
             </div>
           </div>
@@ -76,13 +74,13 @@ export default function Compliance() {
         <div className="intel-card-head">
           <div>
             <div className="intel-card-title">Chain Integrity</div>
-            <div className="intel-card-sub">continuous verification across all sessions</div>
+            <div className="intel-card-sub">use the Sessions view — "Verify Chain" — for live verification</div>
           </div>
-          <span className="chain-chip chain-ok">◆ 1,842 / 1,842 VERIFIED</span>
+          <span className="chain-chip" style={{ color: 'var(--text-muted)' }}>◇ not connected</span>
         </div>
         <div style={{ padding: '8px 2px 2px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.06em' }}>
-          Last verification: 2 minutes ago · depth 247,019 records · merkle root{' '}
-          <span style={{ color: 'var(--gold)' }}>sha256:4a7b…e01c</span>
+          This panel will aggregate per-session verification once the
+          compliance rollup endpoint is in place.
         </div>
       </div>
     </StubScaffold>

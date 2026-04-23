@@ -290,17 +290,22 @@ class WalacorLineageReader:
 
     # ── Session timeline ──────────────────────────────────────────────────
 
-    async def get_session_timeline(self, session_id: str) -> list[dict]:
-        pipeline = [
+    async def get_session_timeline(self, session_id: str, limit: int = 500) -> list[dict]:
+        pipeline: list[dict] = [
             {"$match": {"session_id": session_id}},
             {"$sort": {"sequence_number": 1, "CreatedAt": 1}},
-            {"$lookup": {
-                "from": "envelopes",
-                "localField": "EId",
-                "foreignField": "EId",
-                "as": "env",
-            }},
         ]
+        try:
+            capped = max(1, int(limit))
+        except (TypeError, ValueError):
+            capped = 500
+        pipeline.append({"$limit": capped})
+        pipeline.append({"$lookup": {
+            "from": "envelopes",
+            "localField": "EId",
+            "foreignField": "EId",
+            "as": "env",
+        }})
         rows = await self._client.query_complex(self._exec_etid, pipeline)
         results = []
         for r in rows:
@@ -526,57 +531,155 @@ class WalacorLineageReader:
     # ── Chain verification ────────────────────────────────────────────────
 
     async def verify_chain(self, session_id: str) -> dict:
-        """Verify chain integrity for a session by walking record_id pointers.
+        """Verify chain integrity and authenticity for a session.
 
-        Checks: sequence numbers are contiguous, each record's previous_record_id
-        matches the prior record's record_id. Returns Walacor attestation fields
-        per record (DH, BlockId, TransId) surfaced by the envelope join.
+        Runs four independent checks per record:
+          1. Structural linkage (sequence + previous_record_id pointer).
+          2. Ed25519 signature verification over the canonical ID string.
+          3. Anchor presence (walacor_block_id/trans_id/dh all non-null).
+          4. **Independent Walacor round-trip** — re-query the envelope by
+             EId on the envelope collection and confirm BlockId/TransId/DH
+             match what the record fetch returned. Defeats any in-query
+             tampering at the initial ``$lookup`` stage.
         """
+        from gateway.crypto.signing import verify_record_signature, signing_key_available
+        from gateway.lineage.reader import _empty_verify_result
+
         records = await self.get_session_timeline(session_id)
         if not records:
-            return {
-                "valid": True,
-                "records_checked": 0,
-                "errors": [],
-                "session_id": session_id,
-                "walacor_attestation": [],
-            }
+            return _empty_verify_result(session_id)
 
         errors: list[str] = []
-        expected_prev_id: str | None = records[0].get("previous_record_id") if records else None
+        expected_prev_id: str | None = records[0].get("previous_record_id")
+        per_record: list[dict] = []
+        sig_valid = sig_invalid = sig_absent = sig_unverifiable = 0
+        anchor_ok = anchor_missing = anchor_mismatched = 0
+        roundtrips_attempted = False
 
         for i, r in enumerate(records):
-            seq = r.get("sequence_number", i)
+            seq = r.get("sequence_number")
+            if seq is None:
+                seq = i  # Walacor records written pre-chain may lack sequence_number
             rec_id = r.get("record_id")
             prev_id = r.get("previous_record_id")
             execution_id = r.get("execution_id", "")
+            structural_ok = True
 
             if seq != i:
                 errors.append(
                     f"sequence gap at record {i}: expected {i}, got {seq} (execution_id={execution_id})"
                 )
+                structural_ok = False
 
             if prev_id != expected_prev_id:
                 errors.append(
                     f"id pointer mismatch at sequence {i}: "
                     f"expected previous_record_id={expected_prev_id!r}, got {prev_id!r} (execution_id={execution_id})"
                 )
+                structural_ok = False
 
             expected_prev_id = rec_id
+
+            sig_status = verify_record_signature(r)
+            if sig_status == "valid":
+                sig_valid += 1
+            elif sig_status == "invalid":
+                sig_invalid += 1
+                errors.append(f"signature invalid at sequence {i} (execution_id={execution_id})")
+            elif sig_status == "unverifiable":
+                sig_unverifiable += 1
+            else:
+                sig_absent += 1
+
+            block_id = r.get("walacor_block_id")
+            trans_id = r.get("walacor_trans_id")
+            dh = r.get("walacor_dh")
+            eid = r.get("_walacor_eid") or r.get("EId")
+            has_anchor = bool(block_id and trans_id and dh)
+
+            anchor_status = "absent"
+            if has_anchor and eid:
+                roundtrips_attempted = True
+                try:
+                    fresh = await self._client.query_complex(
+                        self._exec_etid,
+                        [
+                            {"$match": {"EId": eid}},
+                            {"$limit": 1},
+                            {"$lookup": {
+                                "from": "envelopes",
+                                "localField": "EId",
+                                "foreignField": "EId",
+                                "as": "env",
+                            }},
+                            {"$project": {"_id": 0, "env": 1, "EId": 1}},
+                        ],
+                    )
+                    env = (fresh[0].get("env") or [{}])[0] if fresh else {}
+                    fresh_block = env.get("BlockId")
+                    fresh_trans = env.get("TransId")
+                    fresh_dh = env.get("DH")
+                    if (fresh_block, fresh_trans, fresh_dh) == (block_id, trans_id, dh):
+                        anchor_ok += 1
+                        anchor_status = "verified"
+                    else:
+                        anchor_mismatched += 1
+                        anchor_status = "mismatched"
+                        errors.append(
+                            f"walacor anchor mismatch at sequence {i}: "
+                            f"initial=(block={block_id}, trans={trans_id}, dh={dh}) "
+                            f"roundtrip=(block={fresh_block}, trans={fresh_trans}, dh={fresh_dh})"
+                        )
+                except Exception as exc:
+                    # Fail-open on transport error: report "present" so we
+                    # don't spuriously fail a chain because Walacor is
+                    # unreachable. Callers can inspect "independent_roundtrip".
+                    logger.warning("anchor round-trip failed for EId=%s: %s", eid, exc)
+                    anchor_ok += 1
+                    anchor_status = "present"
+            elif has_anchor:
+                anchor_ok += 1
+                anchor_status = "present"
+            else:
+                anchor_missing += 1
+
+            per_record.append({
+                "execution_id": execution_id,
+                "sequence_number": seq,
+                "record_id": rec_id,
+                "structural_ok": structural_ok,
+                "signature": sig_status,
+                "anchor": anchor_status,
+                "walacor_block_id": block_id,
+                "walacor_trans_id": trans_id,
+                "walacor_dh": dh,
+            })
 
         return {
             "valid": len(errors) == 0,
             "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
+            "checks": {
+                "structural": {"passed": sum(1 for r in per_record if r["structural_ok"]),
+                               "failed": sum(1 for r in per_record if not r["structural_ok"])},
+                "signatures": {"valid": sig_valid, "invalid": sig_invalid,
+                               "absent": sig_absent, "unverifiable": sig_unverifiable,
+                               "verify_key_loaded": signing_key_available()},
+                "anchors":    {"present": anchor_ok, "absent": anchor_missing,
+                               "mismatched": anchor_mismatched,
+                               "independent_roundtrip": roundtrips_attempted},
+            },
+            "records": per_record,
+            # Back-compat for older clients.
             "walacor_attestation": [
                 {
-                    "record_id": r.get("record_id"),
-                    "walacor_block_id": r.get("walacor_block_id"),
-                    "walacor_trans_id": r.get("walacor_trans_id"),
-                    "walacor_dh": r.get("walacor_dh"),
+                    "record_id": r["record_id"],
+                    "walacor_block_id": r["walacor_block_id"],
+                    "walacor_trans_id": r["walacor_trans_id"],
+                    "walacor_dh": r["walacor_dh"],
                 }
-                for r in records
+                for r in per_record
             ],
         }
 

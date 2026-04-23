@@ -280,6 +280,14 @@ async def control_upsert_budget(request: Request) -> JSONResponse:
             raw["tenant_id"] = settings.gateway_tenant_id or ""
         parsed = BudgetUpsert.model_validate(raw)
         body = parsed.model_dump(exclude_none=True)
+        # Store expects `user`; Pydantic model uses `user_id`. Clients may still send `user`
+        # (extra field) — prefer that when set so older callers keep working.
+        legacy_user = body.pop("user", None)
+        user_id = body.pop("user_id", None)
+        if legacy_user is not None and str(legacy_user).strip() != "":
+            body["user"] = str(legacy_user).strip()
+        else:
+            body["user"] = (user_id or "").strip()
         result = store.upsert_budget(body)
         _refresh_budget_tracker()
         return JSONResponse(result, status_code=200)

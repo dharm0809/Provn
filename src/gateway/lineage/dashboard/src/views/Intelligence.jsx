@@ -10,6 +10,10 @@ import {
   rejectCandidate,
   rollbackModel,
   forceRetrain,
+  hasControlKey,
+  setControlKey,
+  clearControlKey,
+  getControlStatus,
 } from '../api';
 import { timeAgo, truncHash, formatBytes, formatNumber, fmtPct, fmtDelta } from '../utils';
 import '../styles/intelligence.css';
@@ -734,7 +738,43 @@ function useToast() {
   return { show, node };
 }
 
+function AuthGate({ onAuth }) {
+  const [key, setKey] = useState('');
+  const [error, setError] = useState('');
+
+  const tryAuth = async () => {
+    if (!key.trim()) { setError('Please enter an API key'); return; }
+    setControlKey(key.trim());
+    try {
+      await getControlStatus();
+      onAuth();
+    } catch {
+      clearControlKey();
+      setError('Invalid API key or gateway unreachable');
+    }
+  };
+
+  return (
+    <div className="auth-card">
+      <div style={{ fontSize: 28, color: 'var(--gold)', marginBottom: 16 }}>◆</div>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Governance Access</div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 28, lineHeight: 1.5 }}>
+        Enter your gateway API key to view production models, candidates, and the verdict inspector.
+      </div>
+      <div className="form-group">
+        <input type="password" className="form-input" placeholder="API key" value={key}
+          onChange={e => setKey(e.target.value)} onKeyDown={e => e.key === 'Enter' && tryAuth()} autoFocus />
+      </div>
+      <div className="form-actions" style={{ justifyContent: 'center' }}>
+        <button className="btn-primary" onClick={tryAuth}>Authenticate</button>
+      </div>
+      {error && <div style={{ fontSize: 12, color: 'var(--red)', textAlign: 'center', marginTop: 12 }}>{error}</div>}
+    </div>
+  );
+}
+
 export default function Intelligence() {
+  const [authed, setAuthed] = useState(() => hasControlKey());
   const [sub, setSub] = useState('production');
   const [models, setModels] = useState([]);
   const [candidates, setCandidates] = useState([]);
@@ -755,6 +795,7 @@ export default function Intelligence() {
   const toast = useToast();
 
   const loadModelsAndCandidates = useCallback(async () => {
+    if (!authed) return;
     try {
       const [mRes, cRes] = await Promise.all([getIntelligenceModels(), getIntelligenceCandidates()]);
       const rawModels = mRes?.models || mRes || [];
@@ -762,24 +803,30 @@ export default function Intelligence() {
       setCandidates(cRes?.candidates || cRes || []);
       setLoadError(null);
     } catch (e) {
-      setLoadError(e.message === 'AUTH' ? 'API key required — set it in the Control tab.' : e.message);
+      if (e.message === 'AUTH') { setAuthed(false); return; }
+      setLoadError(e.message);
     }
-  }, []);
+  }, [authed]);
 
   useEffect(() => { loadModelsAndCandidates(); }, [loadModelsAndCandidates]);
 
   useEffect(() => {
+    if (!authed) return;
     let cancelled = false;
     (async () => {
       try {
         const res = await getIntelligenceHistory(historyModel);
         if (!cancelled) setHistoryEvents(res?.events || res || []);
-      } catch { if (!cancelled) setHistoryEvents([]); }
+      } catch (e) {
+        if (e.message === 'AUTH') { if (!cancelled) setAuthed(false); return; }
+        if (!cancelled) setHistoryEvents([]);
+      }
     })();
     return () => { cancelled = true; };
-  }, [historyModel]);
+  }, [historyModel, authed]);
 
   useEffect(() => {
+    if (!authed) return;
     let cancelled = false;
     (async () => {
       try {
@@ -788,10 +835,13 @@ export default function Intelligence() {
           rows: res?.rows || res?.verdicts || [],
           top_divergence_types: res?.top_divergence_types || [],
         });
-      } catch { if (!cancelled) setVerdictData({ rows: [], top_divergence_types: [] }); }
+      } catch (e) {
+        if (e.message === 'AUTH') { if (!cancelled) setAuthed(false); return; }
+        if (!cancelled) setVerdictData({ rows: [], top_divergence_types: [] });
+      }
     })();
     return () => { cancelled = true; };
-  }, [verdictModel, divergenceOnly, limit]);
+  }, [verdictModel, divergenceOnly, limit, authed]);
 
   const handlePromote = async () => {
     const c = promoteTarget;
@@ -850,6 +900,8 @@ export default function Intelligence() {
     setVerdictModel(modelName);
     setTimeout(handleRetrain, 100);
   };
+
+  if (!authed) return <AuthGate onAuth={() => setAuthed(true)} />;
 
   return (
     <div className="intel-view">

@@ -14,6 +14,24 @@ from gateway.pipeline.session_chain import GENESIS_HASH
 
 logger = logging.getLogger(__name__)
 
+
+def _empty_verify_result(session_id: str) -> dict:
+    from gateway.crypto.signing import signing_key_available
+    return {
+        "valid": True,
+        "records_checked": 0,
+        "errors": [],
+        "session_id": session_id,
+        "checks": {
+            "structural": {"passed": 0, "failed": 0},
+            "signatures": {"valid": 0, "invalid": 0, "absent": 0, "unverifiable": 0,
+                           "verify_key_loaded": signing_key_available()},
+            "anchors":    {"present": 0, "absent": 0, "independent_roundtrip": False},
+        },
+        "records": [],
+        "walacor_attestation": [],
+    }
+
 # request_type is an indexed column (see wal/writer.py); the six-way repeated
 # json_extract() in earlier revisions triggered a full scan of record_json for
 # every row. A single CASE over the column short-circuits all of that.
@@ -699,59 +717,113 @@ class LineageReader:
         return attachments
 
     def verify_chain(self, session_id: str) -> dict:
-        """Verify chain integrity for a session by walking record_id pointers.
+        """Verify chain integrity and authenticity for a session.
 
-        Checks: sequence numbers are contiguous, each record's previous_record_id
-        matches the prior record's record_id. Returns Walacor attestation fields
-        per record so callers can surface blockchain provenance.
+        Three independent checks per record:
+          1. **Structural** — sequence_number is contiguous and
+             previous_record_id links to the prior record's record_id.
+          2. **Signature** — Ed25519 signature over the canonical
+             (record_id | previous_record_id | sequence_number | execution_id | timestamp)
+             string verifies against the loaded verify key.
+          3. **Anchor** — walacor_block_id/trans_id/dh are all present
+             (the envelope was sealed by the Walacor backend on ingest).
+
+        The top-level ``valid`` is False if ANY structural check fails OR any
+        present signature fails to verify. Missing signatures / missing anchors
+        don't fail the chain — they're reported so callers can see coverage.
         """
+        from gateway.crypto.signing import verify_record_signature, signing_key_available
+
         records = self.get_session_timeline(session_id)
         if not records:
-            return {
-                "valid": True,
-                "records_checked": 0,
-                "errors": [],
-                "session_id": session_id,
-                "walacor_attestation": [],
-            }
+            return _empty_verify_result(session_id)
 
         errors: list[str] = []
-        # Seed from first record so legacy chains (previous_record_id = "legacy:000...")
-        # validate correctly alongside new chains (previous_record_id = None for seq 0).
-        expected_prev_id: str | None = records[0].get("previous_record_id") if records else None
+        # Seed from first record so legacy chains validate correctly.
+        expected_prev_id: str | None = records[0].get("previous_record_id")
+        per_record: list[dict] = []
+        sig_valid = sig_invalid = sig_absent = sig_unverifiable = 0
+        anchor_ok = anchor_missing = 0
 
         for i, rec in enumerate(records):
             seq = rec.get("sequence_number")
             rec_id = rec.get("record_id")
             prev_id = rec.get("previous_record_id")
             execution_id = rec.get("execution_id", "")
+            structural_ok = True
 
             if seq is not None and seq != i:
                 errors.append(
                     f"sequence gap at record {i}: expected {i}, got {seq} (execution_id={execution_id})"
                 )
+                structural_ok = False
 
             if prev_id != expected_prev_id:
                 errors.append(
                     f"id pointer mismatch at sequence {i}: "
                     f"expected previous_record_id={expected_prev_id!r}, got {prev_id!r} (execution_id={execution_id})"
                 )
+                structural_ok = False
 
             expected_prev_id = rec_id
+
+            sig_status = verify_record_signature(rec)
+            if sig_status == "valid":
+                sig_valid += 1
+            elif sig_status == "invalid":
+                sig_invalid += 1
+                errors.append(
+                    f"signature invalid at sequence {i} (execution_id={execution_id})"
+                )
+            elif sig_status == "unverifiable":
+                sig_unverifiable += 1
+            else:
+                sig_absent += 1
+
+            has_anchor = bool(rec.get("walacor_block_id") and rec.get("walacor_trans_id") and rec.get("walacor_dh"))
+            if has_anchor:
+                anchor_ok += 1
+                anchor_status = "present"
+            else:
+                anchor_missing += 1
+                anchor_status = "absent"
+
+            per_record.append({
+                "execution_id": execution_id,
+                "sequence_number": seq,
+                "record_id": rec_id,
+                "structural_ok": structural_ok,
+                "signature": sig_status,
+                "anchor": anchor_status,
+                "walacor_block_id": rec.get("walacor_block_id"),
+                "walacor_trans_id": rec.get("walacor_trans_id"),
+                "walacor_dh": rec.get("walacor_dh"),
+            })
 
         return {
             "valid": len(errors) == 0,
             "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
+            "checks": {
+                "structural": {"passed": sum(1 for r in per_record if r["structural_ok"]),
+                               "failed": sum(1 for r in per_record if not r["structural_ok"])},
+                "signatures": {"valid": sig_valid, "invalid": sig_invalid,
+                               "absent": sig_absent, "unverifiable": sig_unverifiable,
+                               "verify_key_loaded": signing_key_available()},
+                "anchors":    {"present": anchor_ok, "absent": anchor_missing,
+                               "independent_roundtrip": False},
+            },
+            "records": per_record,
+            # Back-compat: old clients read walacor_attestation[].
             "walacor_attestation": [
                 {
-                    "record_id": r.get("record_id"),
-                    "walacor_block_id": r.get("walacor_block_id"),
-                    "walacor_trans_id": r.get("walacor_trans_id"),
-                    "walacor_dh": r.get("walacor_dh"),
+                    "record_id": r["record_id"],
+                    "walacor_block_id": r["walacor_block_id"],
+                    "walacor_trans_id": r["walacor_trans_id"],
+                    "walacor_dh": r["walacor_dh"],
                 }
-                for r in records
+                for r in per_record
             ],
         }
 
