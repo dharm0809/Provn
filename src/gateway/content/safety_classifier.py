@@ -308,6 +308,7 @@ class SafetyClassifier(ContentAnalyzer):
                     reason=reason,
                 )
             except Exception as e:
+                self._record_fail_open("inference_failed")
                 logger.warning("SafetyClassifier inference failed (fail-open): %s", e)
                 # Reset for recording: inference failed, treat as low-confidence safe.
                 label = "safe"

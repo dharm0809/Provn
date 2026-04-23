@@ -121,6 +121,7 @@ class PresidioPIIAnalyzer(ContentAnalyzer):
         try:
             return await asyncio.to_thread(self._analyze_sync, text)
         except Exception as e:
+            self._record_fail_open("analysis_failed")
             logger.warning("Presidio analysis failed (fail-open): %s", e)
             return Decision(
                 verdict=Verdict.PASS,

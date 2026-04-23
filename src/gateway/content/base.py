@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
+
+from gateway.walacor.client import _iso8601
 
 
 class Verdict(str, Enum):
@@ -31,6 +35,31 @@ class ContentAnalyzer(ABC):
     Plugin contract for semantic firewalls (Protect AI, Lakera Guard, custom NLP).
     Implementations MUST NOT store or log the analyzed text.
     """
+
+    def _ensure_fail_open_log(self) -> deque:
+        """Lazy-init the bounded fail-open log.
+
+        Subclasses do not all call super().__init__(); this helper avoids
+        forcing a change to every analyzer constructor.
+        """
+        log = getattr(self, "_fail_open_log", None)
+        if log is None:
+            log = deque(maxlen=50)
+            self._fail_open_log = log
+        return log
+
+    def _record_fail_open(self, reason: str) -> None:
+        self._ensure_fail_open_log().append((time.time(), reason))
+
+    def fail_open_snapshot(self) -> dict:
+        log = self._ensure_fail_open_log()
+        now = time.time()
+        recent = [e for e in log if now - e[0] <= 60.0]
+        last = log[-1] if log else None
+        return {
+            "fail_opens_60s": len(recent),
+            "last_fail_open": {"ts": _iso8601(last[0]), "reason": last[1]} if last else None,
+        }
 
     @property
     @abstractmethod

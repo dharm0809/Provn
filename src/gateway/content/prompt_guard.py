@@ -134,6 +134,7 @@ class PromptGuardAnalyzer(ContentAnalyzer):
         try:
             return await asyncio.to_thread(self._classify_sync, text)
         except Exception as e:
+            self._record_fail_open("analysis_failed")
             logger.warning("Prompt Guard 2 analysis failed (fail-open): %s", e)
             return Decision(
                 verdict=Verdict.PASS,

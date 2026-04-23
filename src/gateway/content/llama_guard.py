@@ -207,6 +207,7 @@ class LlamaGuardAnalyzer(ContentAnalyzer):
             return self._parse_response(content)
 
         except httpx.TimeoutException:
+            self._record_fail_open("timeout")
             logger.warning("LlamaGuard timeout after %.1fs: model=%s", timeout, self._model)
             return Decision(
                 verdict=Verdict.PASS,
@@ -216,6 +217,7 @@ class LlamaGuardAnalyzer(ContentAnalyzer):
                 reason="timeout",
             )
         except Exception as exc:
+            self._record_fail_open("ollama_unavailable")
             logger.warning("LlamaGuard unavailable (fail-open): %s", exc)
             return Decision(
                 verdict=Verdict.PASS,
