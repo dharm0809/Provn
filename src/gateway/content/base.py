@@ -55,7 +55,7 @@ class ContentAnalyzer(ABC):
         log = self._ensure_fail_open_log()
         now = time.time()
         recent = [e for e in log if now - e[0] <= 60.0]
-        last = log[-1] if log else None
+        last = recent[-1] if recent else None
         return {
             "fail_opens_60s": len(recent),
             "last_fail_open": {"ts": _iso8601(last[0]), "reason": last[1]} if last else None,
