@@ -7,6 +7,8 @@ import base64
 import contextlib
 import json
 import logging
+import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,6 +50,11 @@ def _parse_jwt_exp(token: str) -> datetime | None:
         return datetime.fromtimestamp(int(exp), tz=timezone.utc)
     except (ValueError, OSError):
         return None
+
+
+def _iso8601(ts: float) -> str:
+    """Format a POSIX timestamp as a UTC ISO-8601 string."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
 def _next_refresh_delay_seconds(token: str | None) -> float:
@@ -96,6 +103,9 @@ class WalacorClient:
         self._auth_lock: asyncio.Lock = asyncio.Lock()
         self._refresh_task: asyncio.Task[None] | None = None
         self._closed = False
+        # Bounded deque of recent delivery outcomes for the /v1/connections
+        # endpoint. Entries are (ts, op, ok, detail).
+        self._delivery_log: deque = deque(maxlen=100)
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -156,6 +166,40 @@ class WalacorClient:
             "Authorization": self._token or "",
             "Content-Type": "application/json",
             "ETId": str(etid),
+        }
+
+    # ── Delivery instrumentation ─────────────────────────────────────────────
+
+    def _record_delivery(self, op: str, *, ok: bool, detail: str | None) -> None:
+        self._delivery_log.append((time.time(), op, ok, detail))
+
+    def delivery_snapshot(self) -> dict:
+        now = time.time()
+        recent = [e for e in self._delivery_log if now - e[0] <= 60.0]
+        if not recent:
+            return {
+                "success_rate_60s": 1.0,
+                "pending_writes": 0,
+                "last_failure": None,
+                "last_success_ts": None,
+                "time_since_last_success_s": None,
+            }
+        oks = [e for e in recent if e[2]]
+        last_success = max((e[0] for e in self._delivery_log if e[2]), default=None)
+        last_failure_entry = next(
+            ((e[0], e[1], e[3]) for e in reversed(self._delivery_log) if not e[2]),
+            None,
+        )
+        return {
+            "success_rate_60s": len(oks) / len(recent),
+            "pending_writes": 0,
+            "last_failure": {
+                "ts": _iso8601(last_failure_entry[0]),
+                "op": last_failure_entry[1],
+                "detail": last_failure_entry[2],
+            } if last_failure_entry else None,
+            "last_success_ts": _iso8601(last_success) if last_success else None,
+            "time_since_last_success_s": (now - last_success) if last_success else None,
         }
 
     # ── Core submit ──────────────────────────────────────────────────────────
@@ -270,8 +314,10 @@ class WalacorClient:
         eid = data.get("execution_id", "?")
         try:
             await self._submit(self._executions_etid, [data])
+            self._record_delivery("write_execution", ok=True, detail=None)
             logger.debug("Walacor write_execution execution_id=%s", eid)
         except Exception as e:
+            self._record_delivery("write_execution", ok=False, detail=str(e))
             logger.error(
                 "Walacor write_execution failed execution_id=%s: %s",
                 eid, e,
@@ -316,11 +362,13 @@ class WalacorClient:
             record["reason"] = reason
         try:
             await self._submit(self._attempts_etid, [record])
+            self._record_delivery("write_attempt", ok=True, detail=None)
             logger.debug(
                 "Walacor write_attempt request_id=%s disposition=%s",
                 request_id, disposition,
             )
         except Exception as e:
+            self._record_delivery("write_attempt", ok=False, detail=str(e))
             logger.warning(
                 "Walacor write_attempt failed request_id=%s: %s",
                 request_id, e,
