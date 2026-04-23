@@ -26,3 +26,18 @@ def test_last_exception_scoped_to_window(monkeypatch):
     snap = tool_exceptions_snapshot()
     assert snap["exceptions_60s"] == 0
     assert snap["last_exception"] is None
+
+
+def test_tool_loop_level_exception_recorded():
+    from gateway.pipeline.tool_executor import (
+        _tool_exception_log, record_tool_exception, tool_exceptions_snapshot,
+    )
+    _tool_exception_log.clear()
+    # simulate the call shape used in the L535 site:
+    try:
+        raise RuntimeError("upstream timeout")
+    except Exception as exc:
+        record_tool_exception(tool="tool_loop", error=str(exc) or type(exc).__name__)
+    snap = tool_exceptions_snapshot()
+    assert snap["last_exception"]["tool"] == "tool_loop"
+    assert "upstream timeout" in snap["last_exception"]["error"]
