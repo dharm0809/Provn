@@ -218,29 +218,92 @@ Rollback flag: `WALACOR_CONNECTIONS_ENABLED=true` (default true). When false →
 - **Stress test**: `/v1/connections` p95 ≤100ms under 88-parallel-request load.
 - **Regression gate**: all existing endpoints and tests unchanged.
 
+## Visual Design — Hybrid (v3 spine + v4 banner + runbook-in-drawer)
+
+The UI is **not** designed from scratch. It is ported from the Claude Design deliverable bundled at:
+
+```
+docs/plans/assets/2026-04-23-connections-truzenai/project/
+```
+
+Three variants were produced: `v2` (grouped/swim-lanes), `v3` (severity triage queue), `v4` (incident cockpit). We ship a **hybrid**:
+
+### Base layout = `connections-v3.jsx`
+
+Port `project/overview/connections-v3.jsx` and `connections-v3.css` **verbatim** as the page spine:
+- Severity-ranked triage queue (reds expanded, ambers one-liners, greens collapsed strip)
+- `V3_CONSEQUENCE` copy table — ship as-is
+- 3-column count header (Down / Degraded / Healthy)
+- Events stream with `V3EventRow`
+- `V3Panel` tile-detail slide-over with `CxJsonView`
+
+### Additions from `connections-v4.jsx`
+
+Graft two pieces from v4 on top of the v3 spine:
+1. **Banner stats strip** (the six-number row from v4's cockpit banner: `N DOWN · N DEGRADED · N HEALTHY | N SESSIONS HIT · N EXECUTIONS HIT · N REQUESTS HIT`). Render pinned at the top of the page whenever `overall_status != "green"`. Lift `V4Stat` component + banner container styles verbatim.
+2. **Incident headline block**: when `counts.red >= 1`, render a compact red banner showing the incident driver (`◆ ACTIVE INCIDENT · started <ago> · <plane> plane`, headline, "OPEN PROBE DETAIL →" CTA). Lift `v4-banner` markup + styles from v4; drop the 3-column cockpit body.
+3. **Runbook section inside the tile-detail drawer** (`V3Panel`): append a new block below `CxJsonView` that renders v4's `V4Runbook` component verbatim when a runbook entry exists for `tile.id`, otherwise shows a muted "no runbook yet" line. Reuse v4's `V4_RUNBOOK` object as the curation source — ship with the 3 seed entries (`walacor_delivery`, `auth`, `providers`); other subsystems gracefully render the empty state.
+
+### Explicitly dropped from the bundle
+
+- v4 3-column cockpit (`v4-cockpit`, `v4-col-stream`, `v4-col-context`, `v4-col-runbook`)
+- v4 "Recent changes" lane (`V4Changes`, `RECENT_CHANGES` mock) — no data source today
+- v4 amber degradation board (`v4-amber-board`, `V4AmberCard`) — v3 triage queue covers amber already
+- v4 subsystem checklist footer (`v4-footer`, `v4-checklist`) — v3 green strip covers the same role
+- All of v2 (swim-lane grouping, `V2View`, `V2EventRow`, `V2Panel`)
+
+### Shared components from the bundle (port verbatim)
+
+From `project/overview/connections-shared.jsx` — port as a single `ConnectionsShared.jsx` helper module:
+- Status helpers: `cxStatusLabel`, `cxStatusClass`, `cxPillClass`, `cxSeverityClass`, `cxCountsByStatus`, `cxGroupSummary` (unused but keeps the module intact)
+- Time helpers: `cxAgo`, `cxFmtTime`, `cxShortId`
+- Reusable UI: `CxCopyBtn`, `CxJsonView`, `CxScenarioPicker` (only during dev; strip before merging)
+- Shared data: port `project/overview/connections-data.js` to `data/connectionsMocks.js` — used only by Storybook/dev; production reads from the live API
+
+### Strict port rules
+
+1. **Do not reinvent, restyle, or "improve" any component that exists in the bundle.** Copy the JSX and CSS class names verbatim. The only allowed edits are:
+   - Replace the inline mock-data wiring (`window.ConnectionsMocks`, `useState(() => scenarios.amber)`) with a `useConnections()` hook that calls `getConnections()` every `ttl_seconds`.
+   - Remove the `CxScenarioPicker` from the intro block (dev-only).
+   - Wire `navigate('sessions', { q: session_id })` to the real router (push `?view=sessions&session_id=<id>`).
+   - Adjust import paths.
+2. **CSS tokens:** bundle CSS uses `--gold`, `--green`, `--amber`, `--red`, `--text-primary`, `--mono`, etc. These come from the existing dashboard `styles.css`. Do not redefine them. Do not introduce new tokens. If a style in the bundle references a token that doesn't exist in the live dashboard, stop and report — don't invent a fallback.
+3. **File mapping:**
+   - `project/overview/connections-v3.jsx` → `src/gateway/lineage/dashboard/src/views/Connections.jsx` (with the v4 banner + runbook grafts)
+   - `project/overview/connections-v3.css` + relevant `connections-v4.css` selectors (banner, V4Stat, runbook) → `src/gateway/lineage/dashboard/src/styles/connections.css`
+   - `project/overview/connections-shared.jsx` → `src/gateway/lineage/dashboard/src/components/ConnectionsShared.jsx`
+4. **If any grafted v4 piece conflicts with a v3 style**, preserve v3 and open an issue — do not silently merge.
+
 ## Claude Design handoff — scope lock
 
 **DO build:**
-- `src/gateway/lineage/dashboard/src/views/Connections.jsx` (new)
-- Nav entry in `App.jsx` for the `/connections` route
-- New CSS file `src/styles/connections.css`
+- `src/gateway/lineage/dashboard/src/views/Connections.jsx` (ported from `connections-v3.jsx`)
+- `src/gateway/lineage/dashboard/src/components/ConnectionsShared.jsx` (ported from `connections-shared.jsx`)
+- `src/gateway/lineage/dashboard/src/styles/connections.css` (merged from `connections-v3.css` + v4 banner/runbook selectors)
+- Nav entry in `App.jsx` for the `/connections` route (single line)
 - `api.js`: one new helper `getConnections()` calling `/v1/connections`
 
 **DO NOT TOUCH:**
 - `Overview.jsx`, `Sessions.jsx`, `Timeline.jsx`, `Attempts.jsx`, `Compliance.jsx`, `Playground.jsx`, `Intelligence.jsx`, `Control.jsx`, `Execution.jsx`
 - `main.jsx`, `ErrorBoundary`, routing except the single new route
-- Any existing CSS file in `src/styles/`
+- Any existing CSS file in `src/styles/` (control.css, exec-drawer.css, etc.)
 - Any existing api.js helper
 - Any backend file — if backend gaps surface, stop and report, do not invent endpoints
+
+**DO NOT REINVENT:**
+- Any JSX in the TruzenAI bundle. Port verbatim, rewire data source, move on.
+- Any CSS class names in the bundle. Keep `cx-*`, `v3-*`, `v4-*` prefixes as-is.
+- Any copy in `V3_CONSEQUENCE` or `V4_RUNBOOK`. That's curation work, not code.
+- Any color or token value. Reuse existing dashboard tokens.
 
 **Rules of Hooks:** per project convention, every `useMemo`/`useState`/`useEffect`/`useCallback` must sit BEFORE any early `return`. Use `Overview.jsx` as the reference pattern. Violating this produces React Error #310 and a fully blank dashboard.
 
 **Behavior notes:**
 - Poll every `ttl_seconds` (3s) — not faster.
-- Tiles rendered in the fixed order above (providers → intelligence_worker).
+- Tiles rendered in the fixed order from the contract (providers → intelligence_worker).
 - `status:"unknown"` renders grey, not red.
 - Events newest-first; clicking an event with `session_id` navigates to `?view=sessions&session_id=<id>`; without `session_id` the row is non-clickable.
-- Tile drill-in: clicking a tile opens a side panel showing the raw `detail` object (monospace).
+- Tile drill-in: clicking a tile opens the v3 slide-over with raw `detail` JSON + runbook block.
 
 ## Open questions
 

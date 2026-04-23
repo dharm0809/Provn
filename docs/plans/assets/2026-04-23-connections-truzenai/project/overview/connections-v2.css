@@ -1,0 +1,164 @@
+/* v2 layout — swim-lanes stacked vertically, each with a row-style tile list. */
+
+/* ── lane ──────────────────────────────────────── */
+.v2-lane {
+  margin: 18px 32px 0;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.v2-lane + .v2-lane { margin-top: 14px; }
+.v2-lane.is-amber { border-color: var(--amber); }
+.v2-lane.is-red   { border-color: var(--red); }
+
+.v2-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset, var(--bg));
+}
+.v2-lane-head-left {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.v2-lane-mark { color: var(--gold); font-size: 11px; }
+.v2-lane-title {
+  font: 500 13px/1 var(--mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  margin: 0;
+}
+.v2-lane-count {
+  font: 400 10.5px/1 var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+.v2-lane-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+.v2-lane-blurb {
+  font: 400 11.5px/1.4 var(--font);
+  color: var(--text-muted);
+  max-width: 420px;
+  text-align: right;
+}
+
+.v2-lane-body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── row-style tile ────────────────────────────── */
+.v2-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 4px 32px minmax(180px, 1.2fr) minmax(170px, 1.2fr) minmax(240px, 2fr) 200px;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font);
+  color: var(--text-primary);
+  transition: background 80ms linear;
+}
+.v2-row:first-child { border-top: 0; }
+.v2-row:hover { background: var(--bg-inset, var(--bg)); }
+.v2-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--gold); }
+
+.v2-row-rail {
+  align-self: stretch;
+  background: var(--border);
+}
+.v2-row.is-green .v2-row-rail { background: var(--green); }
+.v2-row.is-amber .v2-row-rail { background: var(--amber); }
+.v2-row.is-red   .v2-row-rail { background: var(--red); }
+.v2-row.is-unknown .v2-row-rail { opacity: 0.4; }
+
+.v2-row-idx {
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+.v2-row-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.v2-row-label {
+  font: 500 11px/1.2 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.v2-row-blurb {
+  font: 400 11px/1.3 var(--font);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-row-headline {
+  font: 500 14px/1.3 var(--font);
+  letter-spacing: -0.005em;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-row.is-red .v2-row-headline { color: var(--red); }
+.v2-row-subline {
+  font: 400 12px/1.4 var(--font);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-row-meta {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+.v2-row-since {
+  font: 400 10px/1 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+/* ── event row — lane chip prefix ─────────────── */
+.v2-event-row .cx-event-sys {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.v2-lane-chip {
+  display: inline-block;
+  padding: 2px 6px;
+  font: 500 9px/1.2 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-inset, var(--bg));
+}
+.v2-chip-providers { color: var(--blue);  border-color: color-mix(in oklab, var(--blue) 45%, transparent); }
+.v2-chip-infra     { color: var(--gold);  border-color: var(--gold-dim); }
+.v2-chip-policy    { color: var(--green); border-color: color-mix(in oklab, var(--green) 45%, transparent); }
+
+@media (max-width: 1100px) {
+  .v2-row { grid-template-columns: 4px 28px minmax(160px, 1fr) minmax(160px, 1.1fr) 160px; }
+  .v2-row-subline { display: none; }
+}
+@media (max-width: 760px) {
+  .v2-row { grid-template-columns: 4px 28px 1fr 120px; }
+  .v2-row-headline { display: none; }
+  .v2-lane-blurb { display: none; }
+}
