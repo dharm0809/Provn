@@ -124,6 +124,7 @@ class PromptGuardAnalyzer(ContentAnalyzer):
 
     async def analyze(self, text: str) -> Decision:
         if not self._available:
+            self._record_fail_open("unavailable")
             return Decision(
                 verdict=Verdict.PASS,
                 confidence=0.0,

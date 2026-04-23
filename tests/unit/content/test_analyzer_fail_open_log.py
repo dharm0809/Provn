@@ -21,3 +21,30 @@ def test_analyzer_fail_open_snapshot_records():
     assert snap["fail_opens_60s"] == 2
     assert snap["last_fail_open"]["reason"] == "connection refused"
     assert "ts" in snap["last_fail_open"]
+
+
+def test_presidio_unavailable_records_fail_open():
+    import asyncio
+
+    from gateway.content.presidio_pii import PresidioPIIAnalyzer
+
+    a = PresidioPIIAnalyzer.__new__(PresidioPIIAnalyzer)  # bypass __init__
+    a._engine = None
+    a._available = False
+    asyncio.run(a.analyze("hello"))
+    snap = a.fail_open_snapshot()
+    assert snap["fail_opens_60s"] == 1
+    assert snap["last_fail_open"]["reason"] == "unavailable"
+
+
+def test_prompt_guard_unavailable_records_fail_open():
+    import asyncio
+
+    from gateway.content.prompt_guard import PromptGuardAnalyzer
+
+    a = PromptGuardAnalyzer.__new__(PromptGuardAnalyzer)  # bypass __init__
+    a._available = False
+    asyncio.run(a.analyze("hello"))
+    snap = a.fail_open_snapshot()
+    assert snap["fail_opens_60s"] == 1
+    assert snap["last_fail_open"]["reason"] == "unavailable"
