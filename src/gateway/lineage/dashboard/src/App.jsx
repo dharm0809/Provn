@@ -14,7 +14,7 @@ const Playground = lazy(() => import('./views/Playground'));
 
 const NAV_ITEMS = [
   { key: 'overview', label: 'Overview' },
-  { key: 'intelligence', label: 'Intelligence' },
+  { key: 'intelligence', label: 'Governance' },
   { key: 'sessions', label: 'Sessions' },
   { key: 'attempts', label: 'Attempts' },
   { key: 'control', label: 'Control' },
@@ -24,7 +24,7 @@ const NAV_ITEMS = [
 
 const VIEW_LABELS = {
   overview: 'Overview',
-  intelligence: 'Intelligence',
+  intelligence: 'Governance',
   sessions: 'Sessions',
   attempts: 'Attempts',
   control: 'Control',

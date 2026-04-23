@@ -82,33 +82,34 @@ export default function Playground() {
                 value={maxTokens}
                 onChange={e => setMaxTokens(parseInt(e.target.value, 10) || 0)} />
             </div>
-            <button className="btn-wal btn-primary">
-              ▶ Send <span className="small" style={{ opacity: 0.6, marginLeft: 4 }}>⌘↵</span>
+            <button
+              className="btn-wal btn-primary"
+              disabled
+              title="Playground is not yet wired up to the gateway">
+              ▶ Send <span className="small" style={{ opacity: 0.6, marginLeft: 4 }}>not connected</span>
             </button>
           </div>
         </div>
 
         <div className="card pg-right">
           <div className="pg-form-head">◇ Response</div>
-          <div className="pg-response-preview">
-            <p>The AI gateway enforces policy-level access controls across all inbound requests, with redaction and blocking paths wired to three active analyzers.</p>
-            <p>Chain-of-custody is preserved through Walacor; 1,842 sessions verified in the current window with zero integrity failures.</p>
-            <p>Two candidate models are currently in shadow validation; one has passed its automated gate and is ready for review.</p>
+          <div className="pg-response-preview" style={{ color: 'var(--text-muted)' }}>
+            <p>
+              The Playground isn't connected to the gateway yet. Submit real
+              prompts via the gateway endpoint directly — every response is
+              audited and shows up under <em>Sessions</em> and <em>Attempts</em>.
+            </p>
           </div>
           <div className="pg-governance">
             <div className="pg-gov-title">◆ GOVERNANCE READOUT</div>
             <div className="pg-gov-grid">
-              <span className="pg-gov-k">EXEC</span><span className="pg-gov-v mono">exec_8a91b4c2e5f0</span>
-              <span className="pg-gov-k">ATTEST</span><span className="pg-gov-v mono">att_3f7de1a8</span>
-              <span className="pg-gov-k">POLICY</span><span className="pg-gov-v"><span className="badge-wal badge-pass">allow</span></span>
-              <span className="pg-gov-k">CHAIN</span><span className="pg-gov-v mono">seq #247,019</span>
-              <span className="pg-gov-k">LATENCY</span><span className="pg-gov-v mono">342ms</span>
-              <span className="pg-gov-k">TOKENS</span><span className="pg-gov-v mono">82 in / 147 out</span>
-              <span className="pg-gov-k">ANALYSIS</span><span className="pg-gov-v">
-                <span className="badge-wal badge-pass">safe</span>{' '}
-                <span className="badge-wal badge-pass">no_pii</span>{' '}
-                <span className="badge-wal badge-pass">within_budget</span>
-              </span>
+              <span className="pg-gov-k">EXEC</span><span className="pg-gov-v mono">—</span>
+              <span className="pg-gov-k">ATTEST</span><span className="pg-gov-v mono">—</span>
+              <span className="pg-gov-k">POLICY</span><span className="pg-gov-v mono">—</span>
+              <span className="pg-gov-k">CHAIN</span><span className="pg-gov-v mono">—</span>
+              <span className="pg-gov-k">LATENCY</span><span className="pg-gov-v mono">—</span>
+              <span className="pg-gov-k">TOKENS</span><span className="pg-gov-v mono">—</span>
+              <span className="pg-gov-k">ANALYSIS</span><span className="pg-gov-v mono">—</span>
             </div>
           </div>
         </div>

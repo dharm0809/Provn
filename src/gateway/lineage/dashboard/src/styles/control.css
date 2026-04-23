@@ -387,6 +387,19 @@
 }
 .cp-section-foot a { color: var(--gold); text-decoration: none; cursor: pointer; }
 .cp-section-foot a:hover { text-decoration: underline; }
+.cp-section-foot .cp-link-like {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--gold);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+.cp-section-foot .cp-link-like:hover { text-decoration: underline; }
 
 /* ---------- event stream ---------- */
 
@@ -682,6 +695,57 @@
 .cp-modal-row {
   display: flex; gap: 8px; justify-content: flex-end;
 }
+.cp-modal-wide {
+  width: min(560px, 92vw);
+  max-width: 92vw;
+}
+.cp-section-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cp-inline-form {
+  background: var(--bg-inset);
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+}
+.cp-form-grid-5 {
+  display: grid;
+  grid-template-columns: 1.5fr 1.5fr 1fr 0.8fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.cp-form-grid-5 .cp-modal-input,
+.cp-form-grid-4 .cp-modal-input {
+  margin-bottom: 0;
+}
+.cp-form-grid-4 {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.cp-form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.cp-form-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cp-detail-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  font: 400 12px/1.45 var(--mono);
+  color: var(--fg-muted);
+}
+.cp-detail-dl dt { color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.08em; font-size: 9.5px; }
+.cp-detail-dl dd { margin: 0; color: var(--fg); word-break: break-all; }
 
 /* ---------- small utility ---------- */
 
