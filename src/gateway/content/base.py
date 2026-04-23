@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
-from gateway.walacor.client import _iso8601
+from gateway.util.time import iso8601_utc as _iso8601
 
 
 class Verdict(str, Enum):
