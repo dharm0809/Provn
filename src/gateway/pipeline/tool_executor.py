@@ -31,7 +31,7 @@ from gateway.mcp.client import ToolResult as MCPToolResult
 from gateway.metrics.prometheus import tool_calls_total, tool_loop_iterations
 from gateway.pipeline.forwarder import forward, stream_with_tee
 from gateway.pipeline.response_evaluator import analyze_text
-from gateway.walacor.client import _iso8601
+from gateway.util.time import iso8601_utc as _iso8601
 import gateway.util.json_utils as json
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,8 @@ _tool_exception_log: deque = deque(maxlen=50)  # (ts, tool, error)
 
 
 def record_tool_exception(*, tool: str, error: str) -> None:
-    _tool_exception_log.append((time.time(), tool, error))
+    cleaned = (error or "").strip() or "Exception"
+    _tool_exception_log.append((time.time(), tool, cleaned))
 
 
 def tool_exceptions_snapshot() -> dict:
@@ -356,8 +357,7 @@ async def _execute_one_tool(
 
     try:
         tool_calls_total.labels(provider=provider, tool_type=tc.tool_type, source="gateway").inc()
-    except Exception as exc:
-        record_tool_exception(tool=tc.tool_name or "unknown", error=str(exc) or type(exc).__name__)
+    except Exception:
         logger.debug("Metric increment failed (tool_calls_total)", exc_info=True)
 
     # Content analysis BEFORE feeding back to LLM
@@ -454,8 +454,7 @@ async def _run_active_tool_loop(
     if iterations > 0:
         try:
             tool_loop_iterations.labels(provider=provider).observe(iterations)
-        except Exception as exc:
-            record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
+        except Exception:
             logger.debug("Metric increment failed (tool_loop_iterations)", exc_info=True)
 
     # If original request was streaming and the model is done calling tools,

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from gateway.core.models.execution import ExecutionRecord
+from gateway.util.time import iso8601_utc as _iso8601
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,6 @@ def _parse_jwt_exp(token: str) -> datetime | None:
         return datetime.fromtimestamp(int(exp), tz=timezone.utc)
     except (ValueError, OSError):
         return None
-
-
-def _iso8601(ts: float) -> str:
-    """Format a POSIX timestamp as a UTC ISO-8601 string."""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
 def _next_refresh_delay_seconds(token: str | None) -> float:
