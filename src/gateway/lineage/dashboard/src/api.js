@@ -349,7 +349,7 @@ export async function applyTemplate(name) {
   return controlFetch(`${CTRL_API}/templates/${encodeURIComponent(name)}/apply`, { method: 'POST' });
 }
 
-// ─── Intelligence API (Phase 25) ───────────────────────────────
+// ─── Intelligence API ───────────────────────────────
 
 const INTEL_API = `${CTRL_API}/intelligence`;
 

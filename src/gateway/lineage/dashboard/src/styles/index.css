@@ -1313,7 +1313,7 @@ html[data-theme="light"] .form-select {
   .compliance-stats { grid-template-columns: 1fr 1fr; }
 }
 
-/* ── Trace Waterfall (Phase 27) ── */
+/* ── Trace Waterfall ── */
 .trace-waterfall-wrap {
   background: var(--bg-inset);
   border: 1px solid var(--border);
@@ -1392,7 +1392,7 @@ html[data-theme="light"] .form-select {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   Playground (Phase 29)
+   Playground
    Aesthetic: Mission control terminal — purposeful, governed
    ═══════════════════════════════════════════════════════════ */
 

@@ -11,12 +11,26 @@ never 5xx's on probe failure — the tile instead goes ``status:"unknown"``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
 from gateway.util.time import iso8601_utc
+
+
+async def _call_reader(fn, *args, **kwargs):
+    """Invoke an async-or-sync lineage reader method uniformly.
+
+    WalacorLineageReader exposes async methods; the local SQLite LineageReader
+    exposes sync ones. Passing an async callable to asyncio.to_thread runs the
+    callable in a thread but leaves the returned coroutine unawaited (→ a
+    RuntimeWarning and a silently dropped result).
+    """
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +437,7 @@ async def build_readiness_tile(ctx: Any) -> dict:
     reader = getattr(ctx, "lineage_reader", None)
     if reader is not None:
         try:
-            res = await asyncio.to_thread(
+            res = await _call_reader(
                 reader.get_attempts, limit=200, disposition="readiness_degraded",
             )
             items = (res or {}).get("items") or []
@@ -755,7 +769,7 @@ async def build_events(ctx: Any, *, cap: int = 50) -> list[dict]:
     reader = getattr(ctx, "lineage_reader", None)
     if reader is not None:
         try:
-            res = await asyncio.to_thread(
+            res = await _call_reader(
                 reader.get_attempts, limit=20, disposition="readiness_degraded",
             )
             for row in (res or {}).get("items") or []:
