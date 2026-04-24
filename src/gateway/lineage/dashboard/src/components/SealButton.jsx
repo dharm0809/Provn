@@ -1,11 +1,12 @@
 import React from 'react';
+import WalacorWordmark from './WalacorWordmark.jsx';
 
 /**
  * SealButton — gold pill shown inside each record card.
  *
  * State rules:
  *   sealed       record has walacor_block_id + walacor_trans_id + walacor_dh
- *                → gold pill "◆ SEALED IN WALACOR", clickable
+ *                → gold pill "SEALED IN" + Walacor wordmark, clickable
  *   pending      any of those fields is missing but delivery was expected
  *                → muted "◇ SEAL PENDING", disabled
  *   hidden       walacor storage not in use for this record → render null
@@ -44,7 +45,8 @@ export default function SealButton({ state, isOpen, onToggle }) {
       onClick={handleClick}
       title={isOpen ? 'Close envelope detail' : 'View Walacor envelope'}
     >
-      <span className="exec-seal-diamond">◆</span> SEALED IN WALACOR
+      <span className="exec-seal-label">SEALED IN</span>
+      <WalacorWordmark size="seal" />
     </button>
   );
 }

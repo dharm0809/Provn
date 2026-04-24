@@ -42,6 +42,46 @@
   font-size: 11px;
   line-height: 1;
 }
+.exec-seal-label {
+  letter-spacing: 0.08em;
+}
+
+/* Walacor wordmark: dark UI uses light-on-dark PNG; light UI uses black ink PNG */
+.walacor-wordmark {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.walacor-wordmark__img {
+  display: block;
+  object-fit: contain;
+}
+.walacor-wordmark--seal .walacor-wordmark__img {
+  height: 14px;
+  width: auto;
+}
+.walacor-wordmark--eyebrow .walacor-wordmark__img {
+  height: 16px;
+  width: auto;
+}
+.walacor-wordmark__img--light {
+  display: none;
+}
+html[data-theme="light"] .walacor-wordmark__img--dark {
+  display: none;
+}
+html[data-theme="light"] .walacor-wordmark__img--light {
+  display: block;
+}
+/* Gold hover/active: silhouette dark asset; light asset (black ink) stays readable */
+.exec-seal-btn:hover .walacor-wordmark--seal .walacor-wordmark__img--dark,
+.exec-seal-btn.is-active .walacor-wordmark--seal .walacor-wordmark__img--dark {
+  filter: brightness(0);
+}
+.exec-seal-btn:hover .walacor-wordmark--seal .walacor-wordmark__img--light,
+.exec-seal-btn.is-active .walacor-wordmark--seal .walacor-wordmark__img--light {
+  filter: none;
+}
 
 /* ---------- Drawer wrapper ---------- */
 
@@ -65,6 +105,23 @@
   text-transform: uppercase;
   color: var(--gold);
   margin: 0 0 14px;
+}
+.exec-drawer-eyebrow-brand {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  text-transform: none;
+  letter-spacing: 0.06em;
+}
+.exec-drawer-eyebrow-brand > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.exec-drawer-eyebrow-sep {
+  text-transform: none;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted, var(--text-muted));
 }
 
 /* ---------- Two-column grid ---------- */

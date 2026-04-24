@@ -786,6 +786,25 @@
   flex-wrap: wrap;
   font-size: 10px;
 }
+.ses-proof-row--record {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ses-proof-row--record .ses-proof-hash {
+  min-width: 0;
+  max-width: min(100%, 36ch);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Inline after RECORD line — do not push to far right (margin-left: auto). */
+.ses-proof-seal-slot {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
 .ses-proof-lbl {
   font-size: 9px;
   letter-spacing: 0.14em;

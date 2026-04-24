@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import CopyBtn from './CopyBtn.jsx';
 import JsonView from './JsonView.jsx';
+import WalacorWordmark from './WalacorWordmark.jsx';
 import { getSealEnvelope, getExecution } from '../api';
 import { truncHash, getTokenCount } from '../utils';
 
@@ -80,7 +81,11 @@ export default function SealDrawer({ r, sessionId, totalInChain }) {
   return (
     <div className="exec-seal-drawer-wrap">
       <div className="exec-seal-drawer" onClick={e => e.stopPropagation()}>
-        <p className="exec-drawer-eyebrow">◆ SEALED IN WALACOR · {r.execution_id}</p>
+        <p className="exec-drawer-eyebrow exec-drawer-eyebrow-brand">
+          <span>SEALED IN</span>
+          <WalacorWordmark size="eyebrow" />
+          <span className="exec-drawer-eyebrow-sep">· {r.execution_id}</span>
+        </p>
 
           {loading && <div className="exec-loading"><span className="exec-spinner" /> fetching envelope…</div>}
 

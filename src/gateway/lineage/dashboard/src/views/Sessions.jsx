@@ -332,6 +332,7 @@ function ChainRecord({ r, isLast, verified, onClick, sealOpen, onToggleSeal }) {
   const response = r.response_content || '';
   const seqCls = verified === 'pass' ? 'verified-pass' : verified === 'fail' ? 'verified-fail' : '';
   const onChain = !!(r.walacor_block_id);
+  const seal = sealState(r);
 
   return (
     <div className="ses-chain-node">
@@ -385,11 +386,20 @@ function ChainRecord({ r, isLast, verified, onClick, sealOpen, onToggleSeal }) {
         )}
 
         <div className="ses-chain-proof">
-          <div className="ses-proof-row">
+          <div className="ses-proof-row ses-proof-row--record">
             <span className="ses-proof-lbl mono">RECORD</span>
             <span className="ses-proof-hash mono">{fmtShortId(r.record_id || r.record_hash, 14, 6)}</span>
             <CopyBtn text={r.record_id || r.record_hash} title="Copy record ID" />
             {r.record_signature && <span className="ses-proof-sig" title={`Ed25519: ${r.record_signature}`}>signed</span>}
+            {seal !== 'hidden' && (
+              <div className="ses-proof-seal-slot">
+                <SealButton
+                  state={seal}
+                  isOpen={!!sealOpen}
+                  onToggle={onToggleSeal}
+                />
+              </div>
+            )}
           </div>
           {onChain && (
             <div className="ses-proof-row">
@@ -402,13 +412,6 @@ function ChainRecord({ r, isLast, verified, onClick, sealOpen, onToggleSeal }) {
               <span className="ses-proof-hash mono muted">{fmtShortId(r._walacor_eid, 8, 4)}</span></>}
             </div>
           )}
-          <div className="ses-proof-row" style={{ marginTop: 8 }}>
-            <SealButton
-              state={sealState(r)}
-              isOpen={!!sealOpen}
-              onToggle={onToggleSeal}
-            />
-          </div>
         </div>
       </div>
     </div>
