@@ -165,6 +165,28 @@ class IntelligenceWorker:
         self._results_callback: Any = None  # Set by pipeline to write back to WAL
         # Distillation buffer: (prompt, label, confidence) for ONNX retraining
         self._distillation_buffer: list[dict] = []
+        self._last_error: tuple[float, str] | None = None
+
+    def _record_error(self, detail: str) -> None:
+        cleaned = (detail or "").strip() or "Exception"
+        self._last_error = (time.time(), cleaned)
+
+    def snapshot(self) -> dict:
+        from gateway.util.time import iso8601_utc
+        q = getattr(self, "_queue", None)
+        queue_depth = q.qsize() if q is not None else 0
+        now = time.time()
+        last_error = None
+        if self._last_error is not None:
+            ts, detail = self._last_error
+            if now - ts <= 60.0:
+                last_error = {"ts": iso8601_utc(ts), "detail": detail}
+        return {
+            "running": bool(self._running),
+            "queue_depth": queue_depth,
+            "oldest_job_age_s": 0.0,
+            "last_error": last_error,
+        }
 
     async def enqueue(self, job: IntelligenceJob) -> bool:
         """Enqueue a job for background processing. Returns False if queue full."""
@@ -198,6 +220,7 @@ class IntelligenceWorker:
                     await self._results_callback(result)
             except Exception as e:
                 self._errors += 1
+                self._record_error(f"{type(e).__name__}: {e}")
                 logger.warning("Intelligence worker error: %s", e, exc_info=True)
 
         logger.info("Intelligence worker stopped (processed=%d, errors=%d)", self._processed, self._errors)
