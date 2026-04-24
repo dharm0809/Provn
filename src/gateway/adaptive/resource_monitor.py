@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from gateway.adaptive.interfaces import ResourceMonitor, ResourceStatus
+from gateway.util.time import iso8601_utc
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class DefaultResourceMonitor(ResourceMonitor):
         self._min_samples = min_samples
         self._provider_results: dict[str, deque] = defaultdict(
             lambda: deque(maxlen=100))
+        self._last_error: dict[str, str] = {}
         self._active_requests = 0
 
     async def check(self) -> ResourceStatus:
@@ -50,6 +52,35 @@ class DefaultResourceMonitor(ResourceMonitor):
 
     def record_provider_result(self, provider: str, success: bool) -> None:
         self._provider_results[provider].append((time.time(), success))
+
+    def record_outcome(self, provider: str, *, ok: bool, error: str | None = None) -> None:
+        """Record a provider outcome with an optional error string.
+
+        Mirrors ``record_provider_result`` but also captures the latest error
+        message for exposure via :meth:`snapshot`. ``error`` is keyword-only
+        so existing call sites remain source-compatible.
+        """
+        self._provider_results[provider].append((time.time(), ok))
+        if not ok and error is not None:
+            self._last_error[provider] = error
+
+    def snapshot(self) -> dict:
+        """Return a per-provider health snapshot for /v1/connections."""
+        rates = self._get_error_rates()
+        providers: dict[str, dict] = {}
+        for name in self._provider_results.keys():
+            cooldown_seconds = self.get_provider_cooldown(name)
+            cooldown_until = (
+                iso8601_utc(time.time() + cooldown_seconds)
+                if cooldown_seconds is not None
+                else None
+            )
+            providers[name] = {
+                "error_rate_60s": rates.get(name, 0.0),
+                "cooldown_until": cooldown_until,
+                "last_error": self._last_error.get(name),
+            }
+        return {"providers": providers}
 
     def get_provider_cooldown(self, provider: str) -> float | None:
         results = self._provider_results.get(provider)
