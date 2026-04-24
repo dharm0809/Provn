@@ -63,6 +63,21 @@ else
     docker exec gateway-ollama-1 ollama pull "$MODEL"
 fi
 
+# ── System dependencies ───────────────────────────────────────────────────
+# WeasyPrint (used by /v1/compliance/export?format=pdf) needs native Pango
+# + Cairo. Without these, PDF export silently falls back to a 501. Install
+# once per host; dnf is idempotent so re-running the script is safe.
+echo "[3a/8] Ensuring native libs for PDF export..."
+if command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y pango cairo 2>&1 | tail -1 || echo "  dnf install skipped (non-fatal)"
+elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangoft2-1.0-0 libcairo2 2>&1 | tail -1 \
+        || echo "  apt install skipped (non-fatal)"
+else
+    echo "  No supported package manager found — install 'pango' + 'cairo' manually if PDF export is needed."
+fi
+
 # ── Install gateway package ───────────────────────────────────────────────
 echo "[3/8] Installing gateway package..."
 cd ~/Gateway
