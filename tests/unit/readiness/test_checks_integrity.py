@@ -87,26 +87,34 @@ def test_int03_red(monkeypatch, tmp_path):
 def test_int04_green(monkeypatch, tmp_path):
     class _S:
         walacor_storage_enabled = True
+        walacor_executions_etid = 123
     monkeypatch.setattr("gateway.readiness.checks.integrity.get_settings", lambda: _S())
-    writer, _ = _make_wal(tmp_path, [
-        {"execution_id": f"e{i}", "walacor_block_id": "b", "walacor_trans_id": "t", "walacor_dh": "d"}
-        for i in range(20)
-    ])
+    writer, _ = _make_wal(tmp_path, [])
+
+    async def _query(etid, pipeline):
+        return [
+            {"execution_id": f"e{i}", "BlockId": "b", "TransId": "t", "DH": "d"}
+            for i in range(20)
+        ]
+    client = types.SimpleNamespace(query_complex=_query)
     from gateway.readiness.checks.integrity import _Int04WalacorAnchoringActive
-    result = _run(_Int04WalacorAnchoringActive().run(_ctx(wal_writer=writer)))
+    result = _run(_Int04WalacorAnchoringActive().run(_ctx(wal_writer=writer, walacor_client=client)))
     assert result.status == "green"
 
 
 def test_int04_red(monkeypatch, tmp_path):
     class _S:
         walacor_storage_enabled = True
+        walacor_executions_etid = 123
     monkeypatch.setattr("gateway.readiness.checks.integrity.get_settings", lambda: _S())
-    writer, _ = _make_wal(tmp_path, [
-        {"execution_id": f"e{i}"}
-        for i in range(20)
-    ])
+    writer, _ = _make_wal(tmp_path, [])
+
+    async def _query(etid, pipeline):
+        # Records written but not yet anchored — no BlockId/TransId/DH
+        return [{"execution_id": f"e{i}"} for i in range(20)]
+    client = types.SimpleNamespace(query_complex=_query)
     from gateway.readiness.checks.integrity import _Int04WalacorAnchoringActive
-    result = _run(_Int04WalacorAnchoringActive().run(_ctx(wal_writer=writer)))
+    result = _run(_Int04WalacorAnchoringActive().run(_ctx(wal_writer=writer, walacor_client=client)))
     assert result.status == "red"
 
 
@@ -199,14 +207,14 @@ def test_int07_green(tmp_path):
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
-        "CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, created_at TEXT, session_id TEXT)"
+        "CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, created_at TEXT, session_id TEXT, request_type TEXT)"
     )
     conn.execute(
         "CREATE TABLE gateway_attempts (request_id TEXT, execution_id TEXT, timestamp TEXT)"
     )
     for i in range(5):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, '{}', 'execution', ?, NULL)",
+            "INSERT INTO wal_records VALUES (?, '{}', 'execution', ?, NULL, NULL)",
             (f"e{i}", old_iso),
         )
         conn.execute(
@@ -228,14 +236,14 @@ def test_int07_red_missing(tmp_path):
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
-        "CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, created_at TEXT, session_id TEXT)"
+        "CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, created_at TEXT, session_id TEXT, request_type TEXT)"
     )
     conn.execute(
         "CREATE TABLE gateway_attempts (request_id TEXT, execution_id TEXT, timestamp TEXT)"
     )
     for i in range(5):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, '{}', 'execution', ?, NULL)",
+            "INSERT INTO wal_records VALUES (?, '{}', 'execution', ?, NULL, NULL)",
             (f"e{i}", old_iso),
         )
     # No gateway_attempts rows
@@ -255,14 +263,14 @@ def test_int07_amber_race_window(tmp_path):
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
-        "CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, created_at TEXT, session_id TEXT)"
+        "CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, created_at TEXT, session_id TEXT, request_type TEXT)"
     )
     conn.execute(
         "CREATE TABLE gateway_attempts (request_id TEXT, execution_id TEXT, timestamp TEXT)"
     )
     for i in range(5):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, '{}', 'execution', ?, NULL)",
+            "INSERT INTO wal_records VALUES (?, '{}', 'execution', ?, NULL, NULL)",
             (f"e{i}", young_iso),
         )
     conn.commit()

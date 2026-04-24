@@ -6,6 +6,7 @@ import json
 import random
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from gateway.config import get_settings
@@ -187,37 +188,54 @@ class _Int04WalacorAnchoringActive:
 
         if not settings.walacor_storage_enabled:
             return CheckResult(status="amber", detail="Walacor storage not configured", elapsed_ms=elapsed_ms())
-        if ctx.wal_writer is None:
-            return CheckResult(status="amber", detail="WAL writer not available", elapsed_ms=elapsed_ms())
+        # Anchor fields (BlockId/TransId/DH) are populated by Walacor when
+        # records are read back — they never live in the pre-submit local
+        # WAL. Query Walacor directly for recent records and inspect the
+        # envelope. If there's no client, we can't judge anchoring so this
+        # check stays amber.
+        client = getattr(ctx, "walacor_client", None)
+        if client is None:
+            return CheckResult(status="amber", detail="Walacor client not available", elapsed_ms=elapsed_ms())
 
         try:
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            rows = conn.execute(
-                "SELECT record_json FROM wal_records WHERE event_type='execution' "
-                "ORDER BY rowid DESC LIMIT 50"
-            ).fetchall()
-            conn.close()
+            # Only consider records old enough to have had a chance to be
+            # anchored. Sandbox typically anchors within a minute; we allow
+            # 2 minutes of headroom before counting an un-anchored record as
+            # a failure.
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+            pipeline = [
+                {"$match": {"timestamp": {"$lte": cutoff}}},
+                {"$sort": {"timestamp": -1}},
+                {"$limit": 20},
+                {"$project": {
+                    "execution_id": 1,
+                    "BlockId": 1, "TransId": 1, "DH": 1,
+                }},
+            ]
+            raw = await client.query_complex(settings.walacor_executions_etid, pipeline)
         except Exception as exc:
-            return CheckResult(status="amber", detail=f"Could not sample records: {exc}", elapsed_ms=elapsed_ms())
+            return CheckResult(status="amber", detail=f"Walacor query failed: {exc}", elapsed_ms=elapsed_ms())
 
-        if not rows:
-            return CheckResult(status="amber", detail="No execution records yet", elapsed_ms=elapsed_ms())
+        if not raw:
+            return CheckResult(
+                status="amber",
+                detail="No execution records older than 2m to verify yet",
+                elapsed_ms=elapsed_ms(),
+            )
 
-        sampled = len(rows)
-        anchored = 0
-        for (rec_json,) in rows:
-            try:
-                rec = json.loads(rec_json)
-                if rec.get("walacor_block_id") and rec.get("walacor_trans_id") and rec.get("walacor_dh"):
-                    anchored += 1
-            except Exception:
-                pass
+        sampled = len(raw)
+        anchored = sum(
+            1 for r in raw if r.get("BlockId") and r.get("TransId") and r.get("DH")
+        )
         pct = anchored / sampled
         status = "green" if pct >= 0.95 else ("amber" if pct >= 0.5 else "red")
         return CheckResult(
             status=status,
             detail=f"{anchored}/{sampled} recent records anchored ({pct:.0%})",
-            remediation=None if status == "green" else "Check walacor_client delivery worker and Walacor server health",
+            remediation=None if status == "green" else (
+                "Walacor writes succeeded but the server has not produced BlockId/TransId/DH — "
+                "verify sandbox/anchor worker health"
+            ),
             evidence={"sampled": sampled, "anchored": anchored},
             elapsed_ms=elapsed_ms(),
         )
@@ -379,12 +397,19 @@ class _Int07AttemptCompleteness:
             # but datetime('now') returns SQLite format ('2025-… 01:30:45').
             # Direct string comparison gets the 'T' vs space ordering wrong — wrap
             # both sides in datetime() so SQLite parses them to a common form.
+            # Exclude internal execution records that never flow through the
+            # HTTP request pipeline (startup self-test, intelligence worker
+            # verdicts, etc.) — completeness_middleware only writes attempt
+            # rows for real inbound requests, so these would be counted as
+            # spurious orphans.
             rows = conn.execute(
                 """
                 SELECT r.execution_id,
                        (SELECT COUNT(*) FROM gateway_attempts a WHERE a.execution_id = r.execution_id) AS matched
                   FROM wal_records r
                  WHERE r.event_type='execution'
+                   AND r.execution_id NOT LIKE 'self-test-%'
+                   AND (r.request_type IS NULL OR r.request_type NOT IN ('system_task', 'intelligence_verdict'))
                    AND datetime(r.created_at) < datetime('now', '-30 seconds')
                  ORDER BY r.rowid DESC
                  LIMIT 100

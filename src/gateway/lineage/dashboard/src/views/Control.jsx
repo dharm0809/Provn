@@ -8,7 +8,7 @@
    - All write helpers already exist in api.js — do not invent new ones.
 */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Fragment, useState, useEffect, useCallback } from 'react';
 import {
   getControlStatus,
   getAttestations,
@@ -1086,11 +1086,17 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
 }
 
 function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
+  const [expandedProvider, setExpandedProvider] = useState(null);
   if (!data) return <Loading />;
 
   const providers = data.providers || [];
   const models = data.discovered_models || [];
   const pendingModels = models.filter(m => !m.attested);
+  const attestedByProvider = models.reduce((acc, m) => {
+    if (!m.attested) return acc;
+    (acc[m.provider] = acc[m.provider] || []).push(m);
+    return acc;
+  }, {});
 
   const onDiscover = async () => {
     try { await discoverModels(); onRefresh(); } catch (e) { alert(e.message); }
@@ -1149,22 +1155,71 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
               </tr>
             </thead>
             <tbody>
-              {providers.map(p => (
-                <tr key={p.id}>
-                  <td><span className="cp-row-primary">{p.name}</span></td>
-                  <td className="cp-mono cp-muted">{p.endpoint}</td>
-                  <td className="cp-mono">{p.latency_ms != null ? `${p.latency_ms}ms` : '—'}</td>
-                  <td className="cp-mono">{p.discovered}</td>
-                  <td className="cp-mono">{p.attested}</td>
-                  <td><Badge kind={p.status}>{p.status}</Badge></td>
-                  <td>
-                    <div className="cp-row-actions">
-                      <button className="cp-btn cp-btn-sm">view</button>
-                      <button className="cp-btn cp-btn-sm" disabled={!canWrite}>re-sync</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {providers.map(p => {
+                const isOpen = expandedProvider === p.name;
+                const attested = attestedByProvider[p.name] || [];
+                return (
+                  <Fragment key={p.id}>
+                    <tr>
+                      <td><span className="cp-row-primary">{p.name}</span></td>
+                      <td className="cp-mono cp-muted">{p.endpoint}</td>
+                      <td className="cp-mono">{p.latency_ms != null ? `${p.latency_ms}ms` : '—'}</td>
+                      <td className="cp-mono">{p.discovered}</td>
+                      <td className="cp-mono">{p.attested}</td>
+                      <td><Badge kind={p.status}>{p.status}</Badge></td>
+                      <td>
+                        <div className="cp-row-actions">
+                          <button
+                            className="cp-btn cp-btn-sm"
+                            onClick={() => setExpandedProvider(isOpen ? null : p.name)}
+                            aria-expanded={isOpen}
+                          >{isOpen ? 'hide' : 'view'}</button>
+                          <button className="cp-btn cp-btn-sm" disabled={!canWrite}>re-sync</button>
+                        </div>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="cp-row-expansion">
+                        <td colSpan={7}>
+                          <div className="cp-expansion-inner">
+                            <div className="cp-expansion-head">
+                              <span className="cp-section-label">
+                                <span className="cp-dia">◆</span>attested models on {p.name}
+                              </span>
+                              <span className="cp-section-meta">{attested.length} active</span>
+                            </div>
+                            {attested.length === 0 ? (
+                              <Empty
+                                title="No attested models yet"
+                                body={`Attest a ${p.name} model below to make it available through the gateway.`}
+                              />
+                            ) : (
+                              <table className="cp-table cp-table-inner">
+                                <thead>
+                                  <tr>
+                                    <th>Model</th>
+                                    <th style={{ width: 160 }}>Context</th>
+                                    <th style={{ width: 160 }}>First seen</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {attested.map((m, i) => (
+                                    <tr key={i}>
+                                      <td className="cp-mono">{m.id}</td>
+                                      <td className="cp-mono">{m.context != null ? m.context.toLocaleString() + ' tok' : '—'}</td>
+                                      <td className="cp-mono cp-dim">{m.seen_at ? timeAgo(m.seen_at) : '—'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         )}
