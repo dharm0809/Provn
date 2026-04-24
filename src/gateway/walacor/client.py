@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from gateway.core.models.execution import ExecutionRecord
+from gateway.util.errors import classify_exception
 from gateway.util.time import iso8601_utc as _iso8601
 
 logger = logging.getLogger(__name__)
@@ -311,7 +312,7 @@ class WalacorClient:
             self._record_delivery("write_execution", ok=True, detail=None)
             logger.debug("Walacor write_execution execution_id=%s", eid)
         except Exception as e:
-            self._record_delivery("write_execution", ok=False, detail=str(e))
+            self._record_delivery("write_execution", ok=False, detail=classify_exception(e))
             logger.error(
                 "Walacor write_execution failed execution_id=%s: %s",
                 eid, e,
@@ -362,7 +363,7 @@ class WalacorClient:
                 request_id, disposition,
             )
         except Exception as e:
-            self._record_delivery("write_attempt", ok=False, detail=str(e))
+            self._record_delivery("write_attempt", ok=False, detail=classify_exception(e))
             logger.warning(
                 "Walacor write_attempt failed request_id=%s: %s",
                 request_id, e,

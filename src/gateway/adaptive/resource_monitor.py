@@ -32,7 +32,7 @@ class DefaultResourceMonitor(ResourceMonitor):
         self._min_samples = min_samples
         self._provider_results: dict[str, deque] = defaultdict(
             lambda: deque(maxlen=100))
-        self._last_error: dict[str, str] = {}
+        self._last_error: dict[str, tuple[float, str]] = {}
         self._active_requests = 0
 
     async def check(self) -> ResourceStatus:
@@ -59,7 +59,7 @@ class DefaultResourceMonitor(ResourceMonitor):
         """
         self._provider_results[provider].append((time.time(), success))
         if not success and error is not None:
-            self._last_error[provider] = error
+            self._last_error[provider] = (time.time(), error)
 
     def snapshot(self) -> dict:
         """Return a per-provider health snapshot for /v1/connections."""
@@ -72,10 +72,11 @@ class DefaultResourceMonitor(ResourceMonitor):
                 if cooldown_seconds is not None
                 else None
             )
+            last_err_entry = self._last_error.get(name)
             providers[name] = {
                 "error_rate_60s": rates.get(name, 0.0),
                 "cooldown_until": cooldown_until,
-                "last_error": self._last_error.get(name),
+                "last_error": last_err_entry[1] if last_err_entry else None,
             }
         return {"providers": providers}
 

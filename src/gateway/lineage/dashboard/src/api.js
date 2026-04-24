@@ -12,7 +12,9 @@ async function fetchJSON(url) {
   const resp = await fetch(url, key ? { headers: { 'X-API-Key': key } } : {});
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
-    throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+    const err = new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+    err.status = resp.status;
+    throw err;
   }
   return resp.json();
 }

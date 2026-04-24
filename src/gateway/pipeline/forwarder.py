@@ -17,6 +17,7 @@ from gateway.config import get_settings
 from gateway.content.stream_safety import check_stream_pii, check_stream_safety
 from gateway.pipeline.context import get_pipeline_context
 from gateway.metrics.prometheus import forward_duration
+from gateway.util.errors import classify_exception
 from gateway.util.time import iso8601_utc
 
 logger = logging.getLogger(__name__)
@@ -267,9 +268,8 @@ def _record_transport_failure(provider: str, exc: BaseException) -> None:
         rm = getattr(ctx, "resource_monitor", None)
         if rm is None:
             return
-        detail = str(exc) or "transport failure"
         rm.record_provider_result(
-            provider, success=False, error=f"{type(exc).__name__}: {detail}",
+            provider, success=False, error=classify_exception(exc),
         )
     except Exception:
         logger.debug("resource_monitor.record_provider_result failed", exc_info=True)
@@ -500,7 +500,7 @@ async def stream_with_tee(
             _exc = e
             record_stream_interruption(
                 provider=adapter.get_provider_name(),
-                detail=str(e) or type(e).__name__,
+                detail=classify_exception(e),
             )
             logger.warning(
                 "Upstream stream interrupted: provider=%s error=%s",
@@ -528,7 +528,7 @@ async def stream_with_tee(
                     if _exc is not None:
                         record_stream_interruption(
                             provider=adapter.get_provider_name(),
-                            detail=str(bg_exc) or type(bg_exc).__name__,
+                            detail=classify_exception(bg_exc),
                         )
                     logger.error(
                         "Stream background task failed: provider=%s",

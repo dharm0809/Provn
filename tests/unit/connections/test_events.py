@@ -7,7 +7,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from gateway.connections.builder import build_events
+
+
+anyio_backend = pytest.fixture(params=["asyncio"])(lambda request: request.param)
 
 
 @dataclass
@@ -26,12 +31,14 @@ def _clear_module_deques():
     _stream_interruption_log.clear()
 
 
-def test_events_empty_when_no_deques():
+@pytest.mark.anyio
+async def test_events_empty_when_no_deques(anyio_backend):
     _clear_module_deques()
-    assert build_events(FakeCtx()) == []
+    assert await build_events(FakeCtx()) == []
 
 
-def test_events_sorted_newest_first():
+@pytest.mark.anyio
+async def test_events_sorted_newest_first(anyio_backend):
     _clear_module_deques()
     from gateway.pipeline.tool_executor import _tool_exception_log
     from gateway.pipeline.forwarder import _stream_interruption_log
@@ -39,25 +46,27 @@ def test_events_sorted_newest_first():
     _tool_exception_log.append((now - 30, "web_search", "timeout"))
     _stream_interruption_log.append((now - 5, "ollama", "closed"))
     _tool_exception_log.append((now - 1, "mcp_x", "oops"))
-    events = build_events(FakeCtx())
+    events = await build_events(FakeCtx())
     tss = [e["ts"] for e in events]
     assert tss == sorted(tss, reverse=True)
     assert events[0]["subsystem"] in ("tool_loop", "streaming")
     _clear_module_deques()
 
 
-def test_events_capped_at_50():
+@pytest.mark.anyio
+async def test_events_capped_at_50(anyio_backend):
     _clear_module_deques()
     from gateway.pipeline.tool_executor import _tool_exception_log
     now = time.time()
     for i in range(60):
         _tool_exception_log.append((now - i, f"t{i}", "e"))
-    events = build_events(FakeCtx())
+    events = await build_events(FakeCtx())
     assert len(events) <= 50
     _clear_module_deques()
 
 
-def test_events_subsystem_tags_correct():
+@pytest.mark.anyio
+async def test_events_subsystem_tags_correct(anyio_backend):
     _clear_module_deques()
 
     class _WC:
@@ -65,7 +74,7 @@ def test_events_subsystem_tags_correct():
             self._delivery_log = deque()
             self._delivery_log.append((time.time(), "write", False, "boom"))
 
-    events = build_events(FakeCtx(walacor_client=_WC()))
+    events = await build_events(FakeCtx(walacor_client=_WC()))
     assert any(e["subsystem"] == "walacor_delivery" for e in events)
     for e in events:
         assert e["session_id"] is None

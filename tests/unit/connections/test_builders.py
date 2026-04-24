@@ -333,18 +333,21 @@ class _Worker:
         }
 
 
-def test_intelligence_worker_empty_disabled():
-    tile = B.build_intelligence_worker_tile(FakeCtx())
+@pytest.mark.anyio
+async def test_intelligence_worker_empty_disabled(anyio_backend):
+    tile = await B.build_intelligence_worker_tile(FakeCtx())
     assert tile["status"] == "unknown"
 
 
-def test_intelligence_worker_red_when_not_running():
-    tile = B.build_intelligence_worker_tile(FakeCtx(intelligence_worker=_Worker(running=False)))
+@pytest.mark.anyio
+async def test_intelligence_worker_red_when_not_running(anyio_backend):
+    tile = await B.build_intelligence_worker_tile(FakeCtx(intelligence_worker=_Worker(running=False)))
     assert tile["status"] == "red"
 
 
-def test_intelligence_worker_amber_on_queue_backup():
-    tile = B.build_intelligence_worker_tile(FakeCtx(intelligence_worker=_Worker(queue_depth=150)))
+@pytest.mark.anyio
+async def test_intelligence_worker_amber_on_queue_backup(anyio_backend):
+    tile = await B.build_intelligence_worker_tile(FakeCtx(intelligence_worker=_Worker(queue_depth=150)))
     assert tile["status"] == "amber"
 
 

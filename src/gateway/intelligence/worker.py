@@ -25,6 +25,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
+from gateway.util.errors import classify_exception
+
 logger = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -220,7 +222,7 @@ class IntelligenceWorker:
                     await self._results_callback(result)
             except Exception as e:
                 self._errors += 1
-                self._record_error(f"{type(e).__name__}: {e}")
+                self._record_error(classify_exception(e))
                 logger.warning("Intelligence worker error: %s", e, exc_info=True)
 
         logger.info("Intelligence worker stopped (processed=%d, errors=%d)", self._processed, self._errors)
