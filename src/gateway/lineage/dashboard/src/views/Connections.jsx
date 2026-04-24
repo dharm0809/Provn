@@ -755,6 +755,72 @@ const V4_RUNBOOK = {
     ],
     escalation: 'If multi-provider outage: freeze new sessions, post advisory in #customer-ops.',
   },
+  analyzers: {
+    oneliner: 'Analyzers fail-open by design — a silent outage means PII/toxicity/Llama Guard verdicts stop landing on records while traffic keeps flowing.',
+    checks: [
+      { label: 'Confirm Llama Guard model is pulled on the provider',  cmd: 'ollama list | grep llama-guard' },
+      { label: 'Probe the analyzer directly against a known-bad prompt', cmd: 'gw cli analyzers probe --name llama_guard' },
+      { label: 'Tail gateway log for fail-open warnings',                cmd: "grep -i 'fail.open\\|analyzer timeout' /tmp/gateway_dharm.log | tail -50" },
+      { label: 'Inspect per-analyzer fail-open counters',               cmd: 'curl -s localhost:8100/health | jq .analyzers' },
+    ],
+    escalation: 'If fail-opens >5/min sustained for 10 min, page #ml-safety — compliance records are being written without safety verdicts.',
+  },
+  tool_loop: {
+    oneliner: 'Unhandled exceptions in the tool executor get swallowed and fall back to the raw model reply — users see answers that look fine but never ran the tool.',
+    checks: [
+      { label: 'Grep the last tool-loop exception trace',         cmd: "grep -A 20 '_run_active_tool_loop' /tmp/gateway_dharm.log | tail -40" },
+      { label: 'Inspect a recent execution for tool_events',      cmd: 'gw cli executions tail --with-tools' },
+      { label: 'Verify MCP/builtin tool registry is populated',   cmd: 'curl -s localhost:8100/health | jq .tools' },
+    ],
+    escalation: 'If failure_rate_60s crosses 10% for a single tool, disable it via control plane and open an incident in #gateway-tools.',
+  },
+  model_capabilities: {
+    oneliner: 'When the gateway auto-disables tools on a model, every subsequent request to that model loses web-search/function-calling silently.',
+    checks: [
+      { label: 'Dump the in-memory capability cache',              cmd: 'curl -s localhost:8100/health | jq .model_capabilities' },
+      { label: 'Retry a tool request against the flagged model',   cmd: 'gw cli models probe --id <model_id> --tools' },
+      { label: 'Review the last tool-unsupported error',           cmd: "grep 'tool_unsupported\\|supports_tools=False' /tmp/gateway_dharm.log | tail -20" },
+    ],
+    escalation: 'If a flagship model auto-disables, force-restart gateway to clear the cache, then page #model-ops if it re-disables within 5 min.',
+  },
+  control_plane: {
+    oneliner: 'Control-plane drift means attestations, policies, or budgets running in-memory no longer match the SQLite store — governance decisions drift from ground truth.',
+    checks: [
+      { label: 'Confirm control.db is readable',                   cmd: 'sqlite3 /tmp/walacor-wal-dharm/control.db ".tables"' },
+      { label: 'Hit the control status endpoint',                  cmd: 'curl -s -H "X-API-Key: $CP_KEY" localhost:8100/v1/control/status | jq' },
+      { label: 'Check policy-cache age (stale => fail-closed soon)', cmd: 'curl -s localhost:8100/v1/readiness | jq ".checks[] | select(.id==\"INT-04\")"' },
+      { label: 'Verify local sync task is alive',                  cmd: "grep '_run_local_sync_loop' /tmp/gateway_dharm.log | tail -10" },
+    ],
+    escalation: 'If sync_task_alive=false or cache age >10× interval, restart the gateway; if drift persists, escalate to #gateway-control.',
+  },
+  readiness: {
+    oneliner: 'The 31-check readiness rollup is the single source of truth for whether this gateway should take traffic — red security/integrity checks mean keep-out.',
+    checks: [
+      { label: 'Fetch the full readiness report',                  cmd: 'curl -s localhost:8100/v1/readiness | jq' },
+      { label: 'List only red/amber checks',                       cmd: 'curl -s localhost:8100/v1/readiness | jq \'.checks[] | select(.status!="green")\'' },
+      { label: 'Audit recent readiness-drift attempts in WAL',     cmd: "sqlite3 /tmp/walacor-wal-dharm/gateway.db \"select timestamp, reason from gateway_attempts where disposition='readiness_degraded' order by timestamp desc limit 20\"" },
+    ],
+    escalation: 'Any SEC-* or INT-* red → pull this node out of the LB immediately; page #gateway-oncall with the check id in the subject.',
+  },
+  streaming: {
+    oneliner: 'Stream interruptions mean SSE responses are being cut mid-flight — users see truncated completions and audit records miss the final chunk.',
+    checks: [
+      { label: 'Count recent stream interruptions',                cmd: "grep 'stream interrupted\\|record_stream_interruption' /tmp/gateway_dharm.log | tail -30" },
+      { label: 'Inspect interruption metric from /health',         cmd: 'curl -s localhost:8100/health | jq .streaming' },
+      { label: 'Test a live SSE round-trip',                       cmd: 'curl -N -H "Content-Type: application/json" -d \'{"model":"qwen3:4b","stream":true,"messages":[{"role":"user","content":"hi"}]}\' localhost:8100/v1/chat/completions' },
+    ],
+    escalation: 'If interruption_rate_60s >5% persistent, check provider health first (ollama/openai/anthropic), then network; escalate to #platform-net if upstream is clean.',
+  },
+  intelligence_worker: {
+    oneliner: 'The ONNX self-learning worker trains off the verdict log asynchronously — if it stalls, adaptive classifiers drift stale but inference keeps serving (fail-open by design).',
+    checks: [
+      { label: 'Check worker heartbeat and queue depth',           cmd: 'curl -s localhost:8100/health | jq .intelligence_worker' },
+      { label: 'Inspect verdict-log row count',                    cmd: 'sqlite3 /tmp/walacor-wal-dharm/gateway.db "select count(*) from verdict_log"' },
+      { label: 'Tail the last training run',                       cmd: "grep -i 'intelligence\\|training run' /tmp/gateway_dharm.log | tail -20" },
+      { label: 'Confirm Ollama is reachable for the training model', cmd: 'curl -s $OLLAMA_URL/api/tags | jq \'.models[].name\'' },
+    ],
+    escalation: 'If queue_depth keeps climbing or oldest_job_age_s >1h, restart the worker; page #ml-platform only if a second restart does not drain it.',
+  },
 };
 
 function V4Stat({ n, label, tone }) {
