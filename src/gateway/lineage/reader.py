@@ -594,11 +594,44 @@ class LineageReader:
         )
         models_used = [r["model_id"] for r in cur2.fetchall()]
 
+        # Content-analysis coverage: percent of window executions whose
+        # JSON payload actually carries analyzer output. The local WAL
+        # stores the full record body in `record_json`; we probe two
+        # shapes — top-level `content_analysis` or
+        # `metadata.analyzer_decisions` — that the orchestrator writes.
+        cur3 = conn.execute(
+            """
+            SELECT record_json FROM wal_records
+             WHERE timestamp >= ? AND timestamp < ?
+               AND event_type = 'execution'
+            """,
+            (start, end),
+        )
+        total_exec = 0
+        analyzed = 0
+        import json as _json
+        for r in cur3.fetchall():
+            total_exec += 1
+            try:
+                rec = _json.loads(r["record_json"] or "{}")
+            except Exception:
+                continue
+            if rec.get("content_analysis"):
+                analyzed += 1
+                continue
+            meta = rec.get("metadata") or {}
+            if isinstance(meta, dict) and (meta.get("analyzer_decisions") or meta.get("content_analysis")):
+                analyzed += 1
+        coverage_pct = round(analyzed / total_exec * 100, 1) if total_exec else 0.0
+
         return {
             "total_requests": total,
             "allowed": allowed,
             "denied": denied,
             "models_used": models_used,
+            "total_executions": total_exec,
+            "content_analysis_covered": analyzed,
+            "content_analysis_coverage_pct": coverage_pct,
         }
 
     def get_execution_export(self, start: str, end: str, limit: int = 10000) -> list[dict]:

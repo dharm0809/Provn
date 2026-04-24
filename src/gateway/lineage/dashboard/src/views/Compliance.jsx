@@ -36,12 +36,68 @@ const FRAMEWORKS = [
 
 // Last 30 days of inclusive coverage. Keeping the window here so all four
 // framework cards + the chain-integrity panel agree on the same slice.
-function defaultWindow() {
+function windowForPreset(preset) {
   const end = new Date();
   const start = new Date(end);
-  start.setDate(start.getDate() - 30);
+  if (preset === 'today') start.setDate(start.getDate() - 0);
+  else if (preset === '7d') start.setDate(start.getDate() - 7);
+  else if (preset === '30d') start.setDate(start.getDate() - 30);
+  else if (preset === '90d') start.setDate(start.getDate() - 90);
+  else if (preset === '365d') start.setDate(start.getDate() - 365);
+  else start.setDate(start.getDate() - 30);
   const iso = (d) => d.toISOString().slice(0, 10);
   return { start: iso(start), end: iso(end) };
+}
+
+const PRESETS = [
+  { id: 'today', label: 'Today' },
+  { id: '7d',    label: '7d' },
+  { id: '30d',   label: '30d' },
+  { id: '90d',   label: '90d' },
+  { id: '365d',  label: '1y' },
+  { id: 'custom', label: 'Custom' },
+];
+
+function RangePicker({ preset, start, end, onPreset, onCustom }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      padding: '10px 14px', margin: '14px 0',
+      background: 'var(--surface-sunken, rgba(0,0,0,0.2))',
+      borderRadius: 4,
+      fontFamily: 'var(--mono)', fontSize: 11,
+    }}>
+      <span style={{ color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Window</span>
+      <div style={{ display: 'inline-flex', gap: 4 }}>
+        {PRESETS.map(p => (
+          <button
+            key={p.id}
+            className={`dl-btn${preset === p.id ? ' is-active' : ''}`}
+            style={preset === p.id ? { borderColor: 'var(--gold, #b8860b)', color: 'var(--gold, #b8860b)' } : undefined}
+            onClick={() => onPreset(p.id)}
+          >{p.label}</button>
+        ))}
+      </div>
+      {preset === 'custom' && (
+        <>
+          <input
+            type="date" value={start} max={end}
+            onChange={(e) => onCustom({ start: e.target.value, end })}
+            style={{ fontFamily: 'var(--mono)', fontSize: 11, padding: '4px 6px', background: 'transparent', color: 'inherit', border: '1px solid var(--border-soft, rgba(255,255,255,0.12))', borderRadius: 3 }}
+          />
+          <span style={{ color: 'var(--text-muted)' }}>→</span>
+          <input
+            type="date" value={end} min={start}
+            onChange={(e) => onCustom({ start, end: e.target.value })}
+            style={{ fontFamily: 'var(--mono)', fontSize: 11, padding: '4px 6px', background: 'transparent', color: 'inherit', border: '1px solid var(--border-soft, rgba(255,255,255,0.12))', borderRadius: 3 }}
+          />
+        </>
+      )}
+      <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
+        {start} → {end}
+      </span>
+    </div>
+  );
 }
 
 function gradeColor(grade) {
@@ -173,10 +229,23 @@ function PreviewDrawer({ framework, report, onClose }) {
 }
 
 export default function Compliance() {
-  const [{ start, end }] = useState(defaultWindow());
+  const [preset, setPreset] = useState('30d');
+  const [range, setRange] = useState(() => windowForPreset('30d'));
+  const { start, end } = range;
   const [reports, setReports] = useState({});   // { framework_id: report | { error } }
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState(null); // { framework, report }
+
+  // Preset change recomputes window from "now"; custom leaves the window
+  // untouched for the user to edit via date inputs.
+  function choosePreset(id) {
+    setPreset(id);
+    if (id !== 'custom') setRange(windowForPreset(id));
+  }
+  function setCustomRange(next) {
+    setPreset('custom');
+    setRange(next);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -210,7 +279,15 @@ export default function Compliance() {
         <path d="M8 12l3 3 5-6"/>
       </svg>}
       title="Compliance"
-      subtitle={`Audit-ready reports mapped to EU AI Act, NIST AI RMF, SOC 2, and ISO 42001. Every control maps back to chain evidence. Window: ${start} → ${end}.`}>
+      subtitle="Audit-ready reports mapped to EU AI Act, NIST AI RMF, SOC 2, and ISO 42001. Each card's readiness score is computed from the same underlying signals (record completeness, cryptographic chain integrity, analyzer coverage, model governance, user identity, persistence, enforcement) — per-framework details diverge in the control mapping, not the score.">
+
+      <RangePicker
+        preset={preset}
+        start={start}
+        end={end}
+        onPreset={choosePreset}
+        onCustom={setCustomRange}
+      />
 
       <div className="compliance-grid">
         {FRAMEWORKS.map(f => {
