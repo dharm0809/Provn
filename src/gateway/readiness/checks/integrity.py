@@ -65,9 +65,16 @@ class _Int02SigningActive:
 
         try:
             conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
+            # Exclude internal execution records that legitimately skip the
+            # signing path (startup self-test, intelligence verdict writes).
             rows = conn.execute(
-                "SELECT record_json FROM wal_records WHERE event_type='execution' "
-                "ORDER BY rowid DESC LIMIT 50"
+                """
+                SELECT record_json FROM wal_records
+                 WHERE event_type='execution'
+                   AND execution_id NOT LIKE 'self-test-%'
+                   AND (request_type IS NULL OR request_type NOT IN ('system_task', 'intelligence_verdict'))
+                 ORDER BY rowid DESC LIMIT 50
+                """
             ).fetchall()
             conn.close()
         except Exception as exc:
@@ -96,7 +103,7 @@ class _Int02SigningActive:
             status=status,
             detail=f"{signed}/{sampled} recent records signed ({pct:.0%})",
             remediation=None if status == "green" else "Ed25519 key loaded but records lack record_signature — check orchestrator._apply_session_chain",
-            evidence={"sampled": sampled, "signed": signed, "window": "last 50 execution records"},
+            evidence={"sampled": sampled, "signed": signed, "window": "last 50 user-request execution records"},
             elapsed_ms=elapsed_ms(),
         )
 
@@ -179,7 +186,13 @@ class _Int04WalacorAnchoringActive:
     id = "INT-04"
     name = "Walacor anchoring active"
     category = Category.integrity
-    severity = Severity.int
+    # Anchoring happens on the Walacor backend — the gateway cannot speed it
+    # up or force it. A missing BlockId/TransId/DH is reportable (we still
+    # want the dashboard to show it) but not a reason to remove the gateway
+    # from the load balancer: signing + WAL + chain continuity still hold
+    # locally. Downgrade to warn so the check surfaces without forcing the
+    # rollup to "unready".
+    severity = Severity.warn
 
     async def run(self, ctx: "PipelineContext") -> CheckResult:
         t0 = time.monotonic()
