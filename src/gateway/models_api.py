@@ -34,6 +34,8 @@ async def _build_models_list(ctx) -> list[dict]:
     """Build the OpenAI-format model list from attestations or discovery."""
     now = int(time.time())
 
+    settings = get_settings()
+
     # ── Path 1: attested models from embedded control plane ───────────────────
     if ctx.control_store:
         attestations = ctx.control_store.list_attestations()
@@ -48,6 +50,13 @@ async def _build_models_list(ctx) -> list[dict]:
                 }
                 for a in active
             ]
+        # Strict mode: control store is the source of truth — never fall back to raw discovery.
+        if getattr(settings, "strict_model_allowlist", False):
+            logger.info(
+                "/v1/models: strict allowlist active and no models attested — "
+                "returning empty list (admin should attest via Control → Discover Models)"
+            )
+            return []
         # Fall through: control store exists but no attested models yet (fresh deployment)
         logger.info("/v1/models: control store has no active attestations — falling back to discovery")
 
@@ -57,7 +66,6 @@ async def _build_models_list(ctx) -> list[dict]:
         return []
 
     try:
-        settings = get_settings()
         discovered = await discover_provider_models(settings, ctx.http_client)
         logger.info("/v1/models: discovered %d model(s) from providers", len(discovered))
         return [

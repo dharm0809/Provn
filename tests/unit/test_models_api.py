@@ -50,9 +50,10 @@ async def test_models_endpoint_no_control_store_uses_discovery():
 
     with patch("gateway.models_api.get_pipeline_context") as mock_ctx, \
          patch("gateway.models_api.discover_provider_models") as mock_discover, \
-         patch("gateway.models_api.get_settings"):
+         patch("gateway.models_api.get_settings") as mock_settings:
 
         mock_ctx.return_value.control_store = None
+        mock_settings.return_value.strict_model_allowlist = False
         mock_ctx.return_value.http_client = MagicMock()
         mock_discover.return_value = []  # no providers configured — empty is valid
 
@@ -106,9 +107,10 @@ async def test_models_falls_back_to_discovery_when_no_control_store():
 
     with patch("gateway.models_api.get_pipeline_context") as mock_ctx, \
          patch("gateway.models_api.discover_provider_models") as mock_discover, \
-         patch("gateway.models_api.get_settings"):
+         patch("gateway.models_api.get_settings") as mock_settings:
 
         mock_ctx.return_value.control_store = None
+        mock_settings.return_value.strict_model_allowlist = False
         mock_ctx.return_value.http_client = mock_http
         mock_discover.return_value = [
             {"model_id": "qwen3:4b", "provider": "ollama"},
@@ -141,9 +143,10 @@ async def test_models_falls_back_to_discovery_when_store_has_no_active():
 
     with patch("gateway.models_api.get_pipeline_context") as mock_ctx, \
          patch("gateway.models_api.discover_provider_models") as mock_discover, \
-         patch("gateway.models_api.get_settings"):
+         patch("gateway.models_api.get_settings") as mock_settings:
 
         mock_ctx.return_value.control_store = mock_store
+        mock_settings.return_value.strict_model_allowlist = False
         mock_ctx.return_value.http_client = MagicMock()
         mock_discover.return_value = [
             {"model_id": "llama3.2:3b", "provider": "ollama"},
@@ -161,6 +164,36 @@ async def test_models_falls_back_to_discovery_when_store_has_no_active():
 
 
 @pytest.mark.anyio
+async def test_models_strict_allowlist_returns_empty_when_no_attestations():
+    """Strict mode: empty attestations → empty list (NO fallback to discovery)."""
+    from gateway.models_api import list_models, _invalidate_models_cache
+    from starlette.requests import Request
+
+    _invalidate_models_cache()
+
+    mock_store = MagicMock()
+    mock_store.list_attestations.return_value = []  # empty
+
+    with patch("gateway.models_api.get_pipeline_context") as mock_ctx, \
+         patch("gateway.models_api.discover_provider_models") as mock_discover, \
+         patch("gateway.models_api.get_settings") as mock_settings:
+
+        mock_ctx.return_value.control_store = mock_store
+        mock_ctx.return_value.http_client = MagicMock()
+        mock_settings.return_value.strict_model_allowlist = True
+        mock_discover.return_value = [{"model_id": "x", "provider": "ollama"}]
+
+        scope = {"type": "http", "method": "GET", "path": "/v1/models",
+                 "query_string": b"", "headers": []}
+        response = await list_models(Request(scope))
+
+    import json
+    body = json.loads(response.body)
+    assert body["data"] == []
+    mock_discover.assert_not_called()
+
+
+@pytest.mark.anyio
 async def test_models_cache_serves_without_rediscovery():
     """Second call within TTL returns cached result without calling discovery again."""
     from gateway.models_api import list_models, _invalidate_models_cache
@@ -170,9 +203,10 @@ async def test_models_cache_serves_without_rediscovery():
 
     with patch("gateway.models_api.get_pipeline_context") as mock_ctx, \
          patch("gateway.models_api.discover_provider_models") as mock_discover, \
-         patch("gateway.models_api.get_settings"):
+         patch("gateway.models_api.get_settings") as mock_settings:
 
         mock_ctx.return_value.control_store = None
+        mock_settings.return_value.strict_model_allowlist = False
         mock_ctx.return_value.http_client = MagicMock()
         mock_discover.return_value = [{"model_id": "qwen3:4b", "provider": "ollama"}]
 

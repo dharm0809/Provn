@@ -853,6 +853,12 @@ async def _auto_register_models(settings, ctx) -> None:
     """Auto-discover provider models and register any new ones in the control store."""
     if ctx.control_store is None or ctx.http_client is None:
         return
+    if settings.strict_model_allowlist:
+        logger.info(
+            "Strict model allowlist: skipping startup auto-registration "
+            "(attest models explicitly via Control → Discover Models)"
+        )
+        return
     try:
         from gateway.control.discovery import discover_provider_models
 
