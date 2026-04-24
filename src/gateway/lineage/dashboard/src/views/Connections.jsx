@@ -705,7 +705,7 @@ const V4_RUNBOOK = {
     escalation: 'If sync_task_alive=false or cache age >10× interval, restart the gateway; if drift persists, escalate to #gateway-control.',
   },
   readiness: {
-    oneliner: 'The 31-check readiness rollup is the single source of truth for whether this gateway should take traffic — red security/integrity checks mean keep-out.',
+    oneliner: 'The readiness rollup is the single source of truth for whether this gateway should take traffic — red security or integrity checks mean keep-out.',
     checks: [
       { label: 'Fetch the full readiness report',                 cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/readiness" | jq' },
       { label: 'List only red/amber checks',                      cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/readiness" | jq \'.checks[] | select(.status!="green")\'' },

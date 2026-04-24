@@ -750,3 +750,28 @@
 /* ---------- small utility ---------- */
 
 .cp-cell-stack { display: flex; flex-direction: column; gap: 2px; }
+
+/* ---------- providers row expansion (attested models drawer) ---------- */
+
+.cp-row-expansion > td {
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.02));
+  border-top: 1px dashed var(--border-soft, rgba(0, 0, 0, 0.08));
+  padding: 0;
+}
+.cp-expansion-inner {
+  padding: 14px 18px 18px;
+}
+.cp-expansion-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.cp-table-inner {
+  margin-top: 4px;
+}
+.cp-table-inner th,
+.cp-table-inner td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
