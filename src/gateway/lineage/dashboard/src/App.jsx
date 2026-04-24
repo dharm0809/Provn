@@ -11,12 +11,14 @@ const Attempts = lazy(() => import('./views/Attempts'));
 const Control = lazy(() => import('./views/Control'));
 const Compliance = lazy(() => import('./views/Compliance'));
 const Playground = lazy(() => import('./views/Playground'));
+const Connections = lazy(() => import('./views/Connections'));
 
 const NAV_ITEMS = [
   { key: 'overview', label: 'Overview' },
   { key: 'intelligence', label: 'Governance' },
   { key: 'sessions', label: 'Sessions' },
   { key: 'attempts', label: 'Attempts' },
+  { key: 'connections', label: 'Connections' },
   { key: 'control', label: 'Control' },
   { key: 'compliance', label: 'Compliance' },
   { key: 'playground', label: 'Playground' },
@@ -27,6 +29,7 @@ const VIEW_LABELS = {
   intelligence: 'Governance',
   sessions: 'Sessions',
   attempts: 'Attempts',
+  connections: 'Connections',
   control: 'Control',
   compliance: 'Compliance',
   playground: 'Playground',
@@ -78,6 +81,15 @@ const navIcons = {
       <path d="M2 5l5 4-5 4M9 14h7" />
     </svg>
   ),
+  connections: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="4" cy="4" r="2" />
+      <circle cx="14" cy="4" r="2" />
+      <circle cx="4" cy="14" r="2" />
+      <circle cx="14" cy="14" r="2" />
+      <path d="M4 6v6M14 6v6M6 4h6M6 14h6" />
+    </svg>
+  ),
 };
 
 function readViewFromUrl() {
@@ -113,6 +125,7 @@ function readViewFromUrl() {
   if (v === 'control') return { name: 'control', params: {} };
   if (v === 'compliance') return { name: 'compliance', params: {} };
   if (v === 'playground') return { name: 'playground', params: {} };
+  if (v === 'connections') return { name: 'connections', params: {} };
   return { name: 'overview', params: {} };
 }
 
@@ -210,6 +223,12 @@ export default function App() {
       window.history.replaceState({}, '', `${path}?${sp.toString()}`);
       return;
     }
+    if (name === 'connections') {
+      const sp = new URLSearchParams();
+      sp.set('view', 'connections');
+      window.history.replaceState({}, '', `${path}?${sp.toString()}`);
+      return;
+    }
     if (name === 'overview' || name === 'timeline' || name === 'execution') {
       window.history.replaceState({}, '', path);
     }
@@ -304,6 +323,12 @@ export default function App() {
         return (
           <Suspense fallback={viewFallback}>
             <Playground />
+          </Suspense>
+        );
+      case 'connections':
+        return (
+          <Suspense fallback={viewFallback}>
+            <Connections navigate={navigate} />
           </Suspense>
         );
       default:

@@ -171,6 +171,10 @@ export async function verifySession(sessionId) {
   return fetchJSON(`${API}/verify/${sessionId}`);
 }
 
+export async function getConnections() {
+  return fetchJSON(`/v1/connections`);
+}
+
 // ─── Control Plane API ──────────────────────────────────────────
 
 function getControlKey() {
