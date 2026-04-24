@@ -21,6 +21,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _has_content_analysis(raw: dict) -> bool:
+    """True when a raw execution record carries content-analysis output.
+
+    Analyzer verdicts may live at the top level (``content_analysis``) or
+    inside ``metadata_json`` (``analyzer_decisions``) depending on write
+    path. Both count as "the analyzer actually ran".
+    """
+    if raw.get("content_analysis"):
+        return True
+    meta = raw.get("metadata_json")
+    if not meta:
+        return False
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, ValueError):
+            return False
+    if isinstance(meta, dict):
+        return bool(meta.get("analyzer_decisions") or meta.get("content_analysis"))
+    return False
+
+
 def _deserialize_record(r: dict) -> dict:
     """Convert Walacor storage format back to gateway record format.
 
@@ -711,11 +733,31 @@ class WalacorLineageReader:
         model_rows = await self._client.query_complex(self._exec_etid, model_pipeline)
         models_used = [r["_id"] for r in model_rows if r.get("_id")]
 
+        # Content-analysis coverage: percent of executions in the window
+        # whose metadata carries a content_analysis block. This measures
+        # whether analyzers actually RAN on traffic, which is what the
+        # compliance score needs — not just whether analyzers were
+        # configured at boot time.
+        ca_pipeline = [
+            {"$match": {"timestamp": {"$gte": start, "$lt": end}}},
+            {"$project": {"metadata_json": 1, "content_analysis": 1}},
+        ]
+        ca_rows = await self._client.query_complex(self._exec_etid, ca_pipeline)
+        total_exec = len(ca_rows)
+        analyzed = 0
+        for r in ca_rows:
+            if _has_content_analysis(r):
+                analyzed += 1
+        coverage_pct = round(analyzed / total_exec * 100, 1) if total_exec else 0.0
+
         return {
             "total_requests": total,
             "allowed": allowed,
             "denied": total - allowed,
             "models_used": models_used,
+            "total_executions": total_exec,
+            "content_analysis_coverage_pct": coverage_pct,
+            "content_analysis_covered": analyzed,
         }
 
     async def get_execution_export(self, start: str, end: str, limit: int = 10000) -> list[dict]:

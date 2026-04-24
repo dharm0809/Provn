@@ -113,30 +113,49 @@ def assess_audit_readiness(
     })
 
     # ── 3. Content Safety (weight: 15) ───────────────────────────────
+    # The compliance-relevant signal is "did an analyzer actually run on
+    # traffic?", NOT "how many analyzers were configured at boot". The
+    # summary exposes analyzer coverage measured over the same window as
+    # the score; we combine it with the configured-count floor so a tenant
+    # with zero traffic still sees a meaningful signal.
+    total_exec = summary.get("total_executions", 0) or summary.get("total_requests", 0)
+    coverage_pct = float(summary.get("content_analysis_coverage_pct", 0.0))
+    covered = summary.get("content_analysis_covered", 0)
+
     d3_score = 0
     d3_evidence = []
-
-    if analyzers_count >= 4:
-        d3_score = 100
-        d3_evidence.append(f"{analyzers_count} content analyzers active (PII, toxicity, safety, DLP)")
-        strengths.append(f"{analyzers_count} content analyzers providing multi-layer safety coverage")
-    elif analyzers_count >= 2:
-        d3_score = 60
-        d3_evidence.append(f"{analyzers_count} content analyzers active")
-        gaps.append({"dimension": "Content Safety", "severity": "info",
-                      "issue": f"Only {analyzers_count} analyzers active — consider enabling more",
-                      "fix": "Enable DLP (dlp_enabled), safety classifier ships built-in"})
-    elif analyzers_count >= 1:
-        d3_score = 30
-        d3_evidence.append(f"{analyzers_count} content analyzer active")
+    if total_exec > 0:
+        # 70 points from actual runtime coverage, 30 from configured breadth.
+        d3_score = int(coverage_pct * 0.7)
+        config_bonus = min(30, analyzers_count * 8)
+        d3_score += config_bonus
+        d3_score = min(d3_score, 100)
+        d3_evidence.append(
+            f"{covered}/{total_exec} executions carry analyzer output ({coverage_pct:.0f}% coverage)"
+        )
+        d3_evidence.append(f"{analyzers_count} analyzer(s) configured")
+        if coverage_pct < 50:
+            gaps.append({"dimension": "Content Safety", "severity": "warning",
+                          "issue": f"Only {coverage_pct:.0f}% of executions have analyzer output",
+                          "fix": "Verify analyzers are not timing out or failing open on request traffic"})
+        elif coverage_pct >= 95 and analyzers_count >= 4:
+            strengths.append("Full analyzer coverage on production traffic (≥95%, multi-layer)")
     else:
-        gaps.append({"dimension": "Content Safety", "severity": "warning",
-                      "issue": "No content analyzers active",
-                      "fix": "Enable pii_detection_enabled and toxicity_detection_enabled"})
+        # Nothing to measure — fall back to configured-breadth only, but
+        # don't mistake absence of traffic for good safety posture.
+        d3_score = min(60, analyzers_count * 15)
+        if analyzers_count > 0:
+            d3_evidence.append(
+                f"{analyzers_count} analyzer(s) configured; no traffic in window to verify coverage"
+            )
+        else:
+            gaps.append({"dimension": "Content Safety", "severity": "warning",
+                          "issue": "No content analyzers configured and no traffic to verify",
+                          "fix": "Enable pii_detection_enabled and toxicity_detection_enabled"})
 
     dimensions.append({
         "name": "Content Safety", "score": d3_score, "weight": 15,
-        "description": "PII detection, toxicity, safety classification, DLP on all requests",
+        "description": "PII / toxicity / safety analyzer coverage on window traffic",
         "evidence": d3_evidence,
     })
 
