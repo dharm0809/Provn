@@ -368,17 +368,30 @@ def build_auth_tile(ctx: Any) -> dict:
     jwks_last_fetch_ts: str | None = None
     jwks_last_error: dict | None = None
 
-    # Bootstrap key stability
-    bootstrap_stable = True
-    try:
-        from gateway.auth.bootstrap_key import bootstrap_key_stable
-        bootstrap_stable = bool(bootstrap_key_stable(settings.wal_path))
-    except Exception:
-        bootstrap_stable = True
+    # The auto-generated bootstrap key only matters when the operator has NOT
+    # configured admin API keys AND the control plane is active — that's the
+    # only case where main.py writes the wgk-*.txt file. When admin keys are
+    # in use, skipping persistence is the correct, stable configuration; the
+    # absent file is not a degradation.
+    admin_keys_configured = bool(getattr(settings, "api_keys_list", None))
+    bootstrap_applicable = bool(
+        getattr(settings, "control_plane_enabled", False)
+    ) and not admin_keys_configured
+
+    bootstrap_stable: bool | None
+    if bootstrap_applicable:
+        try:
+            from gateway.auth.bootstrap_key import bootstrap_key_stable
+            bootstrap_stable = bool(bootstrap_key_stable(settings.wal_path))
+        except Exception:
+            bootstrap_stable = None  # probe failed — don't flag as amber
+    else:
+        bootstrap_stable = None  # not applicable → exclude from status rollup
 
     detail = {
         "auth_mode": auth_mode,
         "jwt_configured": jwt_configured,
+        "admin_api_keys_configured": admin_keys_configured,
         "jwks_last_fetch_ts": jwks_last_fetch_ts,
         "jwks_last_error": jwks_last_error,
         "bootstrap_key_stable": bootstrap_stable,
@@ -395,20 +408,23 @@ def build_auth_tile(ctx: Any) -> dict:
 
     if recent_jwks_err:
         status = "red"
-    elif not bootstrap_stable:
+    elif bootstrap_stable is False:
         status = "amber"
     else:
         status = "green"
+
+    if bootstrap_stable is False:
+        subline = "bootstrap key rotating — persistence failed"
+    elif admin_keys_configured:
+        subline = "JWT + API-key" if jwt_configured else "API-key"
+    else:
+        subline = "JWT configured" if jwt_configured else "bootstrap key only"
 
     return _tile(
         "auth",
         status=status,
         headline=f"auth: {auth_mode}",
-        subline=(
-            "bootstrap key rotating — persistence failed"
-            if not bootstrap_stable
-            else ("JWT configured" if jwt_configured else "API-key only")
-        ),
+        subline=subline,
         detail=detail,
     )
 

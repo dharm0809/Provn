@@ -239,7 +239,21 @@ def test_control_plane_red_on_dead_sync_task():
 # ── auth ──────────────────────────────────────────────────────────────
 
 
+def _fake_settings(monkeypatch, *, api_keys=None, control_plane=True):
+    """Install a dummy Settings object for the auth-tile test matrix."""
+    class _S:
+        api_keys_list = list(api_keys or [])
+        control_plane_enabled = control_plane
+        wal_path = "/tmp/wal-tests"
+        auth_mode = "api_key"
+        jwt_secret = ""
+        jwt_jwks_url = ""
+    monkeypatch.setattr("gateway.config.get_settings", lambda: _S())
+
+
 def test_auth_empty_green(monkeypatch):
+    """No admin keys + persisted bootstrap key → green."""
+    _fake_settings(monkeypatch)
     monkeypatch.setattr(
         "gateway.auth.bootstrap_key.bootstrap_key_stable", lambda _p: True
     )
@@ -248,11 +262,28 @@ def test_auth_empty_green(monkeypatch):
 
 
 def test_auth_amber_on_unstable_bootstrap(monkeypatch):
+    """No admin keys + bootstrap persistence broken → amber with clear subline."""
+    _fake_settings(monkeypatch)
     monkeypatch.setattr(
         "gateway.auth.bootstrap_key.bootstrap_key_stable", lambda _p: False
     )
     tile = B.build_auth_tile(FakeCtx())
     assert tile["status"] == "amber"
+    assert "persistence failed" in tile["subline"]
+
+
+def test_auth_green_when_admin_keys_configured(monkeypatch):
+    """Admin keys configured → bootstrap key is not applicable → green.
+
+    Previously this tile went amber forever on any deployment that set
+    WALACOR_GATEWAY_API_KEYS because the bootstrap-key file is intentionally
+    never written in that mode.
+    """
+    _fake_settings(monkeypatch, api_keys=["dharm-key-2026"])
+    tile = B.build_auth_tile(FakeCtx())
+    assert tile["status"] == "green"
+    assert tile["detail"]["bootstrap_key_stable"] is None
+    assert tile["detail"]["admin_api_keys_configured"] is True
 
 
 # ── readiness ─────────────────────────────────────────────────────────
