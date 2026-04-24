@@ -84,17 +84,33 @@ class _Hyg03OpenWebUISecretPersistence:
         t0 = time.monotonic()
         elapsed_ms = lambda: int((time.monotonic() - t0) * 1000)
 
-        found = [p for p in _OPENWEBUI_VOLUME_PATHS if Path(p).exists()]
+        found: list[str] = []
+        unreadable = False
+        for p in _OPENWEBUI_VOLUME_PATHS:
+            try:
+                if Path(p).exists():
+                    found.append(p)
+            except PermissionError:
+                # Docker volumes are typically root-owned; a non-root gateway
+                # process can't probe them. This is expected, not a failure.
+                unreadable = True
         if not found:
-            return CheckResult(
-                status="green",
-                detail="OpenWebUI not co-located — skipping",
-                elapsed_ms=elapsed_ms(),
+            detail = (
+                "OpenWebUI volume present but not readable by gateway (root-owned) — skipping"
+                if unreadable
+                else "OpenWebUI not co-located — skipping"
             )
+            return CheckResult(status="green", detail=detail, elapsed_ms=elapsed_ms())
         key_path = found[0]
         try:
             stat = Path(key_path).stat()
             size = stat.st_size
+        except PermissionError:
+            return CheckResult(
+                status="green",
+                detail="OpenWebUI secret path exists but not readable by gateway user — skipping",
+                elapsed_ms=elapsed_ms(),
+            )
         except Exception as exc:
             return CheckResult(status="amber", detail=f"stat failed: {exc}", elapsed_ms=elapsed_ms())
 

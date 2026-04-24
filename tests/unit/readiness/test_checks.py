@@ -153,10 +153,10 @@ def test_int02_green(tmp_path):
 
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
-    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT)")
+    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, request_type TEXT)")
     for i in range(50):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, ?, 'execution')",
+            "INSERT INTO wal_records VALUES (?, ?, 'execution', NULL)",
             (str(i), json.dumps({"record_signature": f"sig{i}"})),
         )
     conn.commit()
@@ -174,10 +174,10 @@ def test_int02_red_unsigned(tmp_path):
 
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
-    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT)")
+    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, request_type TEXT)")
     for i in range(50):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, ?, 'execution')",
+            "INSERT INTO wal_records VALUES (?, ?, 'execution', NULL)",
             (str(i), json.dumps({"record_signature": None})),
         )
     conn.commit()
