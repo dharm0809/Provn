@@ -876,6 +876,19 @@ async def _attestation_check(
         )
         _inc_request(provider, model, "blocked_stale" if err.status_code == 503 else "blocked_attestation")
         _inject_caller_role(att_ctx, request)
+        # When the control plane is present (strict or permissive-but-revoked),
+        # the stale-cache error text is misleading. Replace with a clear denial.
+        if ctx.control_store is not None:
+            from starlette.responses import JSONResponse as _JSON
+            err = _JSON(
+                {"error": {
+                    "message": f"model {model!r} is not in the gateway allowlist (provider={provider}). "
+                               "An admin must attest it via Control → Discover Models.",
+                    "type": "model_not_attested",
+                    "code": "model_not_attested",
+                }},
+                status_code=403,
+            )
         return att_id, att_ctx, False, None, err
 
     att_id = attestation.attestation_id
