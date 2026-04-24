@@ -11,6 +11,44 @@
   animation: none !important;
 }
 
+/* ── List fetch errors (401 vs empty store) ──────────────── */
+.ses-fetch-banner {
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ses-fetch-banner--auth {
+  background: color-mix(in oklab, var(--amber, #c9a227) 10%, var(--bg-surface));
+  border-color: color-mix(in oklab, var(--amber, #c9a227) 35%, var(--border));
+}
+.ses-fetch-banner--error {
+  background: color-mix(in oklab, var(--red, #e85d5d) 8%, var(--bg-surface));
+  border-color: color-mix(in oklab, var(--red, #e85d5d) 30%, var(--border));
+}
+.ses-fetch-banner-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.ses-fetch-banner-body {
+  margin: 0 0 12px;
+  color: var(--text-secondary);
+  max-width: 72ch;
+}
+.ses-fetch-banner .btn-sm {
+  margin-top: 2px;
+}
+.ses-fetch-mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+
 /* ── Metric bar ─────────────────────────────────────────── */
 .ses-metric-bar {
   display: grid;

@@ -188,7 +188,7 @@ const SessionListRow = React.memo(function SessionListRow({ s, onOpen }) {
     && aToolsLen === bToolsLen;
 });
 
-function SessionsListView({ all, onOpen }) {
+function SessionsListView({ all, onOpen, navigate, fetchError }) {
   const [q, setQ] = useState('');
   const [chainFilter, setChainFilter] = useState('all');
   const [modelFilter, setModelFilter] = useState('all');
@@ -220,6 +220,29 @@ function SessionsListView({ all, onOpen }) {
 
   return (
     <div className="ses-view">
+      {fetchError?.kind === 'auth' && (
+        <div className="ses-fetch-banner ses-fetch-banner--auth" role="alert">
+          <div className="ses-fetch-banner-title">Gateway API key required</div>
+          <p className="ses-fetch-banner-body">
+            This gateway is configured with <code className="ses-fetch-mono">WALACOR_GATEWAY_API_KEYS</code>, so
+            lineage data needs <code className="ses-fetch-mono">X-API-Key</code>. Open{' '}
+            <strong>Control</strong>, choose <strong>Unlock</strong>, and paste the same key you use for chat requests
+            (for example from your <code className="ses-fetch-mono">.env.gateway</code> file).
+          </p>
+          {typeof navigate === 'function' && (
+            <button type="button" className="btn-wal btn-primary btn-sm" onClick={() => navigate('control')}>
+              Go to Control
+            </button>
+          )}
+        </div>
+      )}
+      {fetchError?.kind === 'error' && (
+        <div className="ses-fetch-banner ses-fetch-banner--error" role="alert">
+          <div className="ses-fetch-banner-title">Could not load sessions</div>
+          <p className="ses-fetch-banner-body mono">{fetchError.detail}</p>
+        </div>
+      )}
+
       <SessionsMetricBar sessions={all} />
 
       <div className="card ses-list-card">
@@ -280,10 +303,18 @@ function SessionsListView({ all, onOpen }) {
         </div>
 
         <div className="ses-rows">
-          {filtered.length === 0 ? (
+          {filtered.length === 0 && !fetchError ? (
             <div className="ses-empty">
-              <div className="ses-empty-title">No sessions match</div>
-              <div className="ses-empty-sub">Adjust the filters above or clear the search.</div>
+              <div className="ses-empty-title">No sessions yet</div>
+              <div className="ses-empty-sub">
+                Send traffic through the gateway (chat completions) with session IDs — sessions appear here after
+                executions are recorded. If you use filters or search, try clearing them.
+              </div>
+            </div>
+          ) : filtered.length === 0 && fetchError ? (
+            <div className="ses-empty">
+              <div className="ses-empty-title">No session list loaded</div>
+              <div className="ses-empty-sub">Fix the issue above to see sessions.</div>
             </div>
           ) : filtered.map(s => (
             <SessionListRow key={s.session_id} s={s} onOpen={onOpen} />
@@ -406,8 +437,6 @@ function ChainRecord({ r, isLast, verified, onClick, sealOpen, onToggleSeal }) {
               <span className="ses-proof-lbl mono gold">◆ BLOCK</span>
               <span className="ses-proof-hash mono gold">{fmtShortId(r.walacor_block_id, 12, 6)}</span>
               <CopyBtn text={r.walacor_block_id} title="Copy block ID" />
-              {r.walacor_dh && <><span className="ses-proof-lbl mono muted">DH</span>
-              <span className="ses-proof-hash mono muted">{fmtShortId(r.walacor_dh, 10, 4)}</span></>}
               {r._walacor_eid && <><span className="ses-proof-lbl mono muted">EID</span>
               <span className="ses-proof-hash mono muted">{fmtShortId(r._walacor_eid, 8, 4)}</span></>}
             </div>
@@ -555,15 +584,26 @@ export default function Sessions({ navigate, params = {} }) {
   const [all, setAll] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
+  const [fetchError, setFetchError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
+        setFetchError(null);
         const res = await getSessions(100, 0, params);
         if (!cancelled) setAll(res.sessions || []);
-      } catch { if (!cancelled) setAll([]); }
-      finally { if (!cancelled) setLoading(false); }
+      } catch (e) {
+        if (!cancelled) {
+          setAll([]);
+          const st = e?.status;
+          if (st === 401 || st === 403) {
+            setFetchError({ kind: 'auth', detail: String(e?.message || '') });
+          } else {
+            setFetchError({ kind: 'error', detail: String(e?.message || e) });
+          }
+        }
+      } finally { if (!cancelled) setLoading(false); }
     })();
     return () => { cancelled = true; };
   }, [params.q, params.sort, params.order, params.offset]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -578,5 +618,5 @@ export default function Sessions({ navigate, params = {} }) {
   if (selected) {
     return <SessionTimelineView session={selected} onBack={() => setSelected(null)} />;
   }
-  return <SessionsListView all={all} onOpen={setSelected} />;
+  return <SessionsListView all={all} onOpen={setSelected} navigate={navigate} fetchError={fetchError} />;
 }
