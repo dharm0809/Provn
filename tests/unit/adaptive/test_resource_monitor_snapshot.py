@@ -19,8 +19,8 @@ def test_snapshot_empty():
 
 def test_snapshot_records_provider_state():
     m = _make_monitor()
-    m.record_outcome("ollama", ok=True)
-    m.record_outcome("ollama", ok=False, error="HTTP 503")
+    m.record_provider_result("ollama", success=True)
+    m.record_provider_result("ollama", success=False, error="HTTP 503")
     snap = m.snapshot()
     assert "ollama" in snap["providers"]
     p = snap["providers"]["ollama"]
@@ -32,7 +32,7 @@ def test_snapshot_cooldown_until_iso8601_when_cooling_down():
     m = _make_monitor()
     # Force cooldown: >50% failures with at least min_samples in 60s window.
     for _ in range(5):
-        m.record_outcome("ollama", ok=False, error="boom")
+        m.record_provider_result("ollama", success=False, error="boom")
     snap = m.snapshot()
     p = snap["providers"]["ollama"]
     assert p["cooldown_until"] is not None
@@ -44,7 +44,7 @@ def test_snapshot_cooldown_until_iso8601_when_cooling_down():
 def test_snapshot_cooldown_until_none_when_healthy():
     m = _make_monitor()
     for _ in range(5):
-        m.record_outcome("ollama", ok=True)
+        m.record_provider_result("ollama", success=True)
     snap = m.snapshot()
     p = snap["providers"]["ollama"]
     assert p["cooldown_until"] is None
@@ -53,18 +53,18 @@ def test_snapshot_cooldown_until_none_when_healthy():
 
 def test_snapshot_multi_provider():
     m = _make_monitor()
-    m.record_outcome("ollama", ok=True)
-    m.record_outcome("openai", ok=False, error="429")
+    m.record_provider_result("ollama", success=True)
+    m.record_provider_result("openai", success=False, error="429")
     snap = m.snapshot()
     assert set(snap["providers"].keys()) == {"ollama", "openai"}
     assert snap["providers"]["openai"]["last_error"] == "429"
     assert snap["providers"]["ollama"]["last_error"] is None
 
 
-def test_record_outcome_without_error_kwarg():
+def test_record_provider_result_without_error_kwarg():
     # Must work without the optional error kwarg (keyword-only, default None).
     m = _make_monitor()
-    m.record_outcome("ollama", ok=True)
-    m.record_outcome("ollama", ok=False)
+    m.record_provider_result("ollama", success=True)
+    m.record_provider_result("ollama", success=False)
     snap = m.snapshot()
     assert snap["providers"]["ollama"]["last_error"] is None

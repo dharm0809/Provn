@@ -50,18 +50,15 @@ class DefaultResourceMonitor(ResourceMonitor):
             active_requests=self._active_requests,
             provider_error_rates=self._get_error_rates())
 
-    def record_provider_result(self, provider: str, success: bool) -> None:
-        self._provider_results[provider].append((time.time(), success))
+    def record_provider_result(self, provider: str, success: bool, *, error: str | None = None) -> None:
+        """Record a provider outcome.
 
-    def record_outcome(self, provider: str, *, ok: bool, error: str | None = None) -> None:
-        """Record a provider outcome with an optional error string.
-
-        Mirrors ``record_provider_result`` but also captures the latest error
-        message for exposure via :meth:`snapshot`. ``error`` is keyword-only
-        so existing call sites remain source-compatible.
+        ``error`` is keyword-only so existing positional call sites remain
+        source-compatible. When ``success`` is False and ``error`` is provided,
+        the message is captured for exposure via :meth:`snapshot`.
         """
-        self._provider_results[provider].append((time.time(), ok))
-        if not ok and error is not None:
+        self._provider_results[provider].append((time.time(), success))
+        if not success and error is not None:
             self._last_error[provider] = error
 
     def snapshot(self) -> dict:
