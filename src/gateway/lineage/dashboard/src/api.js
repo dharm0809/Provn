@@ -177,6 +177,25 @@ export async function getConnections() {
   return fetchJSON(`/v1/connections`);
 }
 
+// ─── Compliance ─────────────────────────────────────────────────
+//
+// All four compliance frameworks share one server-side endpoint. Callers
+// pass a framework id (eu_ai_act / nist / soc2 / iso42001) and an
+// inclusive YYYY-MM-DD date window.
+export async function getComplianceReport(framework, start, end) {
+  const sp = new URLSearchParams({ framework, start, end, format: 'json' });
+  return fetchJSON(`/v1/compliance/export?${sp.toString()}`);
+}
+
+// Build a download URL (CSV / PDF / JSON). We intentionally do NOT fetch
+// here — binary downloads (PDF) bypass JSON parsing, and forcing the
+// browser to handle the download preserves the Content-Disposition
+// filename the backend sets.
+export function complianceExportUrl({ framework, start, end, format }) {
+  const sp = new URLSearchParams({ framework, start, end, format });
+  return `/v1/compliance/export?${sp.toString()}`;
+}
+
 // ─── Control Plane API ──────────────────────────────────────────
 
 function getControlKey() {
