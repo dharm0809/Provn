@@ -447,6 +447,7 @@ async def _init_walacor(settings, ctx) -> None:
         executions_etid=settings.walacor_executions_etid,
         attempts_etid=settings.walacor_attempts_etid,
         tool_events_etid=settings.walacor_tool_events_etid,
+        session_envelope_etid=settings.session_envelope_etid,
     )
     await ctx.walacor_client.start()
     logger.info(
@@ -712,6 +713,30 @@ def _init_otel(settings, ctx) -> None:
     ctx.tracer = init_tracer(
         service_name=settings.otel_service_name,
         endpoint=settings.otel_endpoint,
+    )
+
+
+def _init_session_envelope_writer(settings, ctx) -> None:
+    """Phase 24: Session-scoped Walacor envelope writer.
+
+    Accumulates per-turn state in memory and dual-writes to (a) the local
+    WAL ``gateway_sessions_envelope`` table and (b) the Walacor backend via
+    ``write_session_envelope``. Must NOT initialise in skip_governance mode —
+    callers check the flag before invoking this helper.
+    """
+    from gateway.sessions.envelope_writer import SessionEnvelopeWriter
+
+    ctx.session_envelope_writer = SessionEnvelopeWriter(
+        wal_writer=ctx.wal_writer,
+        walacor_client=ctx.walacor_client,
+        settings=settings,
+    )
+    logger.info(
+        "Session envelope writer ready: etid=%d flush_mode=%s max_turns=%d max_tokens=%d",
+        settings.session_envelope_etid,
+        settings.session_envelope_flush_mode,
+        settings.session_envelope_max_turns,
+        settings.session_envelope_max_tokens,
     )
 
 
@@ -1016,6 +1041,11 @@ async def on_startup() -> None:
             # Seed default content policies if control plane is active
             if ctx.control_store:
                 ctx.control_store.seed_default_content_policies()
+        # Phase 24: Session-scoped Walacor envelope writer.
+        # Critical: this block sits AFTER skip_governance early-return (above)
+        # so the writer never initialises in transparent-proxy mode.
+        if settings.session_envelope_enabled:
+            _init_session_envelope_writer(settings, ctx)
         _init_semantic_cache(settings, ctx)
         _init_load_balancer(settings, ctx)
         # JWT configuration validation warnings
@@ -1176,6 +1206,15 @@ async def on_shutdown() -> None:
             # Data-loss risk: SQLite WAL file may be left in a partially-written state.
             logger.error("Gateway shutdown: wal_writer.close failed — WAL file may be corrupt", exc_info=True)
             errors.append(f"wal_writer.close: {e}")
+
+    # Phase 24: flush session envelopes before closing Walacor client so the
+    # final writes can still complete over the live JWT connection.
+    if ctx.session_envelope_writer:
+        try:
+            await ctx.session_envelope_writer.shutdown_flush()
+        except Exception as e:
+            errors.append(f"session_envelope_writer.shutdown_flush: {e}")
+        ctx.session_envelope_writer = None
 
     if ctx.walacor_client:
         try:

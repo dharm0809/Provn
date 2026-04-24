@@ -145,6 +145,27 @@ class WALWriter:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+            # Phase 24: Session-scoped Walacor envelope mirror table.
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS gateway_sessions_envelope (
+                    session_id             TEXT    PRIMARY KEY,
+                    tenant_id              TEXT,
+                    gateway_id             TEXT,
+                    created_at             TEXT,
+                    updated_at             TEXT,
+                    last_turn_at           TEXT,
+                    turn_count             INTEGER,
+                    status                 TEXT,
+                    envelope_json          TEXT    NOT NULL,
+                    latest_record_hash     TEXT,
+                    latest_sequence_number INTEGER,
+                    synced_to_walacor      INTEGER DEFAULT 0
+                )"""
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gateway_sessions_envelope_tenant_updated"
+                " ON gateway_sessions_envelope (tenant_id, updated_at)"
+            )
             self._thread_conn = conn
         return self._thread_conn
 
@@ -246,6 +267,37 @@ class WALWriter:
         )
         logger.debug("WAL (thread) write_tool_event event_id=%s", event_id)
 
+    @staticmethod
+    def _do_write_session_envelope(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+        """Insert-or-replace one session envelope row (Phase 24)."""
+        conn.execute(
+            """INSERT OR REPLACE INTO gateway_sessions_envelope (
+                    session_id, tenant_id, gateway_id,
+                    created_at, updated_at, last_turn_at,
+                    turn_count, status, envelope_json,
+                    latest_record_hash, latest_sequence_number,
+                    synced_to_walacor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["session_id"],
+                row.get("tenant_id"),
+                row.get("gateway_id"),
+                row.get("created_at"),
+                row.get("updated_at"),
+                row.get("last_turn_at"),
+                row.get("turn_count") or 0,
+                row.get("status") or "open",
+                row["envelope_json"],
+                row.get("latest_record_hash"),
+                row.get("latest_sequence_number"),
+                int(row.get("synced_to_walacor") or 0),
+            ),
+        )
+        logger.debug(
+            "WAL (thread) write_session_envelope session_id=%s turn_count=%s",
+            row.get("session_id"), row.get("turn_count"),
+        )
+
     # ------------------------------------------------------------------
     # Fire-and-forget enqueue API (used by WALBackend)
     # ------------------------------------------------------------------
@@ -275,6 +327,10 @@ class WALWriter:
     def enqueue_write_tool_event(self, record: dict[str, Any]) -> None:
         """Non-blocking enqueue of a tool event record to the dedicated writer thread."""
         self._queue.put((self._do_write_tool_event, (record,)))
+
+    def enqueue_write_session_envelope(self, row: dict[str, Any]) -> None:
+        """Non-blocking enqueue of a session envelope row (Phase 24)."""
+        self._queue.put((self._do_write_session_envelope, (row,)))
 
     # ------------------------------------------------------------------
     # Synchronous public API (used by delivery worker, startup, health, batch writer)
@@ -337,6 +393,27 @@ class WALWriter:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise  # Only suppress "duplicate column" errors
+            # Phase 24: Session-scoped Walacor envelope mirror table.
+            self._conn.execute(
+                """CREATE TABLE IF NOT EXISTS gateway_sessions_envelope (
+                    session_id             TEXT    PRIMARY KEY,
+                    tenant_id              TEXT,
+                    gateway_id             TEXT,
+                    created_at             TEXT,
+                    updated_at             TEXT,
+                    last_turn_at           TEXT,
+                    turn_count             INTEGER,
+                    status                 TEXT,
+                    envelope_json          TEXT    NOT NULL,
+                    latest_record_hash     TEXT,
+                    latest_sequence_number INTEGER,
+                    synced_to_walacor      INTEGER DEFAULT 0
+                )"""
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gateway_sessions_envelope_tenant_updated"
+                " ON gateway_sessions_envelope (tenant_id, updated_at)"
+            )
         return self._conn
 
     def write_and_fsync(self, record: ExecutionRecord | dict[str, Any]) -> None:
@@ -455,6 +532,18 @@ class WALWriter:
         )
         conn.commit()
         logger.debug("WAL write_tool_event event_id=%s", event_id)
+
+    def write_session_envelope(self, row: dict[str, Any]) -> None:
+        """Insert-or-replace one session envelope row (Phase 24).
+
+        Fire-and-forget via the dedicated writer thread so the caller never
+        blocks on fsync. Kept keyed by session_id — each turn overwrites the
+        prior in-flight state locally; the append-only history lives on Walacor.
+        """
+        # Ensure main-thread connection has had a chance to create the schema
+        # so the writer thread's first flush does not race.
+        self._ensure_conn()
+        self.enqueue_write_session_envelope(row)
 
     def purge_delivered(self, max_age_hours: float) -> int:
         """Delete delivered wal_records older than max_age_hours. Returns count deleted."""

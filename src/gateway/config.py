@@ -462,6 +462,16 @@ class Settings(BaseSettings):
         description="Enable /lineage/ dashboard and /v1/lineage/* API endpoints.",
     )
 
+    # Phase 24: Session-scoped Walacor envelopes
+    session_envelope_enabled: bool = Field(default=True, description="Enable session-scoped Walacor envelope rollup (ETId 9000014)")
+    session_envelope_etid: int = Field(default=9000014, description="Walacor ETId for session envelopes")
+    session_envelope_flush_mode: Literal["per_turn", "debounced"] = Field(default="per_turn", description="Flush mode: per_turn (Phase A) or debounced (Phase C)")
+    session_envelope_debounce_turns: int = Field(default=3, description="Debounce: coalesce N turns before flush (Phase C)")
+    session_envelope_debounce_seconds: float = Field(default=5.0, description="Debounce: coalesce for T seconds before flush (Phase C)")
+    session_envelope_idle_timeout_seconds: int = Field(default=1800, description="Close envelope after N seconds of no traffic (Phase C)")
+    session_envelope_max_turns: int = Field(default=500, description="Rollover to new envelope after N turns")
+    session_envelope_max_tokens: int = Field(default=500_000, description="Rollover to new envelope after N cumulative tokens")
+
     # Phase 17: OpenTelemetry export
     otel_enabled: bool = Field(
         default=False,

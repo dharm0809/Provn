@@ -91,3 +91,7 @@ proxy/proxy
 *.jsonl
 CLAUDE.md
 .worktrees/
+*.claude-flow
+*.swarm
+
+*.db

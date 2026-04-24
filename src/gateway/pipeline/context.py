@@ -84,6 +84,8 @@ class PipelineContext:
         self.audit_exporter: AuditExporter | None = None
         # B.4: Semantic cache (exact-match tier)
         self.semantic_cache: SemanticCache | None = None
+        # Phase 24: Session-scoped Walacor envelope writer
+        self.session_envelope_writer: Any = None
 
 
 _ctx = PipelineContext()
