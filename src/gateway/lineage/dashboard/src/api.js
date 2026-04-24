@@ -180,14 +180,15 @@ export async function getConnections() {
 // ─── Control Plane API ──────────────────────────────────────────
 
 function getControlKey() {
-  return sessionStorage.getItem('cp_api_key') || '';
+  return (localStorage.getItem('cp_api_key') || sessionStorage.getItem('cp_api_key')) || '';
 }
 
 export function setControlKey(key) {
-  sessionStorage.setItem('cp_api_key', key);
+  localStorage.setItem('cp_api_key', key);
 }
 
 export function clearControlKey() {
+  localStorage.removeItem('cp_api_key');
   sessionStorage.removeItem('cp_api_key');
 }
 
