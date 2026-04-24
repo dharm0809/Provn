@@ -383,6 +383,7 @@ class WalacorLineageReader:
         search: str | None = None,
         sort: str = "timestamp",
         order: str = "desc",
+        disposition: str | None = None,
     ) -> dict:
         sort_dir = 1 if str(order).lower() == "asc" else -1
         sort_field = sort if sort in (
@@ -402,6 +403,12 @@ class WalacorLineageReader:
                 {"user": {"$regex": safe_search, "$options": "i"}},
                 {"reason": {"$regex": safe_search, "$options": "i"}},
             ]}
+        if disposition is not None:
+            # Additive exact-match filter; wrap with $and so it composes with the $or search.
+            if match_stage:
+                match_stage = {"$and": [match_stage, {"disposition": disposition}]}
+            else:
+                match_stage = {"disposition": disposition}
 
         # Items query
         items_pipeline: list[dict[str, Any]] = []

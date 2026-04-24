@@ -403,17 +403,25 @@ class LineageReader:
         search: str | None = None,
         sort: str = "timestamp",
         order: str = "desc",
+        disposition: str | None = None,
     ) -> dict:
         """Return attempt records and disposition stats (same *search* filter for list, stats, total).
 
         *search* matches substring across request_id, tenant_id, provider, model_id, path,
         disposition, user, execution_id, and status_code (as text), case-insensitive.
         *sort*: timestamp, disposition, request_id, user, model_id, path, status_code.
+        *disposition*: exact-match filter on the ``disposition`` column (additive to *search*).
         """
         sort_key = sort if sort in _ATTEMPTS_SORT_COLUMNS else "timestamp"
         order_sql = "ASC" if str(order).lower() == "asc" else "DESC"
         order_expr = _ATTEMPTS_SORT_COLUMNS[sort_key]
         where_sql, extra_params = _attempts_search_where(search)
+        if disposition is not None:
+            if where_sql:
+                where_sql = f"{where_sql} AND disposition = ?"
+            else:
+                where_sql = "WHERE disposition = ?"
+            extra_params = (*extra_params, disposition)
         base = f"FROM gateway_attempts {where_sql}"
 
         conn = self._ensure_conn()

@@ -240,6 +240,56 @@ def test_get_attempts_stats_respect_search(wal_db):
     assert only_forwarded["stats"] == {"forwarded": 3}
 
 
+def test_get_attempts_disposition_filter(wal_db):
+    db_path, conn = wal_db
+    # _insert_attempts creates 3 "forwarded" and 2 "denied_auth".
+    _insert_attempts(conn, count=5)
+    # Add one synthetic "readiness_degraded" row to ensure the filter is exact.
+    conn.execute(
+        """INSERT INTO gateway_attempts
+           (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("req-rd-0", "2026-03-03T10:01:00+00:00", "test-tenant",
+         "ollama", "qwen3:4b", "/v1/chat/completions", "readiness_degraded", None, 503),
+    )
+    conn.commit()
+
+    reader = LineageReader(db_path)
+    try:
+        only_rd = reader.get_attempts(limit=100, disposition="readiness_degraded")
+        assert only_rd["total"] == 1
+        assert len(only_rd["items"]) == 1
+        assert only_rd["items"][0]["disposition"] == "readiness_degraded"
+
+        only_forwarded = reader.get_attempts(limit=100, disposition="forwarded")
+        assert only_forwarded["total"] == 3
+        assert all(r["disposition"] == "forwarded" for r in only_forwarded["items"])
+
+        # Unchanged behaviour when kwarg not passed.
+        all_rows = reader.get_attempts(limit=100)
+        assert all_rows["total"] == 6
+    finally:
+        reader.close()
+
+
+def test_get_attempts_disposition_filter_combines_with_search(wal_db):
+    db_path, conn = wal_db
+    _insert_attempts(conn, count=5)
+
+    reader = LineageReader(db_path)
+    try:
+        # search="req-0" matches request_id "req-0" (disposition=forwarded).
+        both = reader.get_attempts(limit=100, search="req-0", disposition="forwarded")
+        assert both["total"] == 1
+        assert both["items"][0]["request_id"] == "req-0"
+
+        # Mismatch: req-0 is forwarded, not denied_auth.
+        mismatch = reader.get_attempts(limit=100, search="req-0", disposition="denied_auth")
+        assert mismatch["total"] == 0
+    finally:
+        reader.close()
+
+
 def test_get_attempts_sort_status_code(wal_db):
     db_path, conn = wal_db
     _insert_attempts(conn, count=5)
