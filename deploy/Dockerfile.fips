@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir build && \
 FROM redhat/ubi9/python-312 AS runtime
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
+# Native libs for WeasyPrint (PDF compliance export). ubi9 ships dnf.
+USER 0
+RUN dnf install -y pango cairo && dnf clean all
 RUN useradd --create-home --uid 1000 app
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
