@@ -402,7 +402,7 @@ function Intro({ snapshot, loading, error, errorStatus }) {
   const generated = snapshot?.generated_at;
 
   return (
-    <div className="cx-intro">
+    <div className="cx-intro card card-accent">
       <div className="cx-intro-body">
         <div className="cx-intro-eyebrow">
           <span className="cx-dia">◆</span>

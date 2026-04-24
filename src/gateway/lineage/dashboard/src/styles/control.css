@@ -83,10 +83,16 @@
 
 /* ---------- intro ---------- */
 
+/* Bordered hero: same shell as Compliance stub-hero (card + card-accent). */
 .cp-intro {
-  display: flex; align-items: flex-start; gap: 32px;
-  padding: 32px 32px 28px;
-  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  gap: 32px;
+  margin-bottom: 18px;
+  border-bottom: none;
+}
+.cp-intro.card {
+  padding: 28px 32px;
 }
 .cp-intro-body { flex: 1; min-width: 0; }
 .cp-intro-body h1 {

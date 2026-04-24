@@ -128,11 +128,32 @@ function ReadonlyBanner({ onUnlock }) {
 
 function UnlockModal({ onClose, onSubmit }) {
   const [val, setVal] = useState('');
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
   return (
-    <div className="cp-modal-wrap">
-      <div className="cp-modal">
+    <div
+      className="cp-modal-wrap"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cp-unlock-title"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) e.preventDefault();
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
+    >
+      <div className="cp-modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="cp-modal-eyebrow">◆ unlock writes</div>
-        <h3>Enter control-plane API key</h3>
+        <h3 id="cp-unlock-title">Enter control-plane API key</h3>
         <p>
           Key is held in <code>sessionStorage</code> and cleared on tab close.
           Writes are gated server-side via <code>X-API-Key</code>.
@@ -1511,7 +1532,7 @@ export default function Control({ navigate }) {
 
   return (
     <div className="cp-page" data-screen-label="Control">
-      <div className="cp-intro">
+      <div className="cp-intro card card-accent">
         <div className="cp-intro-body">
           <div className="cp-intro-eyebrow">
             <span className="cp-dia">◆</span>walacor gateway
