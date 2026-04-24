@@ -634,95 +634,100 @@ function TilePanel({ tile, onClose }) {
 
 /* ── v4 grafts: runbook data + components ────────────────────────── */
 
+/* Runbook commands use shell placeholders so they're portable across
+   deployments. Set these in your shell before running the commands:
+     GATEWAY_URL   — e.g. http://localhost:8000 or https://gw.example.com
+     WAL_PATH      — gateway WAL directory, e.g. /tmp/walacor-wal-local
+     GATEWAY_LOG   — log file or journalctl unit
+     CP_KEY        — control-plane API key */
 const V4_RUNBOOK = {
   walacor_delivery: {
     oneliner: 'Walacor cluster is the sole sink for sealed envelopes. When it blocks, compliance pauses.',
     checks: [
-      { label: 'TCP reach from gateway → 10.0.4.12:7443',   cmd: 'nc -zv 10.0.4.12 7443' },
-      { label: 'Inspect pending-write queue size',           cmd: 'gw cli delivery queue --tail' },
-      { label: 'Confirm walacor-cluster k8s pods are Ready', cmd: 'kubectl -n walacor get pods' },
+      { label: 'Check delivery success rate on this gateway',   cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"walacor_delivery\\")"' },
+      { label: 'TCP reach gateway → walacor endpoint',          cmd: 'nc -zv $WALACOR_HOST $WALACOR_PORT' },
+      { label: 'Tail recent delivery failures in WAL',          cmd: 'sqlite3 $WAL_PATH/gateway.db "select count(*) from gateway_attempts where disposition like \'%walacor%\'"' },
     ],
-    escalation: 'If pods Ready but TCP still fails, escalate to #platform-walacor within 5 min.',
+    escalation: 'If delivery success_rate_60s <95% for 5 min, escalate to #platform-walacor.',
   },
   auth: {
-    oneliner: 'All inbound API calls depend on JWKS. Unreachable JWKS → full auth outage.',
+    oneliner: 'All inbound API calls depend on the API key / JWT path. An auth outage is a full outage.',
     checks: [
-      { label: 'Verify jwks_uri resolves and returns 200', cmd: 'curl -sI $JWKS_URI' },
-      { label: 'Check bootstrap key stability flag',        cmd: 'gw cli auth status' },
+      { label: 'Check auth state from /v1/connections',         cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"auth\\")"' },
+      { label: 'Verify JWKS URL resolves (if JWT mode)',        cmd: 'curl -sI "$JWKS_URI"' },
+      { label: 'Inspect SEC-01 readiness check (bootstrap key)', cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/readiness" | jq ".checks[] | select(.id==\\"SEC-01\\")"' },
     ],
-    escalation: 'Rotate bootstrap key; page #sec on-call if stability flag does not recover in 60s.',
+    escalation: 'If bootstrap_key_stable=false for >5 min, persist a stable key on disk and restart. Page #sec on-call if JWKS unreachable.',
   },
   providers: {
-    oneliner: 'An upstream LLM outage will cascade to every session routed through that provider.',
+    oneliner: 'An upstream LLM outage cascades to every session routed through that provider.',
     checks: [
-      { label: 'Check provider status page',          cmd: '—' },
-      { label: 'Force-reroute to healthy providers',  cmd: 'gw cli providers reroute --avoid <id>' },
+      { label: 'Inspect per-provider error rate and cooldown', cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"providers\\")"' },
+      { label: 'Ping Ollama (if using local LLM)',             cmd: 'curl -s "$OLLAMA_URL/api/tags" | jq ".models[].name"' },
+      { label: 'Check provider status pages',                   cmd: '# openai: https://status.openai.com — anthropic: https://status.anthropic.com' },
     ],
     escalation: 'If multi-provider outage: freeze new sessions, post advisory in #customer-ops.',
   },
   analyzers: {
     oneliner: 'Analyzers fail-open by design — a silent outage means PII/toxicity/Llama Guard verdicts stop landing on records while traffic keeps flowing.',
     checks: [
-      { label: 'Confirm Llama Guard model is pulled on the provider',  cmd: 'ollama list | grep llama-guard' },
-      { label: 'Probe the analyzer directly against a known-bad prompt', cmd: 'gw cli analyzers probe --name llama_guard' },
-      { label: 'Tail gateway log for fail-open warnings',                cmd: "grep -i 'fail.open\\|analyzer timeout' /tmp/gateway_dharm.log | tail -50" },
-      { label: 'Inspect per-analyzer fail-open counters',               cmd: 'curl -s localhost:8100/health | jq .analyzers' },
+      { label: 'Inspect per-analyzer fail-open counters',         cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"analyzers\\")"' },
+      { label: 'Confirm Llama Guard model is available',          cmd: 'curl -s "$OLLAMA_URL/api/tags" | jq ".models[].name" | grep -i llama-guard' },
+      { label: 'Tail gateway log for fail-open warnings',         cmd: 'grep -i "fail.open\\|analyzer timeout" "$GATEWAY_LOG" | tail -50' },
     ],
-    escalation: 'If fail-opens >5/min sustained for 10 min, page #ml-safety — compliance records are being written without safety verdicts.',
+    escalation: 'If fail_opens_60s ≥5 sustained for 10 min, page #ml-safety — records are being written without safety verdicts.',
   },
   tool_loop: {
     oneliner: 'Unhandled exceptions in the tool executor get swallowed and fall back to the raw model reply — users see answers that look fine but never ran the tool.',
     checks: [
-      { label: 'Grep the last tool-loop exception trace',         cmd: "grep -A 20 '_run_active_tool_loop' /tmp/gateway_dharm.log | tail -40" },
-      { label: 'Inspect a recent execution for tool_events',      cmd: 'gw cli executions tail --with-tools' },
-      { label: 'Verify MCP/builtin tool registry is populated',   cmd: 'curl -s localhost:8100/health | jq .tools' },
+      { label: 'Inspect current tool-loop exception rate',        cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"tool_loop\\")"' },
+      { label: 'Grep the last tool-loop exception trace',         cmd: 'grep -A 20 "_run_active_tool_loop\\|tool_loop" "$GATEWAY_LOG" | tail -40' },
+      { label: 'Check registered tools via /health',              cmd: 'curl -s "$GATEWAY_URL/health" | jq ".tools? // .tool_registry?"' },
     ],
     escalation: 'If failure_rate_60s crosses 10% for a single tool, disable it via control plane and open an incident in #gateway-tools.',
   },
   model_capabilities: {
     oneliner: 'When the gateway auto-disables tools on a model, every subsequent request to that model loses web-search/function-calling silently.',
     checks: [
-      { label: 'Dump the in-memory capability cache',              cmd: 'curl -s localhost:8100/health | jq .model_capabilities' },
-      { label: 'Retry a tool request against the flagged model',   cmd: 'gw cli models probe --id <model_id> --tools' },
-      { label: 'Review the last tool-unsupported error',           cmd: "grep 'tool_unsupported\\|supports_tools=False' /tmp/gateway_dharm.log | tail -20" },
+      { label: 'Dump model capability flags',                     cmd: 'curl -s "$GATEWAY_URL/health" | jq .model_capabilities' },
+      { label: 'See which models are auto-disabled',              cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"model_capabilities\\")"' },
+      { label: 'Review last tool-unsupported errors',             cmd: 'grep "tool_unsupported\\|supports_tools=False" "$GATEWAY_LOG" | tail -20' },
     ],
-    escalation: 'If a flagship model auto-disables, force-restart gateway to clear the cache, then page #model-ops if it re-disables within 5 min.',
+    escalation: 'If a flagship model auto-disables, restart the gateway to clear the cache; if it re-disables within 5 min, page #model-ops.',
   },
   control_plane: {
-    oneliner: 'Control-plane drift means attestations, policies, or budgets running in-memory no longer match the SQLite store — governance decisions drift from ground truth.',
+    oneliner: 'Control-plane drift means in-memory caches no longer match the SQLite store — governance decisions drift from ground truth.',
     checks: [
-      { label: 'Confirm control.db is readable',                   cmd: 'sqlite3 /tmp/walacor-wal-dharm/control.db ".tables"' },
-      { label: 'Hit the control status endpoint',                  cmd: 'curl -s -H "X-API-Key: $CP_KEY" localhost:8100/v1/control/status | jq' },
-      { label: 'Check policy-cache age (stale => fail-closed soon)', cmd: 'curl -s localhost:8100/v1/readiness | jq ".checks[] | select(.id==\"INT-04\")"' },
-      { label: 'Verify local sync task is alive',                  cmd: "grep '_run_local_sync_loop' /tmp/gateway_dharm.log | tail -10" },
+      { label: 'Check control-plane status',                      cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/control/status" | jq' },
+      { label: 'Policy-cache age + sync loop state',              cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"control_plane\\")"' },
+      { label: 'Confirm control.db is readable',                  cmd: 'sqlite3 "$WAL_PATH/control.db" ".tables"' },
     ],
     escalation: 'If sync_task_alive=false or cache age >10× interval, restart the gateway; if drift persists, escalate to #gateway-control.',
   },
   readiness: {
     oneliner: 'The 31-check readiness rollup is the single source of truth for whether this gateway should take traffic — red security/integrity checks mean keep-out.',
     checks: [
-      { label: 'Fetch the full readiness report',                  cmd: 'curl -s localhost:8100/v1/readiness | jq' },
-      { label: 'List only red/amber checks',                       cmd: 'curl -s localhost:8100/v1/readiness | jq \'.checks[] | select(.status!="green")\'' },
-      { label: 'Audit recent readiness-drift attempts in WAL',     cmd: "sqlite3 /tmp/walacor-wal-dharm/gateway.db \"select timestamp, reason from gateway_attempts where disposition='readiness_degraded' order by timestamp desc limit 20\"" },
+      { label: 'Fetch the full readiness report',                 cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/readiness" | jq' },
+      { label: 'List only red/amber checks',                      cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/readiness" | jq \'.checks[] | select(.status!="green")\'' },
+      { label: 'Audit recent readiness-drift rows in WAL',        cmd: 'sqlite3 "$WAL_PATH/gateway.db" "select timestamp, reason from gateway_attempts where disposition=\'readiness_degraded\' order by timestamp desc limit 20"' },
     ],
     escalation: 'Any SEC-* or INT-* red → pull this node out of the LB immediately; page #gateway-oncall with the check id in the subject.',
   },
   streaming: {
     oneliner: 'Stream interruptions mean SSE responses are being cut mid-flight — users see truncated completions and audit records miss the final chunk.',
     checks: [
-      { label: 'Count recent stream interruptions',                cmd: "grep 'stream interrupted\\|record_stream_interruption' /tmp/gateway_dharm.log | tail -30" },
-      { label: 'Inspect interruption metric from /health',         cmd: 'curl -s localhost:8100/health | jq .streaming' },
-      { label: 'Test a live SSE round-trip',                       cmd: 'curl -N -H "Content-Type: application/json" -d \'{"model":"qwen3:4b","stream":true,"messages":[{"role":"user","content":"hi"}]}\' localhost:8100/v1/chat/completions' },
+      { label: 'Inspect streaming tile state',                    cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"streaming\\")"' },
+      { label: 'Count recent stream interruptions in log',        cmd: 'grep "stream interrupted\\|record_stream_interruption" "$GATEWAY_LOG" | tail -30' },
+      { label: 'Test a live SSE round-trip',                      cmd: 'curl -N -H "Content-Type: application/json" -d \'{"model":"qwen3:4b","stream":true,"messages":[{"role":"user","content":"hi"}]}\' "$GATEWAY_URL/v1/chat/completions"' },
     ],
-    escalation: 'If interruption_rate_60s >5% persistent, check provider health first (ollama/openai/anthropic), then network; escalate to #platform-net if upstream is clean.',
+    escalation: 'If interruption_rate_60s >5% persistent, check provider health first, then network; escalate to #platform-net if upstream is clean.',
   },
   intelligence_worker: {
     oneliner: 'The ONNX self-learning worker trains off the verdict log asynchronously — if it stalls, adaptive classifiers drift stale but inference keeps serving (fail-open by design).',
     checks: [
-      { label: 'Check worker heartbeat and queue depth',           cmd: 'curl -s localhost:8100/health | jq .intelligence_worker' },
-      { label: 'Inspect verdict-log row count',                    cmd: 'sqlite3 /tmp/walacor-wal-dharm/gateway.db "select count(*) from verdict_log"' },
-      { label: 'Tail the last training run',                       cmd: "grep -i 'intelligence\\|training run' /tmp/gateway_dharm.log | tail -20" },
-      { label: 'Confirm Ollama is reachable for the training model', cmd: 'curl -s $OLLAMA_URL/api/tags | jq \'.models[].name\'' },
+      { label: 'Worker heartbeat + queue depth',                  cmd: 'curl -s -H "X-API-Key: $CP_KEY" "$GATEWAY_URL/v1/connections" | jq ".tiles[] | select(.id==\\"intelligence_worker\\")"' },
+      { label: 'Verdict-log row count',                           cmd: 'sqlite3 "$WAL_PATH/gateway.db" "select count(*) from verdict_log"' },
+      { label: 'Tail the last training run',                      cmd: 'grep -i "intelligence\\|training run" "$GATEWAY_LOG" | tail -20' },
     ],
     escalation: 'If queue_depth keeps climbing or oldest_job_age_s >1h, restart the worker; page #ml-platform only if a second restart does not drain it.',
   },

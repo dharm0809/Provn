@@ -755,10 +755,12 @@ html[data-theme="light"] .cx-overlay { background: rgba(22, 22, 30, 0.35); }
   text-align: center;
   letter-spacing: 0.05em;
 }
-.v4-runbook-body { display: flex; flex-direction: column; gap: 6px; }
+.v4-runbook-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .v4-runbook-label {
+  display: block;
   font: 500 12.5px/1.35 var(--font);
   color: var(--text-primary);
+  margin-bottom: 2px;
 }
 .v4-runbook-cmd {
   display: flex;
