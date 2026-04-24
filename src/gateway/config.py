@@ -482,6 +482,16 @@ class Settings(BaseSettings):
         default="",
         description="SQLite path for control plane state. Default: alongside WAL db.",
     )
+    strict_model_allowlist: bool = Field(
+        default=False,
+        description=(
+            "When true, only models with an active attestation in the embedded control "
+            "plane may be used. Disables startup auto-registration of discovered models, "
+            "disables request-time auto-attestation, and suppresses the discovery fallback "
+            "on /v1/models. Admins curate the allowlist via the Control tab "
+            "(Discover Models → Register)."
+        ),
+    )
 
     # Phase 18: Lineage dashboard
     lineage_enabled: bool = Field(

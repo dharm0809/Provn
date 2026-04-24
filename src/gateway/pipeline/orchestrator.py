@@ -818,7 +818,7 @@ async def _attestation_check(
         # With embedded control plane: auto-attest only if the model was NEVER explicitly revoked.
         # Without control plane: always auto-attest (standalone governance mode).
         _can_auto_attest = False
-        if ctx.sync_client is None:
+        if ctx.sync_client is None and not getattr(settings, "strict_model_allowlist", False):
             if ctx.control_store is None:
                 _can_auto_attest = True
             else:
