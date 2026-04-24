@@ -10,14 +10,14 @@ Reads from environment (or .env):
   WALACOR_PASSWORD
 
 Creates 3 schemas via POST /schemas (ETId=50 system envelope):
-  ETId 9000021  gateway_executions   (32 fields)
-  ETId 9000022  gateway_attempts     (10 fields)
-  ETId 9000023  gateway_tool_events  (20 fields)
+  ETId 9000031  gateway_executions   (34 fields — includes record_id chain)
+  ETId 9000032  gateway_attempts     (10 fields)
+  ETId 9000033  gateway_tool_events  (20 fields)
 
 After running, update your .env:
-  WALACOR_EXECUTIONS_ETID=9000021
-  WALACOR_ATTEMPTS_ETID=9000022
-  WALACOR_TOOL_EVENTS_ETID=9000023
+  WALACOR_EXECUTIONS_ETID=9000031
+  WALACOR_ATTEMPTS_ETID=9000032
+  WALACOR_TOOL_EVENTS_ETID=9000033
 """
 
 import os
@@ -42,9 +42,9 @@ if not all([SERVER, USERNAME, PASSWORD]):
     sys.exit(1)
 
 # ── New ETIds ───────────────────────────────────────────────────────────────
-EXECUTIONS_ETID = 9000021
-ATTEMPTS_ETID = 9000022
-TOOL_EVENTS_ETID = 9000023
+EXECUTIONS_ETID = 9000031
+ATTEMPTS_ETID = 9000032
+TOOL_EVENTS_ETID = 9000033
 
 # ── Schema definitions ──────────────────────────────────────────────────────
 # POST /schemas uses: {ETId: 50, SV: 1, Schema: {ETId: <your_id>, Fields: [...]}}
@@ -80,8 +80,10 @@ EXECUTIONS_FIELDS = [
     {"FieldName": "cache_creation_tokens",   "DataType": "INTEGER", "Required": False},
     {"FieldName": "cache_hit",               "DataType": "BOOLEAN", "Required": False},
     {"FieldName": "latency_ms",              "DataType": "DECIMAL", "Required": False},
-    # Session chain (Merkle integrity)
+    # Session chain (UUIDv7 ID-pointer chain + legacy Merkle fields during transition)
     {"FieldName": "sequence_number",         "DataType": "INTEGER", "Required": False},
+    {"FieldName": "record_id",               "DataType": "TEXT", "MaxLength": 255, "Required": False},
+    {"FieldName": "previous_record_id",      "DataType": "TEXT", "MaxLength": 255, "Required": False},
     {"FieldName": "record_hash",             "DataType": "TEXT", "MaxLength": 255, "Required": False},
     {"FieldName": "previous_record_hash",    "DataType": "TEXT", "MaxLength": 255, "Required": False},
     {"FieldName": "record_signature",        "DataType": "TEXT", "MaxLength": 512, "Required": False},

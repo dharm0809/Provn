@@ -65,12 +65,12 @@ function StatusStrip({ health, sessions, total, pctAllowed }) {
 
         <div className="status-cell">
           <div className="status-cell-label">Total Requests</div>
-          <div className="status-cell-value">{formatNumber(total)}</div>
+          <div className="status-cell-value">{total == null ? '—' : formatNumber(total)}</div>
         </div>
 
         <div className="status-cell value-green">
           <div className="status-cell-label">% Allowed</div>
-          <div className="status-cell-value">{pctAllowed}%</div>
+          <div className="status-cell-value">{pctAllowed == null ? '—' : `${pctAllowed}%`}</div>
         </div>
 
         <div className="status-cell mode">
@@ -339,9 +339,13 @@ export default function Overview({ navigate, health }) {
   if (loading) return <Skeleton />;
   if (error)   return <div className="error-card">Error: {error}</div>;
 
-  const allowed = attStats.allowed || 0;
-  const pctAllowedReq = attTotal > 0 ? (allowed / attTotal * 100).toFixed(1) : '100';
-  const totalRequests = counters.total > 0 ? Math.round(counters.total) : attTotal;
+  // Anchor both "total" and "% allowed" to the same source (the selected time
+  // window from the throughput buckets) so the header never disagrees with the
+  // chart underneath. Until the first throughput fetch lands we show a dash
+  // rather than briefly blending unbounded attempt totals with the windowed %.
+  const haveWindow = tpData.length > 0;
+  const totalRequests = haveWindow ? Math.round(counters.total) : null;
+  const pctAllowedDisplay = haveWindow ? counters.pct.toFixed(1) : null;
 
   return (
     <div className="fade-child">
@@ -350,7 +354,7 @@ export default function Overview({ navigate, health }) {
         health={health}
         sessions={sessions.length}
         total={totalRequests}
-        pctAllowed={counters.pct > 0 ? counters.pct.toFixed(1) : pctAllowedReq}
+        pctAllowed={pctAllowedDisplay}
       />
 
       <RangeBar range={range} setRange={setRange} />

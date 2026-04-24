@@ -41,7 +41,7 @@ const TILE_META = {
   model_capabilities:  { label: 'Model Capabilities',  blurb: 'Per-model feature flags'},
   control_plane:       { label: 'Control Plane',       blurb: 'Policy cache & sync'    },
   auth:                { label: 'Auth',                blurb: 'API-key / JWT / JWKS'   },
-  readiness:           { label: 'Readiness',           blurb: 'Phase-26 rollup'        },
+  readiness:           { label: 'Readiness',           blurb: 'Gateway self-check rollup' },
   streaming:           { label: 'Streaming',           blurb: 'SSE interruption tally' },
   intelligence_worker: { label: 'Intelligence Worker', blurb: 'Async training queue'   },
 };
