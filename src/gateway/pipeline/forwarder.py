@@ -255,6 +255,26 @@ def _http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=settings.provider_timeout)
 
 
+def _record_transport_failure(provider: str, exc: BaseException) -> None:
+    """Feed httpx TransportError/TimeoutException into the resource monitor.
+
+    httpx event_hooks only fire for request/response — there is no hook for
+    transport-level failures (ECONNREFUSED, ETIMEDOUT, DNS, TLS). Without this,
+    resource_monitor.last_error only reflects 5xx responses, not real outages.
+    """
+    try:
+        ctx = get_pipeline_context()
+        rm = getattr(ctx, "resource_monitor", None)
+        if rm is None:
+            return
+        detail = str(exc) or "transport failure"
+        rm.record_provider_result(
+            provider, success=False, error=f"{type(exc).__name__}: {detail}",
+        )
+    except Exception:
+        logger.debug("resource_monitor.record_provider_result failed", exc_info=True)
+
+
 async def forward(
     adapter: ProviderAdapter,
     call: ModelCall,
@@ -268,12 +288,17 @@ async def forward(
     t0 = time.perf_counter()
     client = _http_client()
     shared = client is get_pipeline_context().http_client
-    if shared:
-        upstream_resp = await client.send(upstream_req)
-    else:
-        async with client:
+    _provider = adapter.get_provider_name()
+    try:
+        if shared:
             upstream_resp = await client.send(upstream_req)
-    forward_duration.labels(provider=adapter.get_provider_name()).observe(time.perf_counter() - t0)
+        else:
+            async with client:
+                upstream_resp = await client.send(upstream_req)
+    except (httpx.TransportError, httpx.TimeoutException) as exc:
+        _record_transport_failure(_provider, exc)
+        raise
+    forward_duration.labels(provider=_provider).observe(time.perf_counter() - t0)
     model_response = adapter.parse_response(upstream_resp)
 
     # Retry once if Responses API summary was rejected (org not verified).
@@ -281,12 +306,16 @@ async def forward(
     # will omit the summary parameter.
     if model_response.content == "__RETRY_WITHOUT_SUMMARY__":
         upstream_req = await adapter.build_forward_request(call, request)
-        if shared:
-            upstream_resp = await client.send(upstream_req)
-        else:
-            upstream_resp = await httpx.AsyncClient(
-                timeout=httpx.Timeout(300),
-            ).send(upstream_req)
+        try:
+            if shared:
+                upstream_resp = await client.send(upstream_req)
+            else:
+                upstream_resp = await httpx.AsyncClient(
+                    timeout=httpx.Timeout(300),
+                ).send(upstream_req)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            _record_transport_failure(_provider, exc)
+            raise
         model_response = adapter.parse_response(upstream_resp)
 
     resp_headers = dict(upstream_resp.headers)
@@ -404,7 +433,16 @@ async def stream_with_tee(
         upstream_ctx = _owned_client.stream(**stream_kwargs)
 
     # Eagerly open the upstream connection to capture the status_code.
-    upstream = await upstream_ctx.__aenter__()
+    # Transport-level failures (ECONNREFUSED, ETIMEDOUT, DNS, TLS) raise here
+    # without ever materializing a response object — feed them to the
+    # resource monitor so last_error reflects real outages, then re-raise.
+    try:
+        upstream = await upstream_ctx.__aenter__()
+    except (httpx.TransportError, httpx.TimeoutException) as exc:
+        _record_transport_failure(adapter.get_provider_name(), exc)
+        if _owned_client is not None:
+            await _owned_client.aclose()
+        raise
     actual_status = upstream.status_code
 
     # Phase 24: when an OpenAI client is talking to an Anthropic upstream, wrap the

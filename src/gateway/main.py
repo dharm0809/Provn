@@ -1383,12 +1383,10 @@ async def on_startup() -> None:
 
         # Shared HTTP client for all modes. Without this, skip_governance would create
         # a new one-off httpx.AsyncClient per request (Finding 7).
-        # TODO: transport errors (httpx TransportError — timeouts, ECONNREFUSED)
-        # are NOT captured here. httpx event_hooks only fire for request/response;
-        # there is no hook for transport failures. To wire these into last_error,
-        # forwarder.py callers would need to catch TransportError and call
-        # ctx.resource_monitor.record_provider_result(..., success=False, error=...)
-        # directly. Deferred — no existing pattern to extend.
+        # Transport-level failures (httpx TransportError/TimeoutException) are
+        # captured at the call sites in forwarder.py via _record_transport_failure —
+        # httpx event_hooks only fire once a response materializes, so timeouts
+        # and ECONNREFUSED never reach _on_provider_response below.
         async def _on_provider_response(response):
             """Phase 23: Record provider results for resource monitor."""
             if ctx.resource_monitor:
