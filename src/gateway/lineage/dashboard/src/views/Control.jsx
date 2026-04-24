@@ -129,8 +129,8 @@ function ReadonlyBanner({ onUnlock }) {
 function UnlockModal({ onClose, onSubmit }) {
   const [val, setVal] = useState('');
   return (
-    <div className="cp-modal-wrap" onClick={onClose}>
-      <div className="cp-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="cp-modal-wrap">
+      <div className="cp-modal">
         <div className="cp-modal-eyebrow">◆ unlock writes</div>
         <h3>Enter control-plane API key</h3>
         <p>
