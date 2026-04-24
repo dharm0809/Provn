@@ -266,7 +266,7 @@ export default function Connections({ navigate }) {
             type="button"
             className="v4-banner-cta"
             onClick={() => {
-              try { sessionStorage.removeItem('cp_api_key'); } catch (_e) { /* empty */ }
+              try { localStorage.removeItem('cp_api_key'); sessionStorage.removeItem('cp_api_key'); } catch (_e) { /* empty */ }
               window.location.reload();
             }}
           >
