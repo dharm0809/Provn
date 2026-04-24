@@ -116,13 +116,14 @@ def build_walacor_delivery_tile(ctx: Any) -> dict:
     last_success_ts = snap.get("last_success_ts")
     time_since = snap.get("time_since_last_success_s")
 
-    pending = 0
+    pending: int | None = 0
     wal = getattr(ctx, "wal_writer", None)
     if wal is not None:
         try:
             pending = int(wal.pending_count())
         except Exception:
-            pending = 0
+            logger.warning("wal pending_count failed for connections tile", exc_info=True)
+            pending = None
 
     detail = {
         "success_rate_60s": success_rate,
@@ -141,7 +142,7 @@ def build_walacor_delivery_tile(ctx: Any) -> dict:
         if success_rate < 1.0
         else "delivery healthy"
     )
-    subline = f"{pending} pending writes"
+    subline = f"{pending} pending writes" if pending is not None else "pending writes n/a"
     return _tile(
         "walacor_delivery",
         status=status,
@@ -229,10 +230,7 @@ def build_model_capabilities_tile(ctx: Any) -> dict:
     models: list[dict] = []
     auto_disabled = 0
     if reg is not None:
-        try:
-            caps = reg.all_capabilities() or {}
-        except Exception as exc:
-            raise  # propagate so builder wrapper converts to unknown
+        caps = reg.all_capabilities() or {}
         for model_id, cap in (caps or {}).items():
             supports_tools = bool(cap.get("supports_tools")) if isinstance(cap, dict) else bool(cap)
             auto_flag = bool(cap.get("auto_disabled")) if isinstance(cap, dict) else False
@@ -425,7 +423,9 @@ async def build_readiness_tile(ctx: Any) -> dict:
     reader = getattr(ctx, "lineage_reader", None)
     if reader is not None:
         try:
-            res = reader.get_attempts(limit=200, disposition="readiness_degraded")
+            res = await asyncio.to_thread(
+                reader.get_attempts, limit=200, disposition="readiness_degraded",
+            )
             items = (res or {}).get("items") or []
             cutoff = datetime.now(timezone.utc).timestamp() - 86400.0
             for row in items:
@@ -495,28 +495,38 @@ def build_streaming_tile(ctx: Any) -> dict:
     )
 
 
-def build_intelligence_worker_tile(ctx: Any) -> dict:
+def _read_intelligence_db_counters(db_path: str) -> tuple[int, Any]:
+    """Synchronous SQLite read — runs in a worker thread so the event loop stays free."""
+    import sqlite3
+    verdict_log_rows = 0
+    last_training_at = None
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM onnx_verdicts").fetchone()
+            verdict_log_rows = int(row[0]) if row else 0
+        except Exception:
+            verdict_log_rows = 0
+        try:
+            row = conn.execute("SELECT MAX(created_at) FROM training_snapshots").fetchone()
+            last_training_at = row[0] if row and row[0] else None
+        except Exception:
+            last_training_at = None
+    finally:
+        conn.close()
+    return verdict_log_rows, last_training_at
+
+
+async def build_intelligence_worker_tile(ctx: Any) -> dict:
     worker = getattr(ctx, "intelligence_worker", None)
     last_training_at = None
     verdict_log_rows = 0
     db = getattr(ctx, "intelligence_db", None)
     if db is not None:
         try:
-            import sqlite3
-            conn = sqlite3.connect(f"file:{db.path}?mode=ro", uri=True)
-            try:
-                try:
-                    row = conn.execute("SELECT COUNT(*) FROM onnx_verdicts").fetchone()
-                    verdict_log_rows = int(row[0]) if row else 0
-                except Exception:
-                    verdict_log_rows = 0
-                try:
-                    row = conn.execute("SELECT MAX(created_at) FROM training_snapshots").fetchone()
-                    last_training_at = row[0] if row and row[0] else None
-                except Exception:
-                    last_training_at = None
-            finally:
-                conn.close()
+            verdict_log_rows, last_training_at = await asyncio.to_thread(
+                _read_intelligence_db_counters, db.path,
+            )
         except Exception:
             pass
 
@@ -609,7 +619,7 @@ def _evt(ts: float, subsystem: str, severity: str, message: str, **attrs: Any) -
     }
 
 
-def build_events(ctx: Any, *, cap: int = 50) -> list[dict]:
+async def build_events(ctx: Any, *, cap: int = 50) -> list[dict]:
     """Merge in-memory deques across subsystems. Sort newest-first, cap 50."""
     events: list[tuple[float, dict]] = []
 
@@ -712,21 +722,25 @@ def build_events(ctx: Any, *, cap: int = 50) -> list[dict]:
         except Exception:
             pass
 
-    # ResourceMonitor provider last errors within 60s — best-effort
+    # ResourceMonitor provider last errors within 60s
     rm = getattr(ctx, "resource_monitor", None)
     if rm is not None:
         try:
-            # The monitor keeps plain str entries keyed by provider;
-            # we don't have a timestamp for them so surface at "now".
             last = getattr(rm, "_last_error", {}) or {}
-            for provider, err in last.items():
-                if not err:
+            for provider, entry in last.items():
+                if not entry:
                     continue
-                # Emit at an approximate "now" — OK for the stream ordering.
+                # Tolerate legacy plain-string entries (pre-timestamp fix).
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    ts, err = entry
+                else:
+                    ts, err = now, entry
+                if not err or now - ts > 60.0:
+                    continue
                 events.append((
-                    now,
+                    ts,
                     _evt(
-                        now,
+                        ts,
                         "providers",
                         "amber",
                         f"{provider} last error: {err}",
@@ -741,7 +755,9 @@ def build_events(ctx: Any, *, cap: int = 50) -> list[dict]:
     reader = getattr(ctx, "lineage_reader", None)
     if reader is not None:
         try:
-            res = reader.get_attempts(limit=20, disposition="readiness_degraded")
+            res = await asyncio.to_thread(
+                reader.get_attempts, limit=20, disposition="readiness_degraded",
+            )
             for row in (res or {}).get("items") or []:
                 ts_epoch = _ts_to_epoch(row.get("timestamp")) or now
                 events.append((
@@ -784,14 +800,18 @@ _SYNC_BUILDERS: dict[str, Any] = {
     "control_plane": build_control_plane_tile,
     "auth": build_auth_tile,
     "streaming": build_streaming_tile,
+}
+
+_ASYNC_BUILDERS: dict[str, Any] = {
+    "readiness": build_readiness_tile,
     "intelligence_worker": build_intelligence_worker_tile,
 }
 
 
 async def _safe_build(tile_id: str, ctx: Any) -> dict:
     try:
-        if tile_id == "readiness":
-            return await build_readiness_tile(ctx)
+        if tile_id in _ASYNC_BUILDERS:
+            return await _ASYNC_BUILDERS[tile_id](ctx)
         fn = _SYNC_BUILDERS[tile_id]
         return fn(ctx)
     except Exception as exc:
@@ -806,7 +826,7 @@ async def build_snapshot(ctx: Any) -> dict:
         tiles.append(tile)
 
     try:
-        events = build_events(ctx)
+        events = await build_events(ctx)
     except Exception as exc:
         logger.warning("connections: events merger failed: %s", exc)
         events = []

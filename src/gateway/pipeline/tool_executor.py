@@ -31,6 +31,7 @@ from gateway.mcp.client import ToolResult as MCPToolResult
 from gateway.metrics.prometheus import tool_calls_total, tool_loop_iterations
 from gateway.pipeline.forwarder import forward, stream_with_tee
 from gateway.pipeline.response_evaluator import analyze_text
+from gateway.util.errors import classify_exception
 from gateway.util.time import iso8601_utc as _iso8601
 import gateway.util.json_utils as json
 
@@ -126,7 +127,7 @@ def strip_tools_from_call(call: ModelCall) -> ModelCall:
         new_body = json.dumps_bytes(body)
         return dataclasses.replace(call, raw_body=new_body)
     except Exception as exc:
-        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
+        record_tool_exception(tool="unknown", error=classify_exception(exc))
         logger.warning(
             "strip_tools_from_call: failed for model=%s — sending original",
             call.model_id, exc_info=True,
@@ -149,7 +150,7 @@ def _inject_tools_into_call(call: ModelCall, tool_definitions: list[dict]) -> Mo
                 is_streaming=call.is_streaming, metadata=call.metadata,
             )
     except Exception as exc:
-        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
+        record_tool_exception(tool="unknown", error=classify_exception(exc))
         logger.warning(
             "Failed to inject tool definitions: model=%s", call.model_id,
             exc_info=True,
@@ -164,7 +165,7 @@ def _force_non_streaming(call: ModelCall) -> ModelCall:
         body["stream"] = False
         return dataclasses.replace(call, is_streaming=False, raw_body=json.dumps_bytes(body))
     except Exception as exc:
-        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
+        record_tool_exception(tool="unknown", error=classify_exception(exc))
         logger.warning("Failed to override stream=false for tool loop", exc_info=True)
         return call
 
@@ -176,7 +177,7 @@ def _restore_streaming(call: ModelCall) -> ModelCall:
         body["stream"] = True
         return dataclasses.replace(call, is_streaming=True, raw_body=json.dumps_bytes(body))
     except Exception as exc:
-        record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
+        record_tool_exception(tool="unknown", error=classify_exception(exc))
         logger.warning("Failed to restore streaming for final answer", exc_info=True)
         return call
 
@@ -477,7 +478,7 @@ async def _run_active_tool_loop(
                 stream_buffer=buf,
             )
         except Exception as exc:
-            record_tool_exception(tool="unknown", error=str(exc) or type(exc).__name__)
+            record_tool_exception(tool="unknown", error=classify_exception(exc))
             logger.warning("Failed to stream final tool answer — using non-streaming response", exc_info=True)
 
     return ToolExecResult(
@@ -541,7 +542,7 @@ async def execute_tools(
                 ctx, settings, provider, original_streaming,
             )
         except Exception as exc:
-            record_tool_exception(tool="tool_loop", error=str(exc) or type(exc).__name__)
+            record_tool_exception(tool="tool_loop", error=classify_exception(exc))
             logger.error("Active tool loop failed — falling back to original response", exc_info=True)
             return ToolExecResult(
                 call=call, model_response=model_response,
@@ -575,7 +576,7 @@ async def execute_tools(
                 synthetic_stream=True,
             )
         except Exception as exc:
-            record_tool_exception(tool="stream_synthesize", error=str(exc) or type(exc).__name__)
+            record_tool_exception(tool="stream_synthesize", error=classify_exception(exc))
             logger.warning(
                 "Failed to synthesize streaming response — returning non-streaming",
                 exc_info=True,
@@ -691,7 +692,7 @@ async def write_tool_events(
         except Exception as _val_err:
             record_tool_exception(
                 tool=getattr(t, "tool_name", "unknown") or "unknown",
-                error=str(_val_err) or type(_val_err).__name__,
+                error=classify_exception(_val_err),
             )
             logger.error("Tool event schema validation failed: %s", _val_err)
         if ctx.storage:

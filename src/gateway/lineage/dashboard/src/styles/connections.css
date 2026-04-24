@@ -798,3 +798,37 @@ html[data-theme="light"] .cx-overlay { background: rgba(22, 22, 30, 0.35); }
 }
 
 /* (amber board styles omitted — not used in current graft) */
+
+/* Fatal-state cards — shown when polling stops (auth lost, feature off) */
+.cx-fatal-card {
+  margin: 20px 0 12px;
+  padding: 22px 26px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+}
+.cx-fatal-auth { border-left-color: var(--red); }
+.cx-fatal-disabled { border-left-color: var(--amber); }
+.cx-fatal-title {
+  font: 600 12px/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.cx-fatal-body {
+  margin: 0;
+  font: 400 13px/1.55 var(--font);
+  color: var(--text-secondary);
+  max-width: 62ch;
+}
+.cx-fatal-body code {
+  font: 500 12px/1 var(--mono);
+  padding: 1px 5px;
+  background: var(--bg-inset, var(--bg-elevated));
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+}

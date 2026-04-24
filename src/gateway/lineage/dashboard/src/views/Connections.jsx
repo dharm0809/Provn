@@ -48,162 +48,6 @@ const TILE_META = {
 
 /* ── Mock scenarios removed (backend live at /v1/connections) ────── */
 
-/* eslint-disable no-unused-vars */
-const _UNUSED_MOCKS = () => {
-  const now = Date.now();
-  const iso = (sec) => new Date(now - sec * 1000).toISOString();
-
-  const tile = (id, status, headline, subline, detail, last_change = 300) => ({
-    id, status, headline, subline,
-    last_change_ts: last_change == null ? null : iso(last_change),
-    detail,
-  });
-
-  const happy = {
-    generated_at: iso(0),
-    ttl_seconds: 3,
-    overall_status: 'green',
-    tiles: [
-      tile('providers', 'green', '3 providers · 0.4% err', 'openai · anthropic · ollama', {
-        providers: {
-          openai:    { error_rate_60s: 0.004, cooldown_until: null, last_error: null },
-          anthropic: { error_rate_60s: 0.002, cooldown_until: null, last_error: null },
-          ollama:    { error_rate_60s: 0.000, cooldown_until: null, last_error: null },
-        },
-      }, 1800),
-      tile('walacor_delivery', 'green', '99.8% success · 0 pending', 'last success 1.2s ago', {
-        success_rate_60s: 0.998, pending_writes: 0,
-        last_failure: null,
-        last_success_ts: iso(1.2),
-        time_since_last_success_s: 1.2,
-      }, 3600),
-      tile('analyzers', 'green', '4 enabled · 0 fail-opens', 'llama_guard · presidio_pii · safety · prompt_guard', {
-        analyzers: {
-          llama_guard:       { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-          presidio_pii:      { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-          safety_classifier: { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-          prompt_guard:      { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-        },
-      }, 7200),
-      tile('tool_loop', 'green', '42 loops · 0 exceptions', 'failure rate 0.00%', {
-        exceptions_60s: 0, last_exception: null, loops_60s: 42, failure_rate_60s: 0.00,
-      }, 600),
-      tile('model_capabilities', 'green', '8 models · 0 auto-disabled', 'all capabilities intact', {
-        auto_disabled_count: 0,
-        models: [
-          { model_id: 'gpt-4o',                supports_tools: true,  auto_disabled: false, since: null },
-          { model_id: 'claude-3-5-sonnet',     supports_tools: true,  auto_disabled: false, since: null },
-          { model_id: 'llama-3.1-70b',         supports_tools: true,  auto_disabled: false, since: null },
-          { model_id: 'mistral-large',         supports_tools: true,  auto_disabled: false, since: null },
-        ],
-      }, null),
-      tile('control_plane', 'green', 'v42 · synced 7s ago', 'embedded · 3 policies · 4 attestations', {
-        mode: 'embedded',
-        policy_cache: { version: 'v42', last_sync_ts: iso(7), age_s: 7, stale: false },
-        sync_task_alive: true, attestations_count: 4, policies_count: 3,
-      }, 45),
-      tile('auth', 'green', 'JWT + API key · JWKS fresh', 'bootstrap key stable', {
-        auth_mode: 'both', jwt_configured: true,
-        jwks_last_fetch_ts: iso(90), jwks_last_error: null, bootstrap_key_stable: true,
-      }, 86400),
-      tile('readiness', 'green', 'READY · 0 reds · 0 ambers', '2 degraded rows in last 24h', {
-        rollup: 'ready', reds: [], ambers: [], degraded_rows_24h: 2,
-      }, 1200),
-      tile('streaming', 'green', '18 streams · 0 interruptions', 'interruption rate 0.00%', {
-        interruptions_60s: 0, last_interruption: null, streams_60s: 18, interruption_rate_60s: 0.00,
-      }, 900),
-      tile('intelligence_worker', 'green', 'running · 3 queued', 'oldest job 1.2s · 18,432 rows', {
-        running: true, queue_depth: 3, oldest_job_age_s: 1.2, last_error: null,
-        last_training_at: iso(3600), verdict_log_rows: 18432,
-      }, 240),
-    ],
-    events: [],
-  };
-
-  /* ── amber scenario: a few fail-opens, JWKS stumble, auto-disabled model ── */
-  const amber = {
-    ...happy,
-    generated_at: iso(0),
-    overall_status: 'amber',
-    tiles: happy.tiles.map((t) => {
-      if (t.id === 'analyzers') {
-        return tile('analyzers', 'amber', '4 enabled · 2 fail-opens', 'presidio_pii opened 2× in last 60s', {
-          analyzers: {
-            llama_guard:       { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-            presidio_pii:      { enabled: true, fail_opens_60s: 2, last_fail_open: { ts: iso(38), reason: 'presidio worker timeout' } },
-            safety_classifier: { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-            prompt_guard:      { enabled: true, fail_opens_60s: 0, last_fail_open: null },
-          },
-        }, 38);
-      }
-      if (t.id === 'model_capabilities') {
-        return tile('model_capabilities', 'amber', '8 models · 1 auto-disabled', 'llama-3.1-70b: tools disabled', {
-          auto_disabled_count: 1,
-          models: [
-            { model_id: 'gpt-4o',                supports_tools: true,  auto_disabled: false, since: null },
-            { model_id: 'claude-3-5-sonnet',     supports_tools: true,  auto_disabled: false, since: null },
-            { model_id: 'llama-3.1-70b',         supports_tools: false, auto_disabled: true,  since: iso(1800) },
-            { model_id: 'mistral-large',         supports_tools: true,  auto_disabled: false, since: null },
-          ],
-        }, 1800);
-      }
-      if (t.id === 'auth') {
-        return tile('auth', 'amber', 'JWT + API key · bootstrap drift', 'bootstrap key unstable — rotating', {
-          auth_mode: 'both', jwt_configured: true,
-          jwks_last_fetch_ts: iso(300), jwks_last_error: null, bootstrap_key_stable: false,
-        }, 120);
-      }
-      return t;
-    }),
-    events: [
-      { ts: iso(12),  subsystem: 'analyzers',          severity: 'amber', message: 'presidio_pii fail-open · worker timeout after 8000ms', session_id: 'sess_8f3c21a4', execution_id: 'exec_9d12...', request_id: 'req_a1b2', attributes: { analyzer: 'presidio_pii' } },
-      { ts: iso(38),  subsystem: 'analyzers',          severity: 'amber', message: 'presidio_pii fail-open · connection refused',          session_id: 'sess_41ec9b11', execution_id: null, request_id: 'req_c3d4', attributes: { analyzer: 'presidio_pii' } },
-      { ts: iso(120), subsystem: 'auth',               severity: 'amber', message: 'bootstrap key rotated — stability flag cleared',       session_id: null, execution_id: null, request_id: null, attributes: { probe: 'SEC-01' } },
-      { ts: iso(1800),subsystem: 'model_capabilities', severity: 'info',  message: 'llama-3.1-70b auto-disabled tools after 3 tool-call failures', session_id: null, execution_id: null, request_id: null, attributes: { model: 'llama-3.1-70b' } },
-      { ts: iso(2100),subsystem: 'readiness',          severity: 'info',  message: 'SEC-01 transient amber cleared',                       session_id: null, execution_id: null, request_id: null, attributes: { check_id: 'SEC-01' } },
-    ],
-  };
-
-  /* ── red scenario: walacor delivery outage plus analyzer cascade ── */
-  const red = {
-    ...amber,
-    generated_at: iso(0),
-    overall_status: 'red',
-    tiles: amber.tiles.map((t) => {
-      if (t.id === 'walacor_delivery') {
-        return tile('walacor_delivery', 'red', 'WALACOR UNREACHABLE', '18 pending · last success 3m 14s ago', {
-          success_rate_60s: 0.12, pending_writes: 18,
-          last_failure: { ts: iso(4), op: 'PUT /envelope', detail: 'connect ETIMEDOUT 10.0.4.12:7443' },
-          last_success_ts: iso(194),
-          time_since_last_success_s: 194,
-        }, 194);
-      }
-      if (t.id === 'tool_loop') {
-        return tile('tool_loop', 'amber', '18 loops · 2 exceptions', 'last: python_exec · AttributeError', {
-          exceptions_60s: 2,
-          last_exception: { ts: iso(22), tool: 'python_exec', error: "AttributeError: 'NoneType' object has no attribute 'context'" },
-          loops_60s: 18, failure_rate_60s: 0.11,
-        }, 22);
-      }
-      return t;
-    }),
-    events: [
-      { ts: iso(4),   subsystem: 'walacor_delivery', severity: 'red',   message: 'envelope PUT failed · connect ETIMEDOUT 10.0.4.12:7443',             session_id: 'sess_b7d441c0', execution_id: 'exec_12cd...', request_id: 'req_e5f6', attributes: { op: 'PUT /envelope' } },
-      { ts: iso(11),  subsystem: 'walacor_delivery', severity: 'red',   message: 'envelope PUT failed · connect ETIMEDOUT 10.0.4.12:7443',             session_id: 'sess_a2f391be', execution_id: 'exec_33ef...', request_id: 'req_g7h8', attributes: { op: 'PUT /envelope' } },
-      { ts: iso(22),  subsystem: 'tool_loop',        severity: 'amber', message: "python_exec exception swallowed · AttributeError: 'NoneType'…",     session_id: 'sess_c091e2fa', execution_id: 'exec_77ab...', request_id: 'req_i9j0', attributes: { tool: 'python_exec' } },
-      { ts: iso(38),  subsystem: 'analyzers',        severity: 'amber', message: 'presidio_pii fail-open · connection refused',                        session_id: 'sess_41ec9b11', execution_id: null, request_id: 'req_c3d4', attributes: { analyzer: 'presidio_pii' } },
-      { ts: iso(44),  subsystem: 'walacor_delivery', severity: 'red',   message: 'envelope PUT failed · connect ETIMEDOUT 10.0.4.12:7443',             session_id: 'sess_3f8cd92e', execution_id: 'exec_ab12...', request_id: null, attributes: { op: 'PUT /envelope' } },
-      { ts: iso(62),  subsystem: 'walacor_delivery', severity: 'amber', message: 'pending queue crossed threshold · 12 pending writes',                session_id: null, execution_id: null, request_id: null, attributes: { pending_writes: 12 } },
-      { ts: iso(120), subsystem: 'auth',             severity: 'amber', message: 'bootstrap key rotated — stability flag cleared',                      session_id: null, execution_id: null, request_id: null, attributes: { probe: 'SEC-01' } },
-      { ts: iso(194), subsystem: 'walacor_delivery', severity: 'info',  message: 'last successful envelope · kafka topic lag back to 0',                session_id: 'sess_last_good', execution_id: 'exec_last...', request_id: null, attributes: { op: 'PUT /envelope' } },
-      { ts: iso(1800),subsystem: 'model_capabilities', severity: 'info', message: 'llama-3.1-70b auto-disabled tools after 3 tool-call failures',       session_id: null, execution_id: null, request_id: null, attributes: { model: 'llama-3.1-70b' } },
-    ],
-  };
-
-  return { happy, amber, red };
-};
-void _UNUSED_MOCKS;
-/* eslint-enable no-unused-vars */
 
 /* ── helpers ─────────────────────────────────────────────────────── */
 
@@ -269,23 +113,48 @@ export default function Connections({ navigate }) {
   const [snapshot, setSnapshot] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
+  const [errorStatus, setErrorStatus] = useState(null); // HTTP status if known
   const [openTileId, setOpenTileId] = useState(null);
   const [nowTick, setNowTick] = useState(0); // forces "N ago" recomputation
 
-  /* Real backend poll — 3s cadence matches /v1/connections TTL. */
+  /* Real backend poll — 3s cadence. Stops on auth/disabled; exponential
+     backoff (3s→30s) on network/5xx so a revoked key or backend outage
+     doesn't melt the IP rate limiter. */
   useEffect(() => {
     let cancelled = false;
+    let timer = null;
+    let delay = POLL_MS;
+    const MAX_DELAY = 30000;
+
     async function poll() {
       try {
         const data = await getConnections();
-        if (!cancelled) { setSnapshot(data); setError(null); setLoading(false); }
+        if (cancelled) return;
+        setSnapshot(data);
+        setError(null);
+        setErrorStatus(null);
+        setLoading(false);
+        delay = POLL_MS; // reset backoff on success
+        timer = setTimeout(poll, delay);
       } catch (e) {
-        if (!cancelled) { setError(e?.message || 'probe failed'); setLoading(false); }
+        if (cancelled) return;
+        const status = e?.status ?? null;
+        setError(e?.message || 'probe failed');
+        setErrorStatus(status);
+        setSnapshot(null); // don't show stale-green tiles while errored
+        setLoading(false);
+        // Terminal states: stop polling. Operator acts via CTA.
+        if (status === 401 || status === 403 || status === 503) return;
+        // Transient — back off.
+        delay = Math.min(delay * 2, MAX_DELAY);
+        timer = setTimeout(poll, delay);
       }
     }
     poll();
-    const id = setInterval(poll, POLL_MS);
-    return () => { cancelled = true; clearInterval(id); };
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   /* Wall-clock tick so "N ago" labels refresh between polls. */
@@ -383,7 +252,39 @@ export default function Connections({ navigate }) {
         snapshot={snapshot}
         loading={loading}
         error={error}
+        errorStatus={errorStatus}
       />
+
+      {(errorStatus === 401 || errorStatus === 403) && (
+        <div className="cx-fatal-card cx-fatal-auth">
+          <div className="cx-fatal-title">◆ Authentication lost</div>
+          <p className="cx-fatal-body">
+            Your API key was rejected. Tiles are cleared to avoid showing stale
+            green state. Poll has been stopped.
+          </p>
+          <button
+            type="button"
+            className="v4-banner-cta"
+            onClick={() => {
+              try { sessionStorage.removeItem('cp_api_key'); } catch (_e) { /* empty */ }
+              window.location.reload();
+            }}
+          >
+            Re-authenticate →
+          </button>
+        </div>
+      )}
+
+      {errorStatus === 503 && (
+        <div className="cx-fatal-card cx-fatal-disabled">
+          <div className="cx-fatal-title">◆ Feature disabled</div>
+          <p className="cx-fatal-body">
+            Connections is turned off on this gateway
+            (<code>WALACOR_CONNECTIONS_ENABLED=false</code>). Poll has been
+            stopped. Restart with the flag enabled to see live state.
+          </p>
+        </div>
+      )}
 
       {snapshot && snapshot.overall_status !== 'green' && (
         <div className="v4-banner-stats-standalone">
@@ -495,7 +396,7 @@ export default function Connections({ navigate }) {
 
 /* ── Intro ───────────────────────────────────────────────────────── */
 
-function Intro({ snapshot, loading, error }) {
+function Intro({ snapshot, loading, error, errorStatus }) {
   const overall = snapshot?.overall_status || 'unknown';
   const pillClass = statusClass(overall).replace('is-', '');
   const generated = snapshot?.generated_at;
@@ -529,7 +430,11 @@ function Intro({ snapshot, loading, error }) {
           <span className="cx-rollup-meta">
             <span className="cx-tick" />
             {error
-              ? 'snapshot failed'
+              ? (errorStatus === 401 || errorStatus === 403
+                  ? 'unauthorized'
+                  : errorStatus === 503
+                    ? 'feature disabled'
+                    : 'snapshot failed')
               : loading
                 ? 'loading…'
                 : `snapshot ${ago(generated)}`}
