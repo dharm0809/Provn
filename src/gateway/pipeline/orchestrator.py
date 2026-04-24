@@ -1685,6 +1685,20 @@ async def _build_and_write_record(
     # Expose governance metadata for response headers (Phase 23)
     request.state.walacor_chain_seq = record.get("sequence_number")
     await _write_tool_events(params.tool_interactions, record["execution_id"], call, params.tool_strategy, ctx, settings)
+    # Phase 24: Session-scoped Walacor envelope rollup (additional dual-write).
+    # Fail-soft: any exception here must NOT surface to the caller.
+    if ctx.session_envelope_writer and session_id and record.get("record_hash"):
+        try:
+            identity = getattr(request.state, "caller_identity", None)
+            tool_events_count = len(params.tool_interactions) if params.tool_interactions else 0
+            await ctx.session_envelope_writer.on_turn_complete(
+                session_id=session_id,
+                execution_record=record,
+                tool_events_count=tool_events_count,
+                identity=identity,
+            )
+        except Exception:
+            logger.warning("Session envelope write failed (non-fatal)", exc_info=True)
     if session_id and ctx.session_chain and record_hash_val is not None:
         try:
             await ctx.session_chain.update(session_id, record["sequence_number"], record_hash_val)

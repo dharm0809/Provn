@@ -82,6 +82,7 @@ class WalacorClient:
         executions_etid: int = 9000001,
         attempts_etid: int = 9000002,
         tool_events_etid: int = 9000003,
+        session_envelope_etid: int = 9000014,
     ) -> None:
         self._server = server.rstrip("/")
         self._username = username
@@ -89,6 +90,7 @@ class WalacorClient:
         self._executions_etid = executions_etid
         self._attempts_etid = attempts_etid
         self._tool_events_etid = tool_events_etid
+        self._session_envelope_etid = session_envelope_etid
         self._token: str | None = None
         self._http: httpx.AsyncClient | None = None
         self._auth_lock: asyncio.Lock = asyncio.Lock()
@@ -105,8 +107,11 @@ class WalacorClient:
         )
         await self._authenticate()
         self._refresh_task = asyncio.create_task(self._refresh_loop())
-        logger.info("WalacorClient ready server=%s executions_etid=%d attempts_etid=%d tool_events_etid=%d",
-                    self._server, self._executions_etid, self._attempts_etid, self._tool_events_etid)
+        logger.info(
+            "WalacorClient ready server=%s executions_etid=%d attempts_etid=%d tool_events_etid=%d session_envelope_etid=%d",
+            self._server, self._executions_etid, self._attempts_etid,
+            self._tool_events_etid, self._session_envelope_etid,
+        )
 
     async def close(self) -> None:
         """Close the underlying HTTP client and stop the refresh task."""
@@ -286,6 +291,19 @@ class WalacorClient:
         "is_error", "content_analysis", "metadata_json",
     })
 
+    # Phase 24: fields defined in the walacor_gw_sessions schema (ETId 9000014).
+    # Submissions are append-only — each flush creates a new Walacor envelope.
+    _SESSION_ENVELOPE_SCHEMA_FIELDS = frozenset({
+        "session_id", "tenant_id", "gateway_id",
+        "created_at", "updated_at", "last_turn_at",
+        "turn_count", "status",
+        "participant_user_id", "participant_email", "participant_team",
+        "participant_roles", "participant_source",
+        "turns_json", "running_totals_json",
+        "latest_record_hash", "first_record_hash", "latest_sequence_number",
+        "parent_session_envelope_id", "metadata_json",
+    })
+
     async def write_tool_event(self, record: dict[str, Any]) -> None:
         """Persist one tool event record to Walacor (ETId=walacor_tool_events_etid).
 
@@ -311,3 +329,39 @@ class WalacorClient:
                 "Walacor write_tool_event FAILED event_id=%s: %s",
                 data.get("event_id", "?"), e,
             )
+
+    async def write_session_envelope(self, record: dict[str, Any]) -> None:
+        """Persist one session-scoped envelope record to Walacor (ETId=session_envelope_etid).
+
+        Phase 24 append-only rollup (ETId 9000014). Every flush creates a new
+        Walacor envelope — no UID dedup at the backend. Mirrors the
+        ``write_execution`` pattern: strips fields outside the schema, serialises
+        dict/list fields that aren't already JSON strings, raises on submission
+        failure so the caller (SessionEnvelopeWriter) can log and swallow.
+        """
+        data = dict(record)
+        # Serialise any dict/list fields defensively; state.to_walacor_record
+        # already dumps JSON-stringified collections, but keep this guard.
+        for key in (
+            "participant_roles",
+            "turns_json",
+            "running_totals_json",
+            "metadata_json",
+        ):
+            if key in data and isinstance(data[key], (dict, list)):
+                data[key] = json.dumps(data[key], default=str)
+        data = {k: v for k, v in data.items()
+                if v is not None and k in self._SESSION_ENVELOPE_SCHEMA_FIELDS}
+        sid = data.get("session_id", "?")
+        try:
+            await self._submit(self._session_envelope_etid, [data])
+            logger.debug(
+                "Walacor write_session_envelope session_id=%s turn_count=%s",
+                sid, data.get("turn_count"),
+            )
+        except Exception as e:
+            logger.error(
+                "Walacor write_session_envelope failed session_id=%s: %s",
+                sid, e,
+            )
+            raise
