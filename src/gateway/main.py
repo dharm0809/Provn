@@ -24,6 +24,7 @@ from gateway.pipeline.context import get_pipeline_context
 from gateway.health import health_response, metrics_response
 from gateway.auth.api_key import require_api_key_if_configured
 from gateway.readiness.api import readiness_handler
+from gateway.connections.api import connections_handler
 from gateway.middleware.completeness import completeness_middleware
 from gateway.middleware.ip_rate_limiter import IPRateLimiter
 from gateway.lineage.api import (
@@ -1988,6 +1989,7 @@ def create_app() -> Starlette:
         Route("/v1/compliance/export", compliance_export, methods=["GET"]),
         # Readiness self-check
         Route("/v1/readiness", readiness_handler, methods=["GET"]),
+        Route("/v1/connections", connections_handler, methods=["GET"]),
         # Attachment tracking webhook
         Route("/v1/attachments/notify", _attachment_notify, methods=["POST"]),
         # Proxy routes

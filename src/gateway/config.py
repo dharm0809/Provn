@@ -609,6 +609,7 @@ class Settings(BaseSettings):
 
     # ── Phase 26: Readiness self-check ───────────────────────────────────────
     readiness_enabled: bool = Field(default=True, description="Enable GET /v1/readiness endpoint")
+    connections_enabled: bool = Field(default=True, description="Enable GET /v1/connections endpoint")
     lineage_auth_required: bool = Field(default=True, description="Require API key on /v1/lineage/* endpoints")
 
     @property
