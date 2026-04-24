@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from starlette.requests import Request
@@ -22,7 +23,10 @@ async def lineage_cost_summary(request: Request) -> JSONResponse:
     group_by = request.query_params.get("group_by", "model")
 
     try:
+        # Local reader is sync, Walacor reader is async — handle both.
         data = ctx.lineage_reader.get_cost_summary(range_key, group_by)
+        if asyncio.iscoroutine(data):
+            data = await data
         return JSONResponse(data)
     except Exception as e:
         logger.error("lineage_cost_summary error: %s", e, exc_info=True)
