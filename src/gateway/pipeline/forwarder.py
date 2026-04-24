@@ -436,6 +436,10 @@ async def stream_with_tee(
                     accumulated_text = accumulated_text[-4096:]
                 if check_stream_safety(accumulated_text):
                     logger.warning("S4 safety abort triggered mid-stream")
+                    record_stream_interruption(
+                        provider=adapter.get_provider_name() if adapter else "unknown",
+                        detail="content_safety_abort",
+                    )
                     yield b'event: error\ndata: {"error": "content_safety", "message": "Response blocked by safety filter (S4)"}\n\n'
                     return
                 # Windowed PII check — warn only (can't un-send streamed chunks)
@@ -480,10 +484,14 @@ async def stream_with_tee(
                 try:
                     await background_task()
                 except Exception as bg_exc:
-                    record_stream_interruption(
-                        provider=adapter.get_provider_name(),
-                        detail=str(bg_exc) or type(bg_exc).__name__,
-                    )
+                    # Only count as a stream interruption if the stream itself was
+                    # interrupted. Post-success audit-write failures are persistence
+                    # errors, not wire-level interruptions.
+                    if _exc is not None:
+                        record_stream_interruption(
+                            provider=adapter.get_provider_name(),
+                            detail=str(bg_exc) or type(bg_exc).__name__,
+                        )
                     logger.error(
                         "Stream background task failed: provider=%s",
                         adapter.get_provider_name(), exc_info=True,
