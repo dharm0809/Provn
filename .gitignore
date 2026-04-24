@@ -77,6 +77,8 @@ screenshots/
 *.png
 *.pdf
 *.excalidraw.md
+# Keep dashboard branding assets (bundled by Vite at build time)
+!src/gateway/lineage/dashboard/src/assets/**/*.png
 
 # --- Generated gRPC stubs (regenerate with: cd proto && make python) ---
 *_pb2.py
