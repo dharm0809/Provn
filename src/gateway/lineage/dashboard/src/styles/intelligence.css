@@ -169,6 +169,32 @@
   box-shadow: 0 0 6px var(--green);
   animation: pulse-dot 1.6s ease-in-out infinite;
 }
+.prod-status-missing {
+  color: var(--red, #f87171);
+  border-color: rgba(248,113,113,0.4);
+  background: rgba(248,113,113,0.08);
+}
+.prod-status-missing .prod-status-dot {
+  background: var(--red, #f87171);
+  box-shadow: 0 0 6px var(--red, #f87171);
+}
+.prod-status-unreadable {
+  color: var(--amber, #fbbf24);
+  border-color: rgba(251,191,36,0.4);
+  background: rgba(251,191,36,0.08);
+}
+.prod-status-unreadable .prod-status-dot {
+  background: var(--amber, #fbbf24);
+  box-shadow: 0 0 6px var(--amber, #fbbf24);
+}
+.prod-status-error {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--red, #f87171);
+  padding: 6px 14px;
+  background: rgba(248,113,113,0.06);
+  border-bottom: 1px solid rgba(248,113,113,0.2);
+}
 
 .prod-hero {
   display: flex; align-items: center; justify-content: space-between;

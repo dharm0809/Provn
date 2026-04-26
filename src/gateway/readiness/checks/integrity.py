@@ -453,6 +453,70 @@ class _Int07AttemptCompleteness:
         )
 
 
+class _Int08ProductionModelsPresent:
+    """All registered production models have a readable .onnx file on disk.
+
+    A registered name with a missing or unreadable file means the next
+    request silently falls back to deterministic / heuristic classification.
+    Severity = `int` (local invariant we can assert).
+    """
+
+    id = "INT-08"
+    name = "Production models present"
+    category = Category.integrity
+    severity = Severity.int
+
+    async def run(self, ctx: "PipelineContext") -> CheckResult:
+        t0 = time.monotonic()
+        registry = getattr(ctx, "model_registry", None)
+        if registry is None:
+            return CheckResult(
+                status="amber",
+                detail="Intelligence layer disabled — no model registry",
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
+            )
+        try:
+            names = registry.list_production_models()
+        except Exception as exc:
+            return CheckResult(
+                status="amber",
+                detail=f"registry.list_production_models failed: {exc}",
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
+            )
+        if not names:
+            return CheckResult(
+                status="green",
+                detail="No production models registered",
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
+            )
+        unhealthy: list[dict] = []
+        for name in names:
+            path = registry.production_path(name)
+            try:
+                stat = path.stat()
+                if stat.st_size == 0:
+                    unhealthy.append({"model": name, "status": "empty", "path": str(path)})
+            except FileNotFoundError:
+                unhealthy.append({"model": name, "status": "missing", "path": str(path)})
+            except OSError as exc:
+                unhealthy.append({"model": name, "status": "unreadable", "path": str(path), "error": str(exc)})
+        elapsed = int((time.monotonic() - t0) * 1000)
+        if not unhealthy:
+            return CheckResult(
+                status="green",
+                detail=f"{len(names)}/{len(names)} production models readable",
+                evidence={"sampled": len(names)},
+                elapsed_ms=elapsed,
+            )
+        return CheckResult(
+            status="red",
+            detail=f"{len(unhealthy)}/{len(names)} production model files unhealthy",
+            remediation="Restore the missing .onnx file or roll back via /v1/control/intelligence/rollback",
+            evidence={"sampled": len(names), "unhealthy": unhealthy},
+            elapsed_ms=elapsed,
+        )
+
+
 register(_Int01SigningKeyLoaded())
 register(_Int02SigningActive())
 register(_Int03SignaturesVerify())
@@ -460,3 +524,4 @@ register(_Int04WalacorAnchoringActive())
 register(_Int05AnchorRoundTrip())
 register(_Int06ChainContinuity())
 register(_Int07AttemptCompleteness())
+register(_Int08ProductionModelsPresent())

@@ -255,6 +255,39 @@ def test_int07_red_missing(tmp_path):
     assert result.status == "red"
 
 
+def test_int08_green_when_all_models_present(tmp_path):
+    from gateway.intelligence.registry import ModelRegistry
+    from gateway.readiness.checks.integrity import _Int08ProductionModelsPresent
+
+    reg = ModelRegistry(base_path=str(tmp_path / "models"))
+    reg.ensure_structure()
+    (reg.base / "production" / "intent.onnx").write_bytes(b"x")
+    (reg.base / "production" / "safety.onnx").write_bytes(b"y")
+
+    result = _run(_Int08ProductionModelsPresent().run(_ctx(model_registry=reg)))
+    assert result.status == "green"
+
+
+def test_int08_red_when_file_missing(tmp_path, monkeypatch):
+    from gateway.intelligence.registry import ModelRegistry
+    from gateway.readiness.checks.integrity import _Int08ProductionModelsPresent
+
+    reg = ModelRegistry(base_path=str(tmp_path / "models"))
+    reg.ensure_structure()
+    monkeypatch.setattr(reg, "list_production_models", lambda: ["intent"])
+
+    result = _run(_Int08ProductionModelsPresent().run(_ctx(model_registry=reg)))
+    assert result.status == "red"
+    assert "unhealthy" in result.detail
+    assert any(u["status"] == "missing" for u in result.evidence["unhealthy"])
+
+
+def test_int08_amber_when_no_registry():
+    from gateway.readiness.checks.integrity import _Int08ProductionModelsPresent
+    result = _run(_Int08ProductionModelsPresent().run(_ctx()))
+    assert result.status == "amber"
+
+
 def test_int07_amber_race_window(tmp_path):
     """Executions newer than 30s are excluded (racing with attempt write)."""
     import datetime as _dt

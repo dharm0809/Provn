@@ -146,11 +146,16 @@ function ProductionView({ models, onForceRetrain }) {
                 <div className="prod-model-name">{m.model_name}</div>
                 <div className="prod-model-desc">{m.description}</div>
               </div>
-              <div className="prod-status-badge">
+              <div className={`prod-status-badge prod-status-${m.status === 'missing' ? 'missing' : m.status === 'unreadable' ? 'unreadable' : 'active'}`}>
                 <span className="prod-status-dot" />
-                ACTIVE · GEN {m.generation}
+                {m.status === 'missing' ? 'MISSING FILE' : m.status === 'unreadable' ? 'UNREADABLE' : `ACTIVE · GEN ${m.generation}`}
               </div>
             </div>
+            {m.error && (
+              <div className="prod-status-error" title={m.path}>
+                {m.error}
+              </div>
+            )}
 
             <div className="prod-hero">
               <div className="prod-hero-acc">

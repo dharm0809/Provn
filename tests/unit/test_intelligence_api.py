@@ -149,6 +149,39 @@ async def test_list_production_models_surfaces_registry_entries(monkeypatch, tmp
 
 
 @pytest.mark.anyio
+async def test_list_production_models_flags_loaded_status(monkeypatch, tmp_path):
+    """Existing files report status='loaded' with no error."""
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    (ctx.model_registry.base / "production" / "intent.onnx").write_bytes(b"x")
+
+    resp = await list_production_models(_fake_request())
+    body = json.loads(resp.body)
+    intent = next(m for m in body["models"] if m["model_name"] == "intent")
+    assert intent["status"] == "loaded"
+    assert intent["error"] is None
+
+
+@pytest.mark.anyio
+async def test_list_production_models_flags_missing_file(monkeypatch, tmp_path):
+    """A registered model whose .onnx file went away returns status='missing'."""
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    # Force list_production_models to return a name without a backing file.
+    monkeypatch.setattr(
+        ctx.model_registry, "list_production_models",
+        lambda: ["intent"], raising=True,
+    )
+
+    resp = await list_production_models(_fake_request())
+    body = json.loads(resp.body)
+    intent = next(m for m in body["models"] if m["model_name"] == "intent")
+    assert intent["status"] == "missing"
+    assert intent["size_bytes"] == 0
+    assert "not found" in (intent["error"] or "").lower()
+
+
+@pytest.mark.anyio
 async def test_list_production_models_includes_last_promotion(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path)
     _install_ctx(monkeypatch, ctx)

@@ -93,14 +93,36 @@ async def list_production_models(request: Request) -> JSONResponse:
     models = []
     for name in sorted(production):
         prod_path = registry.production_path(name)
-        stat = prod_path.stat() if prod_path.exists() else None
+        try:
+            stat = prod_path.stat()
+            status = "loaded"
+            size = stat.st_size
+            mtime = stat.st_mtime
+            error: str | None = None
+        except FileNotFoundError:
+            status = "missing"
+            size = 0
+            mtime = None
+            error = f"file not found: {prod_path}"
+        except PermissionError as exc:
+            status = "unreadable"
+            size = 0
+            mtime = None
+            error = f"permission denied: {exc}"
+        except OSError as exc:
+            status = "unreadable"
+            size = 0
+            mtime = None
+            error = f"stat failed: {exc}"
         models.append({
             "model_name": name,
             "path": str(prod_path),
-            "size_bytes": stat.st_size if stat else 0,
-            "mtime": stat.st_mtime if stat else None,
+            "size_bytes": size,
+            "mtime": mtime,
             "generation": registry.get_generation(name),
             "last_promotion": last_promotions.get(name),
+            "status": status,
+            "error": error,
         })
     return JSONResponse({"models": models})
 
