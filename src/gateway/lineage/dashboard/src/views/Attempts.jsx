@@ -243,7 +243,7 @@ function AttemptDrawer({ a, onOpenTrace }) {
                     <AttCopyBtn text={a.execution_id} />
                   </>
                 )
-                : <span className="att-mrow-val att-mrow-empty">— no trace stored for this attempt</span>}
+                : <span className="att-mrow-val att-mrow-empty" title="Pre-forward exits (auth/policy/budget denials, parse errors, readiness drift) never reach the provider, so no execution record is written by design.">— pre-forward exit · no execution record</span>}
             </div>
             <div className="att-mrow"><span className="att-mrow-lbl">USER</span>
               <span className="att-mrow-val">{a.user || '—'}</span>
