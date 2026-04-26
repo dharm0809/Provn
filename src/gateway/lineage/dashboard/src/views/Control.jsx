@@ -593,7 +593,6 @@ function PoliciesPanel({
                 <th style={{ width: 100 }}>Mode</th>
                 <th>Applies to</th>
                 <th style={{ width: 70 }}>Rules</th>
-                <th style={{ width: 90 }}>Hits 24h</th>
                 <th style={{ width: 140 }}>Last edit</th>
                 <th style={{ width: 140 }}></th>
               </tr>
@@ -611,7 +610,6 @@ function PoliciesPanel({
                   <td><Badge kind={p.mode === 'enforce' ? 'enforce' : 'warn'}>{p.mode}</Badge></td>
                   <td className="cp-mono cp-muted">{p.applies_to}</td>
                   <td className="cp-mono">{p.rules}</td>
-                  <td className="cp-mono" style={{ color: p.hits_24h > 10 ? 'var(--amber)' : 'var(--fg-muted)' }}>{p.hits_24h}</td>
                   <td className="cp-mono cp-dim">{p.last_edit ? timeAgo(p.last_edit) : '—'}</td>
                   <td>
                     <div className="cp-row-actions">
@@ -1015,45 +1013,23 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
                 <th>Name</th>
                 <th>Scope</th>
                 <th style={{ width: 80 }}>Window</th>
-                <th style={{ width: 220 }}>Spend</th>
-                <th style={{ width: 220 }}>Tokens</th>
-                <th style={{ width: 90 }}>Status</th>
+                <th style={{ width: 200 }}>Token cap</th>
                 <th style={{ width: 160 }}></th>
               </tr>
             </thead>
             <tbody>
               {rows.map(b => {
-                const pctSpend = pct(b.spent_usd, b.cap_usd);
-                const pctTok = pct(b.tokens_used, b.tokens_cap);
                 return (
                   <tr key={b.id}>
                     <td>
                       <div className="cp-cell-stack">
                         <div className="cp-row-primary">{b.name}</div>
-                        <div className="cp-fingerprint">expires {b.expires ? timeAgo(b.expires) : '—'}</div>
+                        <div className="cp-fingerprint">updated {b.expires ? timeAgo(b.expires) : '—'}</div>
                       </div>
                     </td>
                     <td className="cp-mono cp-muted">{b.scope}</td>
                     <td className="cp-mono">{b.window}</td>
-                    <td>
-                      <div className="cp-budget-bar">
-                        <div className={`cp-budget-bar-fill ${pctSpend > 90 ? 'breach' : pctSpend > 70 ? 'warn' : ''}`} style={{ width: pctSpend + '%' }} />
-                      </div>
-                      <div className="cp-budget-meta">
-                        <span><strong>{fmtUsd(b.spent_usd)}</strong> / {fmtUsd(b.cap_usd)}</span>
-                        <span>{pctSpend}%</span>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="cp-budget-bar">
-                        <div className={`cp-budget-bar-fill ${pctTok > 90 ? 'breach' : pctTok > 70 ? 'warn' : ''}`} style={{ width: pctTok + '%' }} />
-                      </div>
-                      <div className="cp-budget-meta">
-                        <span><strong>{fmtTokens(b.tokens_used)}</strong> / {fmtTokens(b.tokens_cap)}</span>
-                        <span>{pctTok}%</span>
-                      </div>
-                    </td>
-                    <td><Badge kind={b.breach}>{b.breach === 'breach' ? 'breach' : b.breach === 'warn' ? 'warn' : 'ok'}</Badge></td>
+                    <td className="cp-mono">{b.tokens_cap != null ? fmtTokens(b.tokens_cap) : '—'}</td>
                     <td>
                       <div className="cp-row-actions">
                         <button
@@ -1394,7 +1370,6 @@ export default function Control({ navigate }) {
           mode: p.enforcement_level === 'blocking' ? 'enforce' : 'warn',
           applies_to: p.description || '—',
           rules: ruleCount,
-          hits_24h: 0,
           last_edit: p.updated_at,
         };
       }));
@@ -1410,11 +1385,7 @@ export default function Control({ navigate }) {
         name: b.user || b.tenant_id || b.budget_id,
         scope: `tenant=${b.tenant_id}${b.user ? ` · user=${b.user}` : ''}`,
         window: b.period,
-        spent_usd: 0,
-        cap_usd: 0,
-        tokens_used: 0,
         tokens_cap: b.max_tokens,
-        breach: 'ok',
         expires: b.updated_at,
         _raw: b,
       })));
