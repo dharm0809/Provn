@@ -1,11 +1,11 @@
-# Provn — Overview
+# TruzenAI — Overview
 
 ## What it is
 
-A security and audit proxy that sits between your application and any AI model. Your app talks to Provn exactly like it talks to OpenAI. The gateway handles attestation, policy enforcement, content analysis, and audit logging — then forwards the request to the actual model.
+A security and audit proxy that sits between your application and any AI model. Your app talks to the gateway exactly like it talks to OpenAI. The gateway handles attestation, policy enforcement, content analysis, and audit logging — then forwards the request to the actual model.
 
 ```
-Your App  →  Provn Gateway  →  LLM (OpenAI / Anthropic / Ollama / any provider)
+Your App  →  TruzenAI Gateway  →  LLM (OpenAI / Anthropic / Ollama / any provider)
 ```
 
 No code changes required in your application.
@@ -20,7 +20,7 @@ Every request produces one audit record containing:
 - **Thinking content** — reasoning chain from thinking models (qwen3), stored separately from the clean response
 - The **provider's own request ID** — the ID the model assigned to that specific exchange
 - The **model hash** — a cryptographic fingerprint of the model weights (available for local models like Ollama)
-- **Tool events** — every tool call (web search, MCP, fetch) with SHA3-512 hashes on input/output
+- **Tool events** — every tool call (web search, MCP, fetch) with full input/output content (Walacor hashes on ingest)
 - **Content analysis** — PII detection, toxicity scoring, Llama Guard verdicts per request
 - **Caller identity** — who made the request (JWT claims, headers, or client IP)
 - Policy result, timestamp, tenant, session chain values, latency, token counts
@@ -85,6 +85,10 @@ See [Getting Started](docs/GETTING-STARTED.md) for the full setup guide includin
 | `GET /v1/lineage/verify/{id}` | Yes | Verify session chain integrity |
 | `GET /v1/control/status` | Yes | Gateway governance status |
 | `GET /v1/control/discover` | Yes | Scan providers for available models |
+| `GET /v1/readiness` | No | 31-check rollup (security, integrity, persistence, hygiene) |
+| `GET /v1/connections` | Yes | 10-tile subsystem health cockpit |
+| `POST /v1/openwebui/events` | Yes | OpenWebUI plugin event governance |
+| `GET /api/tags` · `/ps` · `/version` · `/show` | No | Ollama-shape proxy for OpenWebUI native registration |
 
 ---
 
@@ -102,7 +106,7 @@ Request comes in
            ├─ Execute tools if model requests them (web search, MCP)
            ├─ Strip thinking content, store separately
            ├─ Run content checks (PII, toxicity, Llama Guard, DLP)
-           ├─ Link to session chain (SHA3-512 Merkle hash)
+           ├─ Link to session chain (UUIDv7 ID-pointer: record_id + previous_record_id)
            ├─ Write to local WAL (SQLite, fsync, 0600 permissions)
            └─ Deliver to Walacor backend (async, with retry)
                     ↓
@@ -117,15 +121,15 @@ Every request — whether allowed, blocked, or errored — always produces exact
 
 ## Session chains (G5)
 
-Pass `X-Session-Id` header in your request. The gateway links turns within a session via a hash chain:
+Pass `X-Session-Id` header in your request. The gateway links turns within a session via a UUIDv7 ID-pointer chain:
 
 ```
-turn 1  →  record_hash_1
-turn 2  →  SHA3-512(turn_2_fields + record_hash_1)  →  record_hash_2
-turn 3  →  SHA3-512(turn_3_fields + record_hash_2)  →  record_hash_3
+turn 1  →  record_id_1 (UUIDv7),  previous_record_id = null
+turn 2  →  record_id_2,            previous_record_id = record_id_1
+turn 3  →  record_id_3,            previous_record_id = record_id_2
 ```
 
-The lineage dashboard verifies chains client-side (no server trust required). Any deleted, reordered, or modified turn breaks the chain.
+Each record is Ed25519-signed over its canonical ID string, and Walacor hashes the full record on ingest (returning `DH` as a tamper-evident checkpoint). The lineage dashboard verifies chains server-side via `/v1/lineage/verify/{id}` — any deleted, reordered, or modified turn breaks the pointer walk.
 
 ---
 

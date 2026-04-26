@@ -39,7 +39,6 @@ telemetry = [
 ]
 guard = ["transformers>=4.40", "torch>=2.0"]
 presidio = ["presidio-analyzer>=2.2"]
-search = ["ddgs>=7.0"]
 ocr = ["pytesseract>=0.3", "Pillow>=9.0"]
 signing = ["cryptography>=42.0"]
 compliance = ["weasyprint>=62.0", "jinja2>=3.1"]

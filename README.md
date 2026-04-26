@@ -1,4 +1,4 @@
-# Provn — AI Security Gateway
+# TruzenAI — AI Security Gateway
 
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue) ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 
@@ -193,9 +193,13 @@ Thinking models (qwen3) produce `<think>` blocks which the gateway strips from t
 | `/health` | GET | No | JSON health status |
 | `/metrics` | GET | No | Prometheus metrics |
 | `/lineage/` | GET | No | Audit lineage dashboard (SPA) |
-| `/v1/lineage/*` | GET | Yes | Lineage API (sessions, timeline, execution, verify, attachments) |
-| `/v1/control/*` | CRUD | Yes | Embedded control plane (attestations, policies, budgets) |
-| `/v1/compliance/export` | GET | Yes | Compliance report export |
+| `/v1/lineage/*` | GET | Yes | Lineage API (sessions, executions, attempts, verify, envelope, token-latency) |
+| `/v1/control/*` | CRUD | Yes | Embedded control plane (attestations, policies, budgets, content policies, pricing, templates) |
+| `/v1/readiness` | GET | No | 31-check rollup (security, integrity, persistence, hygiene); k8s-friendly |
+| `/v1/connections` | GET | Yes | 10-tile subsystem health cockpit |
+| `/v1/openwebui/events` | POST | Yes | OpenWebUI plugin event governance (inlet/outlet) |
+| `/api/tags`, `/api/ps`, `/api/version`, `/api/show` | GET/POST | No | Ollama-shape proxy so OpenWebUI registers the gateway as a native Ollama connection |
+| `/v1/compliance/export` | GET | Yes | Compliance report export (JSON or PDF; PDF requires Pango+Cairo) |
 
 ---
 
