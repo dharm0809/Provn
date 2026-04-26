@@ -29,6 +29,11 @@ class ModelVerdict:
     timestamp: str = field(default_factory=_utcnow_iso)
     divergence_signal: str | None = None
     divergence_source: str | None = None
+    # Production model version that produced this verdict. NULL on
+    # pre-migration rows and on call sites that haven't been wired
+    # through reload yet — callers that need per-version isolation
+    # must pass `version` explicitly.
+    version: str | None = None
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.confidence <= 1.0):
@@ -44,6 +49,7 @@ class ModelVerdict:
         confidence: float,
         request_id: str | None = None,
         features: dict[str, Any] | None = None,
+        version: str | None = None,
     ) -> "ModelVerdict":
         input_hash = hashlib.sha256(input_text.encode()).hexdigest()
         # sort_keys so logically-equal feature dicts produce identical JSON —
@@ -56,4 +62,5 @@ class ModelVerdict:
             prediction=prediction,
             confidence=confidence,
             request_id=request_id,
+            version=version,
         )

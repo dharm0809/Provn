@@ -116,6 +116,15 @@ class IntelligenceDB:
                 # Column already present — expected on every run after the
                 # first, not an error.
                 pass
+            # Phase 25 hardening — production model version stamped onto
+            # each verdict so post-promotion validation and drift can
+            # filter precisely instead of approximating with a
+            # promoted_at timestamp window. Pre-existing rows keep
+            # NULL — they're treated as "version unknown" by callers.
+            try:
+                conn.execute("ALTER TABLE onnx_verdicts ADD COLUMN version TEXT")
+            except sqlite3.OperationalError:
+                pass
 
     def accuracy_in_window(
         self,
@@ -142,11 +151,14 @@ class IntelligenceDB:
         """
         where = ["model_name = ?", "timestamp >= ?", "timestamp < ?"]
         args: list = [model, start.isoformat(), end.isoformat()]
-        # NOTE: we don't filter by version in SQL — the schema doesn't
-        # carry a version column. Callers that need per-version accuracy
-        # are responsible for checking the registry separately. Keep the
-        # parameter on the API surface so 2.2 (post-promotion validator)
-        # has a place to plug it in once a version column lands.
+        if version is not None:
+            # Pre-migration rows (no version) intentionally excluded
+            # when a caller asks for a specific version — the validator
+            # MUST NOT count old-version verdicts toward the new
+            # version's accuracy. Callers that want all versions
+            # aggregate by passing version=None.
+            where.append("version = ?")
+            args.append(version)
         sql = (
             "SELECT prediction, divergence_signal "
             "FROM onnx_verdicts "
