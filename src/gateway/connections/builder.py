@@ -130,7 +130,10 @@ def build_walacor_delivery_tile(ctx: Any) -> dict:
     last_success_ts = snap.get("last_success_ts")
     time_since = snap.get("time_since_last_success_s")
 
-    pending: int | None = 0
+    # Distinguish "wal not attached" from "0 pending" — the subline below
+    # only switches to "pending writes n/a" when pending is None, so we
+    # must leave it None when there is no writer to probe.
+    pending: int | None = None
     wal = getattr(ctx, "wal_writer", None)
     if wal is not None:
         try:
