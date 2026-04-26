@@ -11,8 +11,30 @@ issue an explicit `BEGIN IMMEDIATE` / `COMMIT` themselves.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import List
+
+
+@dataclass(frozen=True)
+class AccuracySnapshot:
+    """Rolling-window accuracy reading for a model + version.
+
+    `accuracy` and `coverage` are independent: a model can have 100%
+    accuracy on the rows that *do* have a `divergence_signal` while
+    `coverage` is 0.05 because only 5% of verdicts ever get a teacher
+    label. Drift / post-promotion validators must read both — a high
+    accuracy with low coverage is statistically meaningless.
+    """
+    model: str
+    version: str | None
+    sample_count: int       # rows with a usable ground-truth signal
+    total_rows: int         # all verdict rows in the window
+    accuracy: float         # 0.0 .. 1.0; 0.0 when sample_count == 0
+    coverage: float         # sample_count / total_rows; 0.0 when total_rows == 0
+    window_start: datetime
+    window_end: datetime
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS onnx_verdicts (
@@ -94,6 +116,65 @@ class IntelligenceDB:
                 # Column already present — expected on every run after the
                 # first, not an error.
                 pass
+
+    def accuracy_in_window(
+        self,
+        model: str,
+        *,
+        version: str | None = None,
+        start: datetime,
+        end: datetime,
+    ) -> AccuracySnapshot:
+        """Compute rolling accuracy for `model` against `divergence_signal`.
+
+        Definition of correct: a verdict row whose `divergence_signal` is
+        non-null AND `prediction == divergence_signal`. Rows without a
+        signal are excluded from the accuracy calculation but still count
+        toward `coverage` (the denominator).
+
+        `version` filter is by `prediction` — that's the closest column we
+        have to "which model version emitted this." When None, the window
+        aggregates across all versions of the model.
+
+        SQLite stores the timestamp as ISO-8601; `datetime.isoformat()`
+        sorts lexicographically the same as time-order, so a string range
+        query is correct without parsing.
+        """
+        where = ["model_name = ?", "timestamp >= ?", "timestamp < ?"]
+        args: list = [model, start.isoformat(), end.isoformat()]
+        # NOTE: we don't filter by version in SQL — the schema doesn't
+        # carry a version column. Callers that need per-version accuracy
+        # are responsible for checking the registry separately. Keep the
+        # parameter on the API surface so 2.2 (post-promotion validator)
+        # has a place to plug it in once a version column lands.
+        sql = (
+            "SELECT prediction, divergence_signal "
+            "FROM onnx_verdicts "
+            "WHERE " + " AND ".join(where)
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+
+        total = len(rows)
+        with_signal = 0
+        correct = 0
+        for pred, sig in rows:
+            if sig is None:
+                continue
+            with_signal += 1
+            if pred == sig:
+                correct += 1
+
+        return AccuracySnapshot(
+            model=model,
+            version=version,
+            sample_count=with_signal,
+            total_rows=total,
+            accuracy=(correct / with_signal) if with_signal else 0.0,
+            coverage=(with_signal / total) if total else 0.0,
+            window_start=start,
+            window_end=end,
+        )
 
     def list_tables(self) -> List[str]:
         # Filter `sqlite_%` so SQLite's internal bookkeeping tables — created
