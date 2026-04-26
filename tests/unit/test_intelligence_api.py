@@ -627,10 +627,11 @@ async def test_rollback_restores_most_recent_archive(monkeypatch, tmp_path):
     # Previous production archived — the count in archive grew by 1.
     archived = list((reg.base / "archive").glob("intent-*.onnx"))
     assert len(archived) == 2  # one consumed, one added (previous prod)
-    # Event emitted.
+    # Event emitted as a real rollback so _last_rollback_per_model can find it.
     ev = ctx.lifecycle_event_writer.events[0]
-    assert ev.event_type.value == "model_promoted"
-    assert ev.payload["approver"] == "ops@walacor.com"
+    assert ev.event_type.value == "model_rolled_back"
+    assert ev.payload["to_archive"] == "intent-archived-20260101T000000.000000Z.onnx"
+    assert "manual rollback by ops@walacor.com" in ev.payload["reason"]
 
 
 @pytest.mark.anyio
