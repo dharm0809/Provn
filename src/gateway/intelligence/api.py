@@ -347,6 +347,19 @@ async def promote_candidate(request: Request) -> JSONResponse:
             return JSONResponse({"error": str(e)}, status_code=400)
         registry.disable_shadow(model)
 
+        # Drop cached candidate `InferenceSession`s for this model so RAM
+        # isn't leaked across promotions. The just-promoted version is now
+        # served from the production session; older candidate sessions are
+        # never reused. `current_version=version` keeps the promoted-as-
+        # candidate session if anything is mid-iteration, evicts everything
+        # else.
+        shadow_runner = getattr(ctx, "shadow_runner", None)
+        if shadow_runner is not None:
+            try:
+                shadow_runner.evict_old_sessions(model, current_version=version)
+            except Exception:
+                logger.debug("shadow session eviction failed", exc_info=True)
+
         approver = _caller_identity(request)
         event = build_promotion_event(
             model_name=model,

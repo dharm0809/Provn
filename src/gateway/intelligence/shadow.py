@@ -65,6 +65,29 @@ class ShadowRunner:
         # session leaks in ORT's arena. Serialize the check-then-set.
         self._sessions_lock = threading.Lock()
 
+    def evict_old_sessions(self, model: str, current_version: str | None = None) -> int:
+        """Drop cached `InferenceSession` rows for `model` other than `current_version`.
+
+        Called from `reload.py` after a generation bump so the previous
+        candidate's session is freed promptly instead of leaking until
+        process restart. `current_version=None` evicts every session for
+        that model (used when a model is fully retired).
+
+        Returns the number of sessions evicted. Eviction is a simple
+        dict.pop — `onnxruntime.InferenceSession` has no explicit close;
+        dropping the last reference lets the GC reclaim the arena.
+        """
+        if model not in ALLOWED_MODEL_NAMES:
+            raise ValueError(f"unknown model name {model!r}")
+        with self._sessions_lock:
+            stale_keys = [
+                k for k in self._sessions
+                if k[0] == model and (current_version is None or k[1] != current_version)
+            ]
+            for key in stale_keys:
+                self._sessions.pop(key, None)
+        return len(stale_keys)
+
     def get_session(self, model: str, candidate: Candidate) -> Any:
         """Return the cached `InferenceSession` for `candidate`, loading once.
 
