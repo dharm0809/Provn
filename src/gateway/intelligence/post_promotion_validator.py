@@ -312,6 +312,13 @@ class PostPromotionValidator:
         self, *, model: str, from_version: str, to_archive: str,
         reason: str, delta: float, sample_count: int,
     ) -> None:
+        """Persist the rollback event.
+
+        Audit-trail invariant: the local SQLite mirror is written
+        UNCONDITIONALLY. The optional `lifecycle_writer` only handles
+        the remote (Walacor) leg — its absence must never cause the
+        event to be lost from the local audit log.
+        """
         event = build_rollback_event(
             model_name=model,
             from_version=from_version,
@@ -321,7 +328,17 @@ class PostPromotionValidator:
             sample_count=sample_count,
         )
         if self._writer is None:
+            # Local-only path — writer would have done both legs.
+            try:
+                await asyncio.to_thread(
+                    self._db.write_lifecycle_event, event, status="local_only",
+                )
+            except Exception:
+                logger.warning("rollback local mirror write failed", exc_info=True)
             return
+        # Writer present — it owns both the remote write AND the local
+        # mirror row (LifecycleEventWriter._write_mirror_row covers
+        # both success and failure paths). Don't double-write here.
         try:
             if hasattr(self._writer, "write_event"):
                 await self._writer.write_event(event)
@@ -331,3 +348,14 @@ class PostPromotionValidator:
                 await self._writer.write_record(event.to_record())
         except Exception:
             logger.warning("rollback lifecycle write failed", exc_info=True)
+            # Writer failed in an unexpected way (LifecycleEventWriter
+            # doesn't raise on remote failure, but other writer shapes
+            # might) — fall through to a local-mirror write so the
+            # audit row isn't lost.
+            try:
+                await asyncio.to_thread(
+                    self._db.write_lifecycle_event, event,
+                    status="failed", error_reason="writer raised",
+                )
+            except Exception:
+                logger.warning("rollback local mirror fallback failed", exc_info=True)

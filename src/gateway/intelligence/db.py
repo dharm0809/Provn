@@ -188,6 +188,50 @@ class IntelligenceDB:
             window_end=end,
         )
 
+    def write_lifecycle_event(
+        self,
+        event: "Any",
+        *,
+        walacor_id: str | None = None,
+        status: str = "local_only",
+        error_reason: str | None = None,
+        attempts: int = 1,
+    ) -> int:
+        """INSERT a lifecycle event row into the local mirror, unconditionally.
+
+        Local persistence is the audit-trail invariant — every emitted
+        event must land here even when no remote walacor writer is
+        wired. The optional `LifecycleEventWriter` handles the remote
+        leg AND the mirror in one go; callers that don't have a writer
+        configured still call this method directly so the event is
+        never lost. `status='local_only'` distinguishes these rows
+        from `'written'` (mirrored after a successful remote write)
+        and `'failed'` (mirrored after the remote leg gave up).
+
+        Returns the inserted rowid.
+        """
+        import json
+        from datetime import datetime, timezone
+        record = event.to_record()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO lifecycle_events_mirror "
+                "(event_type, payload_json, timestamp, walacor_record_id, "
+                " write_status, error_reason, attempts, written_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_type.value,
+                    json.dumps(record, sort_keys=True),
+                    event.timestamp,
+                    walacor_id,
+                    status,
+                    error_reason,
+                    attempts,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            return int(cur.lastrowid)
+
     def list_tables(self) -> List[str]:
         # Filter `sqlite_%` so SQLite's internal bookkeeping tables — created
         # eagerly by AUTOINCREMENT columns — don't leak to callers doing set

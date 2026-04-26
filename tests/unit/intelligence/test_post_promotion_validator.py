@@ -299,6 +299,51 @@ async def test_validator_rolls_back_under_flapping_when_v3_regresses(db, tmp_pat
 
 
 @pytest.mark.anyio
+async def test_validator_writes_local_mirror_with_no_writer(db, tmp_path):
+    """Audit invariant: a rollback event MUST land in the local mirror
+    even when no `lifecycle_writer` is wired. The optional writer only
+    gates the remote-delivery leg; local persistence is unconditional.
+    """
+    reg = _setup_registry(tmp_path)
+    _seed_archive(reg, "intent")
+    (reg.base / "production" / "intent.onnx").write_bytes(b"current")
+
+    now = datetime.now(timezone.utc)
+    promoted_at = now - timedelta(hours=1)
+    _seed_promotion(db, model="intent", version="v9", promoted_at=promoted_at)
+
+    pre_ts = promoted_at - timedelta(minutes=30)
+    post_ts = promoted_at + timedelta(minutes=15)
+    for i in range(200):
+        _seed_verdict(db, model="intent", prediction="A",
+                      divergence_signal="A" if i < 195 else "B", ts=pre_ts)
+    for i in range(200):
+        _seed_verdict(db, model="intent", prediction="A",
+                      divergence_signal="A" if i < 150 else "B",
+                      ts=post_ts, version="v9")
+
+    validator = PostPromotionValidator(
+        db, reg, threshold=0.05, min_samples=50, min_coverage=0.30,
+        clock=lambda: now,
+        lifecycle_writer=None,
+    )
+    results = await validator.check_once()
+    assert len(results) == 1 and results[0]["action"] == "rolled_back"
+
+    # Local mirror MUST contain the rolled_back event with status='local_only'.
+    with sqlite3.connect(db.path) as conn:
+        rows = conn.execute(
+            "SELECT payload_json, write_status FROM lifecycle_events_mirror "
+            "WHERE event_type = 'model_rolled_back'"
+        ).fetchall()
+    assert len(rows) == 1, "exactly one rollback row should be mirrored"
+    payload = json.loads(rows[0][0])
+    assert payload["model_name"] == "intent"
+    assert payload["from_version"] == "v9"
+    assert rows[0][1] == "local_only"
+
+
+@pytest.mark.anyio
 async def test_validator_skips_when_no_archive_present(db, tmp_path):
     """Regression detected but archive dir empty — surfaces rollback_skipped."""
     reg = _setup_registry(tmp_path)
