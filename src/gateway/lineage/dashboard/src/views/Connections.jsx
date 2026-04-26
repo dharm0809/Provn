@@ -410,7 +410,7 @@ function Intro({ snapshot, loading, error, errorStatus }) {
           <span className="cx-eyebrow-sep">·</span>
           <span>Silent-failure surface</span>
         </div>
-        <h1>Is anything silently broken right now?</h1>
+        <h1>Subsystem health check</h1>
         <p>
           Ten subsystem probes, one scrollback of recent degradation events.
           Everything here is derived from live in-process state —

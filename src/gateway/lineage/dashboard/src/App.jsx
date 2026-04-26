@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { getHealth } from './api';
 import { formatUptime, isTabVisible } from './utils';
 import './styles/app-shell.css';
+import truzenaiLogoLight from './assets/branding/truzenai-logo-light.png';
+import truzenaiLogoDark from './assets/branding/truzenai-logo-dark.png';
 import Overview from './views/Overview';
 const Intelligence = lazy(() => import('./views/Intelligence'));
 const Sessions = lazy(() => import('./views/Sessions'));
@@ -345,19 +347,33 @@ export default function App() {
         onClick={() => setMobileNavOpen(false)}
       />
       <aside className="sidebar">
-        <button type="button" className="sb-brand" title="TruzenAI" onClick={() => navigate('overview')}>
-          <span className="sb-diamond">◆</span>
+        <button
+          type="button"
+          className="sb-brand"
+          title="TruzenAI — Home"
+          onClick={() => navigate('overview')}
+        >
+          <img
+            className="sb-brand-img"
+            src={theme === 'light' ? truzenaiLogoLight : truzenaiLogoDark}
+            alt="TruzenAI"
+            width={200}
+            height={44}
+            decoding="async"
+          />
         </button>
-        <nav className="sb-nav">
+        <nav className="sb-nav" aria-label="Primary">
           {NAV_ITEMS.map((it) => (
             <button
               key={it.key}
               type="button"
               className={`sb-item${activeNavKey === it.key ? ' active' : ''}`}
-              title={it.label.toUpperCase()}
+              title={it.label}
+              aria-current={activeNavKey === it.key ? 'page' : undefined}
               onClick={() => navigate(it.key)}
             >
-              {navIcons[it.key]}
+              <span className="sb-item-icon" aria-hidden="true">{navIcons[it.key]}</span>
+              <span className="sb-item-label">{it.label}</span>
             </button>
           ))}
         </nav>

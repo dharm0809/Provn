@@ -79,46 +79,71 @@
 
 /* ---------- page ---------- */
 
-.cp-page { padding: 0; display: flex; flex-direction: column; }
+.cp-page {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
 
-/* ---------- intro ---------- */
+/* ---------- intro (metrics + type parity with stubs.css .stub-hero + .card) ---------- */
 
-/* Bordered hero: same shell as Compliance stub-hero (card + card-accent). */
 .cp-intro {
   display: flex;
   align-items: flex-start;
   gap: 32px;
-  margin-bottom: 18px;
   border-bottom: none;
 }
-.cp-intro.card {
+.cp-intro.card.card-accent {
   padding: 28px 32px;
+  margin-bottom: 18px;
+  position: relative;
+  overflow: hidden;
 }
 .cp-intro-body { flex: 1; min-width: 0; }
 .cp-intro-body h1 {
   margin: 0 0 8px;
-  font: 500 28px/1.1 var(--font);
-  letter-spacing: -0.02em;
-  color: var(--fg);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-family: var(--font);
+  letter-spacing: -0.01em;
+  color: var(--text-primary, var(--fg));
 }
 .cp-intro-body .cp-intro-sub {
   margin: 0;
-  font: 400 13.5px/1.55 var(--font);
-  color: var(--fg-muted);
-  max-width: 620px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.55;
+  font-family: var(--font);
+  color: var(--text-secondary, var(--fg-muted));
+  max-width: 720px;
   text-wrap: pretty;
 }
 .cp-intro-eyebrow {
-  display: inline-flex; align-items: center; gap: 2px;
-  font: 500 10px/1 var(--mono);
-  color: var(--fg-muted);
-  letter-spacing: 0.18em;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
-  margin-bottom: 14px;
+  color: var(--gold);
+  margin-bottom: 6px;
   white-space: nowrap;
 }
-.cp-intro-eyebrow .cp-dia { color: var(--gold); margin-right: 8px; font-size: 9px; }
-.cp-intro-eyebrow .cp-eyebrow-sep { color: var(--fg-dim); margin: 0 6px; }
+.cp-intro-eyebrow .cp-dia {
+  color: var(--gold);
+  margin-right: 8px;
+  font-size: 9px;
+}
+.cp-intro-eyebrow .cp-eyebrow-sep {
+  color: color-mix(in oklab, var(--gold) 38%, var(--fg-dim));
+  margin: 0 6px;
+}
 
 /* ---------- auth strip ---------- */
 
@@ -170,7 +195,7 @@
 .cp-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
-  padding: 0 26px;
+  padding: 0;
   gap: 2px;
   overflow-x: auto;
   scrollbar-width: none;
@@ -220,16 +245,48 @@
 /* ---------- tab panel ---------- */
 
 .cp-tab-panel {
-  padding: 28px 32px 80px;
+  padding: 0 0 80px;
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
+}
+
+/* Status tab: metrics strip + events stack; events fills remaining viewport height. */
+.cp-tab-panel > .cp-stat-grid {
+  flex-shrink: 0;
+}
+.cp-tab-panel > .cp-stat-grid + .cp-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+.cp-tab-panel > .cp-stat-grid + .cp-section > .cp-section-head,
+.cp-tab-panel > .cp-stat-grid + .cp-section > .cp-section-foot {
+  flex-shrink: 0;
+}
+.cp-tab-panel > .cp-stat-grid + .cp-section > .cp-events {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.cp-tab-panel > .cp-stat-grid + .cp-section > .cp-empty {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ---------- panel head ---------- */
 
 .cp-panel-head {
   display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 24px; margin-bottom: 22px;
+  gap: 24px;
+  margin-bottom: 22px;
+  padding: 0 18px;
+  box-sizing: border-box;
 }
 .cp-panel-head-left { flex: 1; min-width: 0; }
 .cp-panel-head-left h2 {
@@ -619,7 +676,7 @@
 .cp-readonly-banner {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 16px;
-  margin: 16px 32px 0;
+  margin: 16px 0 0;
   border: 1px solid color-mix(in oklab, var(--amber) 40%, transparent);
   background: color-mix(in oklab, var(--amber) 6%, transparent);
   color: var(--amber);

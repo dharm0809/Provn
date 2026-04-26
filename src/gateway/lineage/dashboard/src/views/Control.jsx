@@ -227,13 +227,6 @@ function StatusPanel({ status, events, onOpenAuditLog }) {
 
   return (
     <>
-      <div className="cp-panel-head">
-        <div className="cp-panel-head-left">
-          <h2>Control plane status</h2>
-          <p>Single-pane view of attestations, policies, budgets and providers — plus the audit trail of every config change.</p>
-        </div>
-      </div>
-
       <div className="cp-stat-grid">
         {stats.map(s => (
           <div key={s.k} className="cp-stat">

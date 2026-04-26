@@ -181,6 +181,11 @@ async def body_size_middleware(request: Request, call_next):
 _ip_limiter = IPRateLimiter()  # configured at startup via _configure_ip_limiter()
 
 
+def _is_lineage_dashboard_path(path: str) -> bool:
+    """True for the SPA and static assets under /lineage (mount may be requested without trailing slash)."""
+    return path == "/lineage" or path.startswith("/lineage/")
+
+
 async def api_key_middleware(request: Request, call_next):  # noqa: C901
     """When WALACOR_GATEWAY_API_KEYS is set, require valid API key on proxy routes.
 
@@ -190,7 +195,7 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
     # /lineage/ serves the static dashboard — must load so users can reach the AuthGate.
     # /v1/lineage/* and /v1/compliance expose JSON data; gated when lineage_auth_required=True.
     # /v1/openwebui/* and /api/* are the OpenWebUI plugin + native Ollama proxy routes.
-    _static_ui = request.url.path.startswith("/lineage/")
+    _static_ui = _is_lineage_dashboard_path(request.url.path)
     _plugin_paths = ("/v1/openwebui/", "/api/")
     _lineage_data_paths = ("/v1/lineage/", "/v1/compliance")
     _lineage_data_open = not get_settings().lineage_auth_required
@@ -336,11 +341,11 @@ _LINEAGE_CSP = (
 
 
 async def security_headers_middleware(request: Request, call_next):
-    """Append security headers to every response; add CSP for /lineage/ paths."""
+    """Append security headers to every response; add CSP for /lineage paths."""
     response = await call_next(request)
     for key, value in _SECURITY_HEADERS.items():
         response.headers[key] = value
-    if request.url.path.startswith("/lineage/"):
+    if _is_lineage_dashboard_path(request.url.path):
         response.headers["Content-Security-Policy"] = _LINEAGE_CSP
     return response
 
