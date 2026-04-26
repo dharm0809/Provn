@@ -195,6 +195,23 @@
   background: rgba(248,113,113,0.06);
   border-bottom: 1px solid rgba(248,113,113,0.2);
 }
+.prod-status-rollback {
+  color: var(--amber, #fbbf24);
+  border-color: rgba(251,191,36,0.4);
+  background: rgba(251,191,36,0.08);
+}
+.prod-status-rollback .prod-status-dot {
+  background: var(--amber, #fbbf24);
+  box-shadow: 0 0 6px var(--amber, #fbbf24);
+}
+.prod-rollback-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--amber, #fbbf24);
+  padding: 6px 14px;
+  background: rgba(251,191,36,0.05);
+  border-bottom: 1px solid rgba(251,191,36,0.18);
+}
 
 .prod-hero {
   display: flex; align-items: center; justify-content: space-between;

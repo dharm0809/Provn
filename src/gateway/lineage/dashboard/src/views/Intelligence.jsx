@@ -146,14 +146,42 @@ function ProductionView({ models, onForceRetrain }) {
                 <div className="prod-model-name">{m.model_name}</div>
                 <div className="prod-model-desc">{m.description}</div>
               </div>
-              <div className={`prod-status-badge prod-status-${m.status === 'missing' ? 'missing' : m.status === 'unreadable' ? 'unreadable' : 'active'}`}>
-                <span className="prod-status-dot" />
-                {m.status === 'missing' ? 'MISSING FILE' : m.status === 'unreadable' ? 'UNREADABLE' : `ACTIVE · GEN ${m.generation}`}
-              </div>
+              {(() => {
+                // Tri-state health pill:
+                //   red   = file missing/unreadable on disk
+                //   amber = file ok but auto-rollback fired in the last 24h
+                //   green = file ok, no recent rollback
+                let tone = 'active';
+                let label = `ACTIVE · GEN ${m.generation}`;
+                if (m.status === 'missing') { tone = 'missing'; label = 'MISSING FILE'; }
+                else if (m.status === 'unreadable') { tone = 'unreadable'; label = 'UNREADABLE'; }
+                else if (m.last_rollback?.timestamp) {
+                  const ageMs = Date.now() - new Date(m.last_rollback.timestamp).getTime();
+                  if (ageMs < 24 * 60 * 60 * 1000) {
+                    tone = 'rollback';
+                    label = `ROLLED BACK · ${timeAgo(m.last_rollback.timestamp)}`;
+                  }
+                }
+                return (
+                  <div className={`prod-status-badge prod-status-${tone}`}>
+                    <span className="prod-status-dot" />
+                    {label}
+                  </div>
+                );
+              })()}
             </div>
             {m.error && (
               <div className="prod-status-error" title={m.path}>
                 {m.error}
+              </div>
+            )}
+            {m.last_rollback && !m.error && (
+              <div className="prod-rollback-line" title={m.last_rollback.reason || ''}>
+                Last rollback: <span className="mono">{timeAgo(m.last_rollback.timestamp)}</span>
+                {m.last_rollback.from_version && (
+                  <> · from <span className="mono">{m.last_rollback.from_version}</span></>
+                )}
+                {m.last_rollback.reason && <> · {m.last_rollback.reason}</>}
               </div>
             )}
 

@@ -88,7 +88,9 @@ async def list_production_models(request: Request) -> JSONResponse:
         return _503("model registry not initialized")
 
     production = registry.list_production_models()
-    last_promotions = _last_promotion_per_model(_require_db())
+    db = _require_db()
+    last_promotions = _last_promotion_per_model(db)
+    last_rollbacks = _last_rollback_per_model(db)
 
     models = []
     for name in sorted(production):
@@ -121,6 +123,7 @@ async def list_production_models(request: Request) -> JSONResponse:
             "mtime": mtime,
             "generation": registry.get_generation(name),
             "last_promotion": last_promotions.get(name),
+            "last_rollback": last_rollbacks.get(name),
             "status": status,
             "error": error,
         })
@@ -226,6 +229,43 @@ def _last_promotion_per_model(db) -> dict[str, dict[str, Any]]:
                 "shadow_metrics": payload.get("shadow_metrics"),
                 "timestamp": ts,
                 "walacor_record_id": wal_id,
+            }
+    finally:
+        conn.close()
+    return out
+
+
+def _last_rollback_per_model(db) -> dict[str, dict[str, Any]]:
+    """Most recent MODEL_ROLLED_BACK event per model from lifecycle_events_mirror.
+
+    Mirrors `_last_promotion_per_model`. Returns empty when no
+    rollbacks have ever fired (the common case in fresh deployments).
+    """
+    if db is None:
+        return {}
+    sql = """
+        SELECT payload_json, timestamp
+        FROM lifecycle_events_mirror
+        WHERE event_type = 'model_rolled_back'
+        ORDER BY written_at DESC
+    """
+    out: dict[str, dict[str, Any]] = {}
+    conn = sqlite3.connect(db.path)
+    try:
+        for payload_json, ts in conn.execute(sql):
+            try:
+                payload = json.loads(payload_json)
+            except (ValueError, TypeError):
+                continue
+            name = payload.get("model_name")
+            if not isinstance(name, str) or name in out:
+                continue
+            out[name] = {
+                "from_version": payload.get("from_version"),
+                "to_archive": payload.get("to_archive"),
+                "reason": payload.get("reason"),
+                "delta": payload.get("delta"),
+                "timestamp": ts,
             }
     finally:
         conn.close()

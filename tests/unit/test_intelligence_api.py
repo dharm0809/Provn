@@ -182,6 +182,33 @@ async def test_list_production_models_flags_missing_file(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_list_production_models_includes_last_rollback(monkeypatch, tmp_path):
+    """A rolled-back model surfaces last_rollback alongside last_promotion."""
+    ctx = _make_ctx(tmp_path)
+    _install_ctx(monkeypatch, ctx)
+    (ctx.model_registry.base / "production" / "intent.onnx").write_bytes(b"x")
+
+    _insert_event(
+        ctx.intelligence_db,
+        event_type="model_rolled_back",
+        payload={
+            "model_name": "intent",
+            "from_version": "v9",
+            "to_archive": "intent-archived-2026-04-26.onnx",
+            "reason": "regression delta=0.150",
+            "delta": 0.15,
+        },
+    )
+
+    resp = await list_production_models(_fake_request())
+    body = json.loads(resp.body)
+    intent = next(m for m in body["models"] if m["model_name"] == "intent")
+    assert intent["last_rollback"] is not None
+    assert intent["last_rollback"]["from_version"] == "v9"
+    assert intent["last_rollback"]["to_archive"] == "intent-archived-2026-04-26.onnx"
+
+
+@pytest.mark.anyio
 async def test_list_production_models_includes_last_promotion(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path)
     _install_ctx(monkeypatch, ctx)
