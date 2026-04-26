@@ -68,6 +68,9 @@ class EventType(str, Enum):
     SHADOW_VALIDATION_COMPLETE = "shadow_validation_complete"
     MODEL_PROMOTED = "model_promoted"
     MODEL_REJECTED = "model_rejected"
+    # Phase 25 hardening — auto-rollback fires this when the
+    # post-promotion validator restores an archived version.
+    MODEL_ROLLED_BACK = "model_rolled_back"
 
 
 @dataclass
@@ -148,6 +151,29 @@ def build_promotion_event(
         "approver": approver,
     }
     return LifecycleEvent(event_type=EventType.MODEL_PROMOTED, payload=payload)
+
+
+def build_rollback_event(
+    *, model_name: str, from_version: str | None, to_archive: str, reason: str,
+    delta: float | None = None, sample_count: int | None = None,
+) -> LifecycleEvent:
+    """Build the lifecycle event for an auto-rollback.
+
+    `from_version` is the version that was just rolled back FROM (the
+    candidate that regressed). `to_archive` is the archive filename
+    that was restored.
+    """
+    payload: dict[str, Any] = {
+        "model_name": model_name,
+        "from_version": from_version,
+        "to_archive": to_archive,
+        "reason": reason,
+    }
+    if delta is not None:
+        payload["delta"] = delta
+    if sample_count is not None:
+        payload["sample_count"] = sample_count
+    return LifecycleEvent(event_type=EventType.MODEL_ROLLED_BACK, payload=payload)
 
 
 def build_model_rejected(

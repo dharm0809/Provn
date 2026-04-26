@@ -628,6 +628,12 @@ class Settings(BaseSettings):
     drift_check_interval_s: int = Field(default=600, ge=10, description="Seconds between drift monitor accuracy checks")
     drift_min_samples: int = Field(default=50, ge=1, description="Minimum signal-bearing samples required in both baseline and recent windows before drift is evaluated")
     drift_min_coverage: float = Field(default=0.30, ge=0.0, le=1.0, description="Minimum signal-coverage ratio in both windows before drift is evaluated")
+    post_promotion_window_h: int = Field(default=24, ge=1, description="Hours since promotion within which a candidate is eligible for auto-rollback validation")
+    post_promotion_threshold: float = Field(default=0.05, ge=0.0, le=1.0, description="Pre→post-promotion accuracy drop that triggers an auto-rollback")
+    post_promotion_interval_s: int = Field(default=600, ge=10, description="Seconds between post-promotion validation cycles")
+    post_promotion_min_samples: int = Field(default=200, ge=1, description="Minimum signal-bearing samples in pre AND post windows before auto-rollback fires")
+    post_promotion_cooldown_h: int = Field(default=12, ge=1, description="Hours after an auto-rollback during which the same model is exempt from further auto-rollback")
+    post_promotion_settle_minutes: int = Field(default=15, ge=1, description="Minutes after a promotion before its candidate is eligible for evaluation")
 
     # ── Phase 26: Readiness self-check ───────────────────────────────────────
     readiness_enabled: bool = Field(default=True, description="Enable GET /v1/readiness endpoint")

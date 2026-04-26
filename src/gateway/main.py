@@ -1139,6 +1139,34 @@ def _init_distillation_worker(settings, ctx) -> None:
         except Exception as drift_err:
             logger.warning("DriftMonitor init failed (non-fatal): %s", drift_err)
             ctx.drift_monitor = None
+
+        # Post-promotion validator — third regression line of defence.
+        try:
+            from gateway.intelligence.post_promotion_validator import (
+                PostPromotionValidator,
+            )
+            validator = PostPromotionValidator(
+                db=ctx.intelligence_db,
+                registry=ctx.model_registry,
+                threshold=settings.post_promotion_threshold,
+                window_h=settings.post_promotion_window_h,
+                interval_s=settings.post_promotion_interval_s,
+                min_samples=settings.post_promotion_min_samples,
+                min_coverage=settings.drift_min_coverage,
+                cooldown_h=settings.post_promotion_cooldown_h,
+                settle_minutes=settings.post_promotion_settle_minutes,
+                lifecycle_writer=ctx.lifecycle_event_writer,
+            )
+            validator.start()
+            ctx.post_promotion_validator = validator
+            logger.info(
+                "PostPromotionValidator started (window=%dh threshold=%.3f)",
+                settings.post_promotion_window_h,
+                settings.post_promotion_threshold,
+            )
+        except Exception as ppv_err:
+            logger.warning("PostPromotionValidator init failed (non-fatal): %s", ppv_err)
+            ctx.post_promotion_validator = None
     except Exception as e:
         logger.warning("DistillationWorker init failed (non-fatal): %s", e)
         ctx.distillation_worker = None

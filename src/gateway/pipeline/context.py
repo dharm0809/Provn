@@ -128,6 +128,9 @@ class PipelineContext:
         # When wired, schedules forced cycles when baseline→recent
         # accuracy drops past `drift_accuracy_drop_threshold`.
         self.drift_monitor: Any = None
+        # Post-promotion validator — auto-rolls back a freshly promoted
+        # candidate that regresses on production traffic.
+        self.post_promotion_validator: Any = None
 
 
 _ctx = PipelineContext()

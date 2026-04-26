@@ -156,6 +156,13 @@ model_promoted_total = Counter(
     "Candidate ONNX models promoted to production",
     ["model"],
 )
+# Auto- + manual-rollback events. `reason` values: "regression"
+# (post-promotion validator), "manual" (operator via /v1/control/...).
+model_rollback_total = Counter(
+    "walacor_gateway_model_rollback_total",
+    "Production model versions rolled back",
+    ["model", "reason"],
+)
 shadow_inference_errors_total = Counter(
     "walacor_gateway_shadow_inference_errors_total",
     "Shadow-inference errors (recorded as candidate_error rows)",
