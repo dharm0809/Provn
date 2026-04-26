@@ -58,12 +58,24 @@ def clear_analysis_cache() -> None:
 async def _run_analyzer(analyzer: ContentAnalyzer, text: str) -> Decision | None:
     """Run a single analyzer under its declared timeout. Returns fail-open Decision on timeout/error."""
     try:
-        result = analyzer.analyze(text)
-        # Support both sync and async analyzers:
-        # - Sync analyzers (PII, toxicity, DLP, SafetyClassifier) return Decision directly
-        # - Async analyzers (LlamaGuard) return a coroutine
+        # Sync analyzers (PII, toxicity, DLP, SafetyClassifier) call into
+        # blocking C extensions (ORT InferenceSession.run, regex engines).
+        # Calling them inline would hold the event loop for the entirety
+        # of the analyzer's runtime — including the per-analyzer ONNX
+        # timeout budget. Offload to a worker thread so the loop stays
+        # responsive and the existing `run_with_timeout` budget (sync,
+        # thread-pool-backed) only blocks that worker thread.
+        timeout_s = analyzer.timeout_ms / 1000.0
+        result = await asyncio.wait_for(
+            asyncio.to_thread(analyzer.analyze, text),
+            timeout=timeout_s,
+        )
+        # The to_thread call already awaited a sync return. If the
+        # analyzer happens to be coroutine-returning (e.g. LlamaGuard),
+        # `asyncio.to_thread` would have returned the coroutine object
+        # without awaiting it — handle that case.
         if asyncio.iscoroutine(result) or asyncio.isfuture(result):
-            return await asyncio.wait_for(result, timeout=analyzer.timeout_ms / 1000.0)
+            return await asyncio.wait_for(result, timeout=timeout_s)
         return result
     except asyncio.TimeoutError:
         logger.warning(

@@ -1992,13 +1992,17 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     _messages = _body.get("messages", [])
 
     # process_request() does prompt extraction + intent classification in one pass
-    # Wrapped in try/except — SI failure must NEVER block the request pipeline
+    # Wrapped in try/except — SI failure must NEVER block the request pipeline.
+    # Offloaded to a worker thread because Tier-2 ONNX classification calls
+    # into blocking onnxruntime.InferenceSession.run; running it inline
+    # would hold the event loop for up to onnx_inference_timeout_ms.
     _si_enrichment: dict[str, Any] = {}
     try:
-        _si_enrichment = _si.process_request(
-            messages=_messages,
-            metadata=_intent_metadata,
-            model_id=call.model_id or "",
+        _si_enrichment = await asyncio.to_thread(
+            _si.process_request,
+            _messages,
+            _intent_metadata,
+            call.model_id or "",
         )
     except Exception as _si_err:
         logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
@@ -2255,7 +2259,9 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     if _schema_mapper and http_response.status_code < 400:
         try:
             _raw_resp = json.loads(http_response.body)
-            _canonical = _schema_mapper.map_response(_raw_resp)
+            # Same offload reasoning as `_si.process_request` above —
+            # SchemaMapper._classify_onnx is sync and blocks on ORT.
+            _canonical = await asyncio.to_thread(_schema_mapper.map_response, _raw_resp)
 
             # Cross-validate: if adapter found no usage but ML did, enrich
             _adapter_usage = model_response.usage or {}

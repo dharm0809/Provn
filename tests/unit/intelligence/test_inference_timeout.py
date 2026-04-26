@@ -75,6 +75,49 @@ def test_safety_classifier_falls_back_when_session_hangs():
     assert decision.reason == "onnx_timeout"
 
 
+@pytest.mark.anyio
+async def test_safety_analyze_offloaded_to_thread_does_not_block_loop():
+    """Run _run_analyzer with a hanging SafetyClassifier; the loop must stay live.
+
+    Verifies the response_evaluator wraps sync analyzers in asyncio.to_thread
+    so onnxruntime.InferenceSession.run can't hold the event loop.
+    """
+    import asyncio
+    from gateway.content.safety_classifier import SafetyClassifier
+    from gateway.pipeline.response_evaluator import _run_analyzer
+
+    clf = SafetyClassifier()
+    if not clf._loaded:
+        pytest.skip("SafetyClassifier ONNX bundle not loaded")
+
+    blocking = MagicMock()
+    blocking.run.side_effect = lambda *a, **k: time.sleep(5.0)
+    clf._session = blocking
+
+    from gateway.config import get_settings
+    settings = get_settings()
+    original = settings.onnx_inference_timeout_ms
+    object.__setattr__(settings, "onnx_inference_timeout_ms", 50)
+    try:
+        # If the loop is held by clf.analyze, the heartbeat task can't tick.
+        ticks = 0
+        async def heartbeat():
+            nonlocal ticks
+            for _ in range(10):
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        hb = asyncio.create_task(heartbeat())
+        decision_task = asyncio.create_task(_run_analyzer(clf, "some text payload"))
+        await decision_task
+        await hb
+    finally:
+        object.__setattr__(settings, "onnx_inference_timeout_ms", original)
+
+    # Heartbeat must have ticked at least a few times while analyze was outstanding.
+    assert ticks >= 5, f"event loop appears blocked, only {ticks} heartbeat ticks observed"
+
+
 def test_intent_classifier_falls_back_when_session_hangs():
     """A blocking InferenceSession.run must not hang classify(); fall back to NORMAL."""
     from gateway.classifier.intent import IntentClassifier, NORMAL

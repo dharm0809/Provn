@@ -443,17 +443,25 @@ class SchemaIntelligence:
         """ONNX ML classification with confidence gating."""
         try:
             import numpy as np
+            from gateway.intelligence._inference_timeout import (
+                InferenceTimeout,
+                run_with_timeout,
+            )
             input_name = self._onnx_session.get_inputs()[0].name
 
             if input_name == "prompt":
                 inp = np.array([[prompt[:1000]]]).reshape(1, 1)
-                outputs = self._onnx_session.run(None, {input_name: inp})
+                outputs = run_with_timeout(
+                    self._onnx_session.run, None, {input_name: inp}, model="intent",
+                )
                 intent = str(outputs[0][0])
                 prob_dict = outputs[1][0]
                 confidence = float(max(prob_dict.values()))
             else:
                 inputs = self._tokenize(prompt)
-                outputs = self._onnx_session.run(None, inputs)
+                outputs = run_with_timeout(
+                    self._onnx_session.run, None, inputs, model="intent",
+                )
                 logits = outputs[0][0]
                 exp_logits = np.exp(logits - np.max(logits))
                 probs = exp_logits / exp_logits.sum()
@@ -467,6 +475,9 @@ class SchemaIntelligence:
                 return IntentResult(intent, confidence, "ml_onnx", "onnx_flagged_for_review")
             else:
                 return IntentResult(NORMAL, confidence, "ml_onnx", "onnx_low_confidence_default")
+        except InferenceTimeout as e:
+            logger.warning("ONNX intent inference timed out, falling back to NORMAL: %s", e)
+            return IntentResult(NORMAL, 0.0, "deterministic", "onnx_timeout")
         except Exception as e:
             logger.warning("ONNX classification failed: %s", e)
             return IntentResult(NORMAL, 0.0, "ml_onnx", f"onnx_error: {e}")
