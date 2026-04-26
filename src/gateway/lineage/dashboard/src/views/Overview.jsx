@@ -65,7 +65,7 @@ function StatusStrip({ health, sessions, total, pctAllowed }) {
 
         <div className="status-cell">
           <div className="status-cell-label">Total Requests</div>
-          <div className="status-cell-value">{total == null ? '—' : formatNumber(total)}</div>
+          <div className="status-cell-value" title="Counted from gateway_attempts (1 row per inbound request). Token totals below are per-execution and may exceed this when a single request spawns tool calls or retries.">{total == null ? '—' : formatNumber(total)}</div>
         </div>
 
         <div className="status-cell value-green">
@@ -264,7 +264,11 @@ export default function Overview({ navigate, health }) {
 
   // Charts
   const applySummary = useCallback((tpRows, tkRows, rng) => {
-    const total   = tpRows.reduce((s, d) => s + (d.rps || 0), 0);
+    // tpRows[i].requests is a per-bucket COUNT (despite the legacy `rps`
+    // chart-key still being plotted as the bar height). Sum the counts and
+    // divide by the full range duration to get the average rps over the
+    // window — not a per-bucket rate.
+    const total   = tpRows.reduce((s, d) => s + (d.requests || d.rps || 0), 0);
     const allowed = tpRows.reduce((s, d) => s + (d.allowed || 0), 0);
     const secs    = RANGE_SECONDS[rng] || 3600;
     const rps     = secs > 0 ? total / secs : 0;
@@ -285,12 +289,19 @@ export default function Overview({ navigate, health }) {
   useEffect(() => {
     const needsDate = range === '7d' || range === '30d';
     const label = (t) => t ? (needsDate ? t.substring(5, 16).replace('T', ' ') : t.substring(11, 16)) : '';
-    const mapThroughput = (d) => (d.buckets || []).map(b => ({
-      t: label(b.t),
-      rps:     b.request_count ?? b.total ?? 0,
-      allowed: b.allowed || 0,
-      blocked: b.blocked != null ? b.blocked : Math.max(0, (b.request_count ?? b.total ?? 0) - (b.allowed || 0)),
-    }));
+    const mapThroughput = (d) => (d.buckets || []).map(b => {
+      const requests = b.request_count ?? b.total ?? 0;
+      return {
+        t: label(b.t),
+        // `requests` is the per-bucket count (correctly named). `rps` is
+        // kept as an alias because the chart still references the legacy
+        // dataKey; treat it as the bar height, not a rate.
+        requests,
+        rps: requests,
+        allowed: b.allowed || 0,
+        blocked: b.blocked != null ? b.blocked : Math.max(0, requests - (b.allowed || 0)),
+      };
+    });
     const mapTkLt = (d) => (d.buckets || []).map(b => ({
       t:          label(b.t),
       prompt:     b.prompt_tokens    ?? 0,
