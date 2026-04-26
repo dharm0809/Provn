@@ -102,6 +102,10 @@ class DistillationWorker:
         # disk or silently overwrite each other. Locks are per-model so
         # `intent` and `safety` can still train in parallel.
         self._cycle_locks: dict[str, asyncio.Lock] = {}
+        # Strong references for drift-monitor-spawned retrain tasks; see
+        # attach_drift_monitor. Without these the GC can collect a
+        # pending task whose coroutine is still running.
+        self._drift_retrain_tasks: set[asyncio.Task] = set()
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -151,6 +155,39 @@ class DistillationWorker:
         background task.
         """
         return await self._run_cycle()
+
+    def attach_drift_monitor(self, monitor: "Any") -> None:
+        """Subscribe a forced cycle to drift signals from `monitor`.
+
+        Listener is sync (drift monitor expectation). It schedules
+        `retrain_one(sig.model)` as a background task and returns
+        immediately so the monitor's check loop isn't held up by
+        training latency. Failures are logged and swallowed — drift
+        detection is observational; a missed retrain is recoverable on
+        the next cycle.
+        """
+        def _on_drift(sig) -> None:  # type: ignore[no-untyped-def]
+            logger.info(
+                "drift signal: model=%s baseline=%.3f current=%.3f delta=%.3f samples=%d",
+                sig.model, sig.baseline_accuracy, sig.current_accuracy,
+                sig.delta, sig.sample_count,
+            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.debug("drift listener fired with no running loop — skipping")
+                return
+            task = loop.create_task(
+                self.retrain_one(sig.model),
+                name=f"drift-retrain-{sig.model}",
+            )
+            # Hold a reference so the task isn't GC'd mid-flight.
+            self._drift_retrain_tasks.add(task)
+            task.add_done_callback(self._drift_retrain_tasks.discard)
+
+        if not hasattr(self, "_drift_retrain_tasks"):
+            self._drift_retrain_tasks = set()
+        monitor.on_drift(_on_drift)
 
     async def retrain_one(self, model_name: str) -> CycleResult:
         """Train a single model immediately, bypassing the trigger gate.

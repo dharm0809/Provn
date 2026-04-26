@@ -623,6 +623,11 @@ class Settings(BaseSettings):
     teacher_llm_url: str = Field(default="", description="URL for teacher LLM used in distillation (empty = disabled)")
     teacher_llm_sample_rate: float = Field(default=0.01, ge=0.0, le=1.0, description="Fraction of requests sampled for teacher LLM labeling (0.0–1.0)")
     onnx_inference_timeout_ms: int = Field(default=100, ge=1, description="Hot-path ONNX inference timeout in milliseconds; on overrun callers fall back to Tier-1 / heuristic path")
+    drift_window_hours: int = Field(default=1, ge=1, description="Recent-accuracy window size for drift detection (hours)")
+    drift_accuracy_drop_threshold: float = Field(default=0.05, ge=0.0, le=1.0, description="Minimum baseline→recent accuracy drop that triggers a drift signal")
+    drift_check_interval_s: int = Field(default=600, ge=10, description="Seconds between drift monitor accuracy checks")
+    drift_min_samples: int = Field(default=50, ge=1, description="Minimum signal-bearing samples required in both baseline and recent windows before drift is evaluated")
+    drift_min_coverage: float = Field(default=0.30, ge=0.0, le=1.0, description="Minimum signal-coverage ratio in both windows before drift is evaluated")
 
     # ── Phase 26: Readiness self-check ───────────────────────────────────────
     readiness_enabled: bool = Field(default=True, description="Enable GET /v1/readiness endpoint")

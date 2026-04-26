@@ -124,6 +124,10 @@ class PipelineContext:
         # set, the Task 28 retrain endpoint calls `retrain_one(model)`
         # on it to kick an immediate training pass for one model.
         self.distillation_worker: DistillationWorker | None = None
+        # Optional rolling-accuracy drift monitor (Phase 25 hardening).
+        # When wired, schedules forced cycles when baseline→recent
+        # accuracy drops past `drift_accuracy_drop_threshold`.
+        self.drift_monitor: Any = None
 
 
 _ctx = PipelineContext()

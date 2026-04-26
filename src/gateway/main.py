@@ -1112,6 +1112,33 @@ def _init_distillation_worker(settings, ctx) -> None:
             "DistillationWorker started (min_divergences=%d)",
             settings.distillation_min_divergences,
         )
+
+        # Drift monitor — independent periodic task that watches for
+        # accuracy regressions on production verdicts and schedules a
+        # retrain via the worker. Subscribed before start() so the
+        # first check_once may already trigger a cycle.
+        try:
+            from gateway.intelligence.drift_monitor import DriftMonitor
+            drift = DriftMonitor(
+                ctx.intelligence_db,
+                window_hours=settings.drift_window_hours,
+                threshold=settings.drift_accuracy_drop_threshold,
+                check_interval_s=settings.drift_check_interval_s,
+                min_samples=settings.drift_min_samples,
+                min_coverage=settings.drift_min_coverage,
+            )
+            worker.attach_drift_monitor(drift)
+            drift.start()
+            ctx.drift_monitor = drift
+            logger.info(
+                "DriftMonitor started (window=%dh threshold=%.3f interval=%ds)",
+                settings.drift_window_hours,
+                settings.drift_accuracy_drop_threshold,
+                settings.drift_check_interval_s,
+            )
+        except Exception as drift_err:
+            logger.warning("DriftMonitor init failed (non-fatal): %s", drift_err)
+            ctx.drift_monitor = None
     except Exception as e:
         logger.warning("DistillationWorker init failed (non-fatal): %s", e)
         ctx.distillation_worker = None

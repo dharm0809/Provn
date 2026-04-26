@@ -218,6 +218,67 @@ class _Fea07Intelligence:
         return CheckResult(status="green", detail="Intelligence registry + DB available", elapsed_ms=elapsed)
 
 
+class _Fea08DriftMonitor:
+    """Drift monitor task is alive and ticking on schedule.
+
+    Severity = warn — drift detection is a quality signal, not a local
+    invariant. A stuck monitor degrades the gateway, doesn't keep it
+    out of rotation. Green when the monitor exists and last_check_at
+    is within `2 * check_interval_s` of now. Amber when intelligence
+    is disabled (drift monitor not expected). Red when intelligence
+    is enabled but the monitor never started, or its check loop has
+    stopped ticking.
+    """
+    id = "FEA-08"
+    name = "Drift monitor"
+    category = Category.feature
+    severity = Severity.warn
+
+    async def run(self, ctx: "PipelineContext") -> CheckResult:
+        t0 = time.monotonic()
+        settings = get_settings()
+        elapsed_ms = lambda: int((time.monotonic() - t0) * 1000)
+        if not settings.intelligence_enabled:
+            return CheckResult(
+                status="amber",
+                detail="intelligence disabled — drift monitor not started",
+                elapsed_ms=elapsed_ms(),
+            )
+        monitor = getattr(ctx, "drift_monitor", None)
+        if monitor is None:
+            return CheckResult(
+                status="red",
+                detail="intelligence enabled but DriftMonitor not initialized",
+                remediation="check startup logs for 'DriftMonitor init failed'",
+                elapsed_ms=elapsed_ms(),
+            )
+        last = getattr(monitor, "last_check_at", None)
+        if last is None:
+            return CheckResult(
+                status="amber",
+                detail="DriftMonitor has not run its first check_once yet",
+                elapsed_ms=elapsed_ms(),
+            )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        age_s = (now - last).total_seconds()
+        budget_s = 2 * settings.drift_check_interval_s
+        if age_s > budget_s:
+            return CheckResult(
+                status="red",
+                detail=f"DriftMonitor last check was {age_s:.0f}s ago (budget {budget_s}s)",
+                remediation="restart the gateway; if the issue persists, check intelligence DB locks",
+                evidence={"last_check_age_s": age_s, "budget_s": budget_s},
+                elapsed_ms=elapsed_ms(),
+            )
+        return CheckResult(
+            status="green",
+            detail=f"DriftMonitor last check {age_s:.0f}s ago",
+            evidence={"last_check_age_s": age_s},
+            elapsed_ms=elapsed_ms(),
+        )
+
+
 register(_Fea01LlamaGuard())
 register(_Fea02WebSearch())
 register(_Fea03Presidio())
@@ -225,3 +286,4 @@ register(_Fea04PromptGuard())
 register(_Fea05OTel())
 register(_Fea06WorkerRedis())
 register(_Fea07Intelligence())
+register(_Fea08DriftMonitor())
