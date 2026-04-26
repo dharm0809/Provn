@@ -62,6 +62,11 @@ class CycleResult:
     skipped: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     candidates: dict[str, Path] = field(default_factory=dict)
+    # Models whose lock was already held by another cycle and were
+    # therefore not entered. Surfaced separately from `skipped` (which
+    # means "trained but threshold not met") so dashboards can render
+    # the distinction.
+    already_running: list[str] = field(default_factory=list)
 
 
 class DistillationWorker:
@@ -90,6 +95,13 @@ class DistillationWorker:
         self._walacor = walacor_client
         self._running = False
         self._task: asyncio.Task | None = None
+        # Per-model cycle locks. Two concurrent retrain triggers for the
+        # same model (manual force_cycle + scheduled poll, two dashboard
+        # tabs) would otherwise both call trainer.train, both write
+        # candidates with timestamp-based versions, and either collide on
+        # disk or silently overwrite each other. Locks are per-model so
+        # `intent` and `safety` can still train in parallel.
+        self._cycle_locks: dict[str, asyncio.Lock] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -157,23 +169,34 @@ class DistillationWorker:
             # renders the error consistently.
             result.failed.append(model_name)
             return result
-        try:
-            outcome = await self._train_one(model_name)
-            if outcome is None:
-                result.skipped.append(model_name)
-            else:
-                result.trained.append(model_name)
-                result.candidates[model_name] = outcome
-        except Exception:
-            logger.exception("retrain_one(%s) failed", model_name)
-            result.failed.append(model_name)
+        await self._train_with_lock(model_name, result)
         return result
 
-    # ── Cycle ──────────────────────────────────────────────────────────
+    def _lock_for(self, model_name: str) -> asyncio.Lock:
+        """Lazy per-model lock so callers don't need to pre-register models."""
+        lock = self._cycle_locks.get(model_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._cycle_locks[model_name] = lock
+        return lock
 
-    async def _run_cycle(self) -> CycleResult:
-        result = CycleResult()
-        for model_name in _MODELS_IN_CYCLE_ORDER:
+    async def _train_with_lock(self, model_name: str, result: CycleResult) -> None:
+        """Run `_train_one` under the per-model lock; record the bucket.
+
+        If the lock is already held by a concurrent cycle for the same
+        model, append to `already_running` and return immediately. The
+        in-flight cycle will write the candidate; this caller doesn't
+        wait for it.
+        """
+        lock = self._lock_for(model_name)
+        if lock.locked():
+            logger.info(
+                "distillation skip %s: cycle already running for this model",
+                model_name,
+            )
+            result.already_running.append(model_name)
+            return
+        async with lock:
             try:
                 outcome = await self._train_one(model_name)
                 if outcome is None:
@@ -184,6 +207,13 @@ class DistillationWorker:
             except Exception:
                 logger.exception("training failed for %s", model_name)
                 result.failed.append(model_name)
+
+    # ── Cycle ──────────────────────────────────────────────────────────
+
+    async def _run_cycle(self) -> CycleResult:
+        result = CycleResult()
+        for model_name in _MODELS_IN_CYCLE_ORDER:
+            await self._train_with_lock(model_name, result)
         return result
 
     async def _train_one(self, model_name: str) -> Path | None:
