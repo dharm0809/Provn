@@ -215,6 +215,8 @@ class IntentClassifier:
             if input_name == "prompt":
                 # sklearn TF-IDF + LR pipeline — string input
                 inp = np.array([[prompt[:1000]]]).reshape(1, 1)
+                # Dormant — production intent inference goes through unified.SchemaIntelligence (see unified.py:_tier2_onnx).
+                # Wrap kept so re-enabling IntentClassifier inherits the same timeout protection.
                 outputs = run_with_timeout(
                     self._onnx_session.run, None, {input_name: inp}, model="intent",
                 )
