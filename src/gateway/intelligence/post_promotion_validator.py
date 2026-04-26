@@ -41,6 +41,11 @@ class _PromotionRow:
     model: str
     version: str
     promoted_at: datetime
+    # Version of the promotion that came BEFORE this one — used as the
+    # "previous accuracy" reference. None when no prior promotion is
+    # recorded for the model (first-ever promotion).
+    previous_version: str | None = None
+    previous_promoted_at: datetime | None = None
 
 
 class PostPromotionValidator:
@@ -134,16 +139,32 @@ class PostPromotionValidator:
         if promo.model not in ALLOWED_MODEL_NAMES:
             return None
 
+        # Per-version filter — see commit 3 of the version-column
+        # migration. "current" must look at THIS version's verdicts
+        # only, and "previous" must look at the PRIOR promotion's
+        # version's verdicts only. Without the filter, a flapping
+        # promotion (v2 → v1 → v3 in a short window) would mix
+        # versions in both windows and produce noisy comparisons.
         current = await asyncio.to_thread(
             self._db.accuracy_in_window,
             promo.model,
+            version=promo.version,
             start=promo.promoted_at,
             end=now,
+        )
+        # Use the previous version's promoted_at as the start of its
+        # window when we know it; otherwise fall back to a duration
+        # window backwards from the current promotion.
+        prev_window_start = (
+            promo.previous_promoted_at
+            if promo.previous_promoted_at is not None
+            else promo.promoted_at - self._window
         )
         previous = await asyncio.to_thread(
             self._db.accuracy_in_window,
             promo.model,
-            start=promo.promoted_at - self._window,
+            version=promo.previous_version,
+            start=prev_window_start,
             end=promo.promoted_at,
         )
         if (
@@ -218,7 +239,18 @@ class PostPromotionValidator:
     # ── helpers ────────────────────────────────────────────────────────
 
     def _recent_promotions(self, now: datetime) -> list[_PromotionRow]:
-        """One row per model — the most recent promotion within `window_h`."""
+        """One row per model — the most recent promotion within `window_h`,
+        annotated with the prior promotion's version + timestamp.
+
+        Walks `lifecycle_events_mirror` newest-first. The first
+        MODEL_PROMOTED event per model is the "current" promotion; the
+        second is "previous_version" (used as the per-version
+        accuracy baseline in `_evaluate`). MODEL_ROLLED_BACK events
+        are ignored — they don't change `version=` on the new
+        verdicts (the verdicts that follow a rollback carry the
+        restored version, which must have been MODEL_PROMOTED at some
+        earlier point).
+        """
         import json
         import sqlite3 as sql
 
@@ -230,6 +262,9 @@ class PostPromotionValidator:
                 "WHERE event_type = 'model_promoted' "
                 "ORDER BY written_at DESC"
             ).fetchall()
+        # Pre-parse so we can do a single pass that captures both
+        # current + previous in order.
+        by_model: dict[str, list[tuple[str, datetime]]] = {}
         for payload_json, ts in rows:
             try:
                 payload = json.loads(payload_json)
@@ -239,17 +274,28 @@ class PostPromotionValidator:
             version = payload.get("candidate_version")
             if not (isinstance(model, str) and isinstance(version, str)):
                 continue
-            if model in seen:
-                continue
             try:
                 promoted_at = datetime.fromisoformat(ts)
             except ValueError:
                 continue
             if promoted_at.tzinfo is None:
                 promoted_at = promoted_at.replace(tzinfo=timezone.utc)
-            if promoted_at < cutoff:
+            by_model.setdefault(model, []).append((version, promoted_at))
+        for model, ordered in by_model.items():
+            current_version, current_at = ordered[0]
+            if current_at < cutoff:
                 continue
-            seen[model] = _PromotionRow(model=model, version=version, promoted_at=promoted_at)
+            prev_version: str | None = None
+            prev_at: datetime | None = None
+            if len(ordered) > 1:
+                prev_version, prev_at = ordered[1]
+            seen[model] = _PromotionRow(
+                model=model,
+                version=current_version,
+                promoted_at=current_at,
+                previous_version=prev_version,
+                previous_promoted_at=prev_at,
+            )
         return list(seen.values())
 
     def _latest_archive(self, model: str) -> str | None:
