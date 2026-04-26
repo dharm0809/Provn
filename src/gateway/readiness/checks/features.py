@@ -286,4 +286,70 @@ register(_Fea04PromptGuard())
 register(_Fea05OTel())
 register(_Fea06WorkerRedis())
 register(_Fea07Intelligence())
+class _Fea09SignalCoverage:
+    """Harvesters write divergence_signal often enough to power drift / validator.
+
+    Severity = warn — observability quality, not local invariant. Red
+    when intelligence is enabled, the model has > 100 verdicts in the
+    last 24h, AND coverage < 0.10. Amber when the gauge has never been
+    populated (drift monitor hasn't run check_once yet).
+    """
+    id = "FEA-09"
+    name = "Intelligence signal coverage"
+    category = Category.feature
+    severity = Severity.warn
+
+    async def run(self, ctx: "PipelineContext") -> CheckResult:
+        t0 = time.monotonic()
+        elapsed_ms = lambda: int((time.monotonic() - t0) * 1000)
+        settings = get_settings()
+        if not settings.intelligence_enabled:
+            return CheckResult(
+                status="amber",
+                detail="intelligence disabled",
+                elapsed_ms=elapsed_ms(),
+            )
+        db = getattr(ctx, "intelligence_db", None)
+        if db is None:
+            return CheckResult(
+                status="amber",
+                detail="intelligence DB not available",
+                elapsed_ms=elapsed_ms(),
+            )
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(hours=24)
+        unhealthy: list[dict] = []
+        from gateway.intelligence.registry import ALLOWED_MODEL_NAMES
+        for model in sorted(ALLOWED_MODEL_NAMES):
+            try:
+                snap = db.accuracy_in_window(model, start=start, end=now)
+            except Exception as exc:
+                unhealthy.append({"model": model, "status": "query_failed", "error": str(exc)})
+                continue
+            if snap.total_rows < 100:
+                continue  # too thin to judge
+            if snap.coverage < 0.10:
+                unhealthy.append({
+                    "model": model,
+                    "status": "low_coverage",
+                    "coverage": round(snap.coverage, 3),
+                    "total_rows": snap.total_rows,
+                })
+        if not unhealthy:
+            return CheckResult(
+                status="green",
+                detail="signal coverage healthy across all models",
+                elapsed_ms=elapsed_ms(),
+            )
+        return CheckResult(
+            status="red",
+            detail=f"{len(unhealthy)} model(s) below 0.10 signal coverage",
+            remediation="check teacher LLM availability and harvester runner status; coverage drives drift + auto-rollback decisions",
+            evidence={"unhealthy": unhealthy},
+            elapsed_ms=elapsed_ms(),
+        )
+
+
 register(_Fea08DriftMonitor())
+register(_Fea09SignalCoverage())

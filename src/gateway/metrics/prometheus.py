@@ -163,6 +163,16 @@ model_rollback_total = Counter(
     "Production model versions rolled back",
     ["model", "reason"],
 )
+# Fraction of recent verdicts that have a populated `divergence_signal`.
+# Drift monitor + post-promotion validator key off this signal as
+# ground truth; if coverage is low (< 0.10), their accuracy readings
+# are statistically meaningless and they correctly skip — but
+# operators need to see WHY no signals are flowing.
+intelligence_signal_coverage_ratio = Gauge(
+    "walacor_gateway_intelligence_signal_coverage_ratio",
+    "Fraction of verdicts with a populated divergence_signal in the last hour",
+    ["model"],
+)
 shadow_inference_errors_total = Counter(
     "walacor_gateway_shadow_inference_errors_total",
     "Shadow-inference errors (recorded as candidate_error rows)",

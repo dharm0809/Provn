@@ -157,6 +157,14 @@ class DriftMonitor:
             baseline = self._db.accuracy_in_window(
                 model, start=baseline_start, end=baseline_end,
             )
+            # Surface the recent-window signal coverage as a gauge —
+            # operators need to see when teachers / harvesters stop
+            # contributing labels, even before any drift threshold trips.
+            try:
+                from gateway.metrics.prometheus import intelligence_signal_coverage_ratio
+                intelligence_signal_coverage_ratio.labels(model=model).set(recent.coverage)
+            except Exception:
+                logger.debug("coverage gauge update failed", exc_info=True)
             if recent.sample_count < self._min_samples:
                 logger.debug(
                     "drift skip %s: recent samples %d < %d",
