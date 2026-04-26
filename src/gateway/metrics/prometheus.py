@@ -168,6 +168,15 @@ distillation_run_duration_seconds = Histogram(
     buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0),
 )
 
+# Hot-path ONNX inference timed out and the caller fell back to its
+# deterministic / heuristic path. Watch for spikes — sustained timeouts
+# usually mean a regressed candidate or a host under CPU pressure.
+onnx_inference_timeout_total = Counter(
+    "walacor_gateway_onnx_inference_timeout_total",
+    "Hot-path ONNX inference exceeded its timeout and fell back",
+    ["model"],
+)
+
 # teacher-LLM calls from the intent harvester.
 # Labels the call outcome so operators can reason about teacher cost
 # vs. harvest value: `called` = request made; `failed` = teacher call

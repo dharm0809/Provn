@@ -270,10 +270,17 @@ class SafetyClassifier(ContentAnalyzer):
             )
         else:
             try:
+                from gateway.intelligence._inference_timeout import (
+                    InferenceTimeout,
+                    run_with_timeout,
+                )
+
                 features = self._featurize(text)
                 features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
 
-                outputs = self._session.run(None, {self._input_name: features})
+                outputs = run_with_timeout(
+                    self._session.run, None, {self._input_name: features}, model="safety",
+                )
                 pred_idx = int(outputs[0][0])
                 label = self._labels[pred_idx] if pred_idx < len(self._labels) else "safe"
 
@@ -306,6 +313,18 @@ class SafetyClassifier(ContentAnalyzer):
                     confidence=round(confidence, 3),
                     category=label if label != "safe" else "safety",
                     reason=reason,
+                )
+            except InferenceTimeout as e:
+                self._record_fail_open("inference_timeout")
+                logger.warning("SafetyClassifier inference timed out (fail-open): %s", e)
+                label = "safe"
+                confidence = 0.0
+                decision = Decision(
+                    analyzer_id=self.analyzer_id,
+                    verdict=Verdict.PASS,
+                    confidence=0.0,
+                    category="safety",
+                    reason="onnx_timeout",
                 )
             except Exception as e:
                 self._record_fail_open("inference_failed")

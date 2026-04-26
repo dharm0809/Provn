@@ -203,6 +203,10 @@ class IntentClassifier:
         """ONNX classification with confidence gating."""
         try:
             import numpy as np
+            from gateway.intelligence._inference_timeout import (
+                InferenceTimeout,
+                run_with_timeout,
+            )
 
             # sklearn pipeline ONNX model expects string input named "prompt"
             input_name = self._onnx_session.get_inputs()[0].name
@@ -211,7 +215,9 @@ class IntentClassifier:
             if input_name == "prompt":
                 # sklearn TF-IDF + LR pipeline — string input
                 inp = np.array([[prompt[:1000]]]).reshape(1, 1)
-                outputs = self._onnx_session.run(None, {input_name: inp})
+                outputs = run_with_timeout(
+                    self._onnx_session.run, None, {input_name: inp}, model="intent",
+                )
                 # Output 0 = label, Output 1 = probability dict
                 intent = str(outputs[0][0])
                 prob_dict = outputs[1][0]  # {class: prob}
@@ -219,7 +225,9 @@ class IntentClassifier:
             else:
                 # Transformer model — tokenized input
                 inputs = self._tokenize(prompt)
-                outputs = self._onnx_session.run(None, inputs)
+                outputs = run_with_timeout(
+                    self._onnx_session.run, None, inputs, model="intent",
+                )
                 logits = outputs[0][0]
                 exp_logits = np.exp(logits - np.max(logits))
                 probs = exp_logits / exp_logits.sum()
@@ -242,6 +250,12 @@ class IntentClassifier:
                     intent=NORMAL, confidence=confidence,
                     tier="ml_onnx", reason="onnx_low_confidence_default",
                 )
+        except InferenceTimeout as e:
+            logger.warning("ONNX intent inference timed out, falling back to NORMAL: %s", e)
+            return IntentResult(
+                intent=NORMAL, confidence=0.0,
+                tier="deterministic", reason="onnx_timeout",
+            )
         except Exception as e:
             logger.warning("ONNX classification failed: %s", e)
             return IntentResult(

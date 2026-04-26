@@ -251,17 +251,27 @@ class SchemaMapper:
         Returns list of (label, confidence) tuples.
         """
         if self._session:
-            return self._classify_onnx(fields)
+            from gateway.intelligence._inference_timeout import InferenceTimeout
+            try:
+                return self._classify_onnx(fields)
+            except InferenceTimeout as e:
+                logger.warning("schema-mapper ONNX timed out, using heuristic: %s", e)
+                return self._classify_heuristic(fields)
         return self._classify_heuristic(fields)
 
     def _classify_onnx(self, fields: list[FlatField]) -> list[tuple[str, float]]:
         """Batch ONNX inference on all fields."""
+        from gateway.intelligence._inference_timeout import run_with_timeout
+
         feature_matrix = np.array(
             [extract_features(f) for f in fields], dtype=np.float32
         )
         feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=1.0, neginf=-1.0)
 
-        outputs = self._session.run(None, {self._input_name: feature_matrix})
+        outputs = run_with_timeout(
+            self._session.run, None, {self._input_name: feature_matrix},
+            model="schema_mapper",
+        )
         predicted_indices = outputs[0]
 
         # Get probabilities if available (output[1] for sklearn models)
