@@ -552,6 +552,7 @@ def _init_safety_classifier(settings, ctx) -> None:
             verdict_buffer=ctx.verdict_buffer,
             registry=ctx.model_registry,
             model_name="safety" if ctx.model_registry is not None else None,
+            intelligence_db=ctx.intelligence_db,
         )
         # When a registry is wired the session load is deferred to first
         # inference, so `_loaded` stays False at init. Trust the registry
@@ -1666,6 +1667,7 @@ async def on_startup() -> None:
                 verdict_buffer=ctx.verdict_buffer,
                 registry=ctx.model_registry,
                 model_name="schema_mapper" if ctx.model_registry is not None else None,
+                intelligence_db=ctx.intelligence_db,
             )
             logger.info(
                 "SchemaMapper initialized (ONNX=%s, registry=%s)",

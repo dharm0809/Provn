@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Canonical set of model names this registry serves. Matches the `model_name`
 # strings recorded by `ModelVerdict` (see `intelligence/types.py`) and the
@@ -86,6 +87,44 @@ class ModelRegistry:
     def ensure_structure(self) -> None:
         for sub in ("production", "candidates", "archive", "archive/failed"):
             (self.base / sub).mkdir(parents=True, exist_ok=True)
+
+    def current_version(self, db: "Any | None", model: str) -> str | None:
+        """Return the candidate_version of the most recent MODEL_PROMOTED event.
+
+        `db` is an `IntelligenceDB`. Reading from `lifecycle_events_mirror`
+        rather than from a sidecar file avoids a parallel source of truth —
+        promotions already write the mirror row, rollbacks emit a new
+        MODEL_PROMOTED-shaped record (the rollback payload carries
+        `to_archive`, but the next promotion that succeeds is what
+        re-anchors `current_version`). Pre-Phase-25-promotion files have
+        no event and return None; classifiers stamp NULL on those rows.
+
+        Sync — callers that care about latency wrap in to_thread.
+        """
+        if db is None:
+            return None
+        _validate_model_name(model)
+        import json
+        import sqlite3
+        try:
+            with sqlite3.connect(db.path) as conn:
+                row = conn.execute(
+                    "SELECT payload_json FROM lifecycle_events_mirror "
+                    "WHERE event_type = 'model_promoted' "
+                    "ORDER BY written_at DESC"
+                ).fetchall()
+        except sqlite3.Error:
+            return None
+        for (payload_json,) in row:
+            try:
+                payload = json.loads(payload_json)
+            except (ValueError, TypeError):
+                continue
+            if payload.get("model_name") != model:
+                continue
+            v = payload.get("candidate_version")
+            return v if isinstance(v, str) else None
+        return None
 
     def production_path(self, model: str) -> Path:
         _validate_model_name(model)

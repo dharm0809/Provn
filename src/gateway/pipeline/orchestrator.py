@@ -1979,6 +1979,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             # to be true — the runner itself no-ops when no active
             # candidate is registered.
             shadow_runner=ctx.shadow_runner,
+            intelligence_db=ctx.intelligence_db,
         )
         ctx.schema_intelligence = _si
 
@@ -2252,6 +2253,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             _schema_mapper = SchemaMapper(
                 registry=ctx.model_registry,
                 model_name="schema_mapper" if ctx.model_registry is not None else None,
+                intelligence_db=ctx.intelligence_db,
             )
             ctx.schema_mapper = _schema_mapper
         except Exception as _sm_init_err:

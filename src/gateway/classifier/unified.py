@@ -208,6 +208,7 @@ class SchemaIntelligence:
         registry: "ModelRegistry | None" = None,
         model_name: str | None = None,
         shadow_runner: "ShadowRunner | None" = None,
+        intelligence_db: "Any | None" = None,
     ) -> None:
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
@@ -226,7 +227,9 @@ class SchemaIntelligence:
         # contract. When set, `classify_intent` polls the registry generation
         # counter and rebuilds the ONNX session after a promote/rollback.
         from gateway.intelligence.reload import ReloadState
-        self._reload_state = ReloadState(registry=registry, model_name=model_name)
+        self._reload_state = ReloadState(
+            registry=registry, model_name=model_name, db=intelligence_db,
+        )
 
         # Load ONNX intent model
         if onnx_model_path and Path(onnx_model_path).exists():
@@ -374,6 +377,7 @@ class SchemaIntelligence:
                         prediction=result.intent,
                         confidence=float(result.confidence),
                         request_id=rid,
+                        version=self._reload_state.current_version,
                     )
                 )
             except Exception:

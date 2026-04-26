@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from gateway.intelligence.registry import ModelRegistry
@@ -35,10 +35,19 @@ class ReloadState:
     `-1` on `last_generation` guarantees the first `maybe_reload` call
     rebuilds (since registry generations start at 0). A client created
     without a registry keeps `registry=None` and `maybe_reload` short-circuits.
+
+    `current_version` is refreshed on every successful generation bump
+    by reading the latest MODEL_PROMOTED event from `lifecycle_events_mirror`.
+    Classifiers stamp this onto each `ModelVerdict.version` so
+    `accuracy_in_window` can isolate per-version traffic. None on
+    pre-Phase-25-promotion files — those verdicts go in with NULL
+    version and are filtered out by version-specific queries.
     """
     registry: "ModelRegistry | None" = None
     model_name: str | None = None
     last_generation: int = -1
+    current_version: str | None = None
+    db: "Any | None" = None
 
 
 def maybe_reload(
@@ -89,4 +98,19 @@ def maybe_reload(
         )
         return
     on_success(session)
-    logger.info("%s session reloaded from %s (generation=%d)", label, path, current)
+    # Refresh the current_version snapshot. Best-effort — lookup
+    # failures leave the previous value in place rather than wiping
+    # it. Classifiers may stamp NULL on the brief window between
+    # generation bump and the next promotion event being mirrored,
+    # which is fine — a NULL version still segregates from any
+    # specific-version query.
+    try:
+        state.current_version = state.registry.current_version(state.db, state.model_name)
+    except Exception:
+        logger.debug(
+            "%s reload: current_version lookup failed", label, exc_info=True,
+        )
+    logger.info(
+        "%s session reloaded from %s (generation=%d, version=%s)",
+        label, path, current, state.current_version,
+    )

@@ -127,6 +127,7 @@ class SafetyClassifier(ContentAnalyzer):
         verdict_buffer: "VerdictBuffer | None" = None,
         registry: "ModelRegistry | None" = None,
         model_name: str | None = None,
+        intelligence_db: "Any | None" = None,
     ) -> None:
         self._session = None
         self._input_name = ""
@@ -143,7 +144,9 @@ class SafetyClassifier(ContentAnalyzer):
         # components are stable training artifacts that do not change with
         # retraining in the current distillation setup.
         from gateway.intelligence.reload import ReloadState
-        self._reload_state = ReloadState(registry=registry, model_name=model_name)
+        self._reload_state = ReloadState(
+            registry=registry, model_name=model_name, db=intelligence_db,
+        )
 
         self._load()
 
@@ -354,6 +357,7 @@ class SafetyClassifier(ContentAnalyzer):
                         prediction=label,
                         confidence=float(confidence),
                         request_id=rid,
+                        version=self._reload_state.current_version,
                     )
                 )
             except Exception:

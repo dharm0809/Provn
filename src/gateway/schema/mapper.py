@@ -127,6 +127,7 @@ class SchemaMapper:
         verdict_buffer: "VerdictBuffer | None" = None,
         registry: "ModelRegistry | None" = None,
         model_name: str | None = None,
+        intelligence_db: "Any | None" = None,
     ) -> None:
         self._session = None
         self._input_name = ""
@@ -136,7 +137,9 @@ class SchemaMapper:
 
         # optional `ModelRegistry` wiring — see `intelligence/reload.py`.
         from gateway.intelligence.reload import ReloadState
-        self._reload_state = ReloadState(registry=registry, model_name=model_name)
+        self._reload_state = ReloadState(
+            registry=registry, model_name=model_name, db=intelligence_db,
+        )
 
         model_path = onnx_path or str(_ONNX_PATH)
         labels_path = str(_LABELS_PATH)
@@ -214,6 +217,7 @@ class SchemaMapper:
                         prediction=prediction,
                         confidence=float(result.mapping.confidence or 0.0),
                         request_id=rid,
+                        version=self._reload_state.current_version,
                     )
                 )
             except Exception:

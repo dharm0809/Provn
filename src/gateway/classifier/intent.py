@@ -62,6 +62,7 @@ class IntentClassifier:
         verdict_buffer: "VerdictBuffer | None" = None,
         registry: "ModelRegistry | None" = None,
         model_name: str | None = None,
+        intelligence_db: "Any | None" = None,
     ):
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
@@ -74,7 +75,9 @@ class IntentClassifier:
         # generation counter moves (i.e. after a promote/rollback). Held in
         # a ReloadState so the client + helper share a single source of truth.
         from gateway.intelligence.reload import ReloadState
-        self._reload_state = ReloadState(registry=registry, model_name=model_name)
+        self._reload_state = ReloadState(
+            registry=registry, model_name=model_name, db=intelligence_db,
+        )
 
         # Try loading ONNX model
         if onnx_model_path and Path(onnx_model_path).exists():
@@ -131,6 +134,7 @@ class IntentClassifier:
                         prediction=result.intent,
                         confidence=float(result.confidence),
                         request_id=rid,
+                        version=self._reload_state.current_version,
                     )
                 )
             except Exception:
