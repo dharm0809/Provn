@@ -70,6 +70,9 @@ dev = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests; slower, may need optional deps (sklearn, onnxruntime)",
+]
 
 [project.scripts]
 walacor-gateway = "gateway.main:main"
