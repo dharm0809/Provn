@@ -499,7 +499,7 @@ async def rollback_model(request: Request) -> JSONResponse:
     10 naming). We pick the lexicographically-latest — ISO-8601
     timestamps sort correctly — and call `registry.rollback`.
     """
-    from gateway.intelligence.events import build_promotion_event
+    from gateway.intelligence.events import build_rollback_event
 
     model = request.path_params.get("model", "")
     ctx = get_pipeline_context()
@@ -536,12 +536,17 @@ async def rollback_model(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=400)
 
     approver = _caller_identity(request)
-    event = build_promotion_event(
+    # Surface the prior production version when we know it; the
+    # _last_promotion_per_model index gives us the most recent candidate
+    # that was promoted to production for this model.
+    db = ctx.intelligence_db
+    prior = _last_promotion_per_model(db).get(model) if db is not None else None
+    from_version = (prior or {}).get("candidate_version")
+    event = build_rollback_event(
         model_name=model,
-        candidate_version=f"rollback:{target.name}",
-        dataset_hash="",
-        shadow_metrics={"source": "rollback"},
-        approver=approver,
+        from_version=from_version,
+        to_archive=target.name,
+        reason=f"manual rollback by {approver}",
     )
     await _write_lifecycle_event(ctx, event)
     try:
