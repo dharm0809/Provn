@@ -43,7 +43,7 @@
       "expected_labels": {
         "id": "response_id",
         "object": "UNKNOWN",
-        "created": "UNKNOWN",
+        "created": "response_timestamp",
         "model": "model",
         "system_fingerprint": "model_hash",
         "choices[0].index": "UNKNOWN",
@@ -62,7 +62,7 @@
         "usage.completion_tokens_details.accepted_prediction_tokens": "UNKNOWN",
         "usage.completion_tokens_details.rejected_prediction_tokens": "UNKNOWN"
       },
-      "notes": "Plain non-streaming chat-completions response. `created` is a unix timestamp (response creation), distinct from `timing_value` which is a latency/duration. `reasoning_tokens` is a token *count*, not the reasoning *content*, so UNKNOWN. `refusal` is a free-text refusal field, not a safety category label."
+      "notes": "Plain non-streaming chat-completions response. `created` (unix int) → response_timestamp (provider wall-clock); distinct from timing_value (a duration). `reasoning_tokens` is a token *count*, not the reasoning *content*, so UNKNOWN. `refusal` is a free-text refusal field, not a safety category label."
     },
     {
       "raw": {
@@ -85,7 +85,7 @@
       "expected_labels": {
         "id": "response_id",
         "object": "UNKNOWN",
-        "created": "UNKNOWN",
+        "created": "response_timestamp",
         "model": "model",
         "system_fingerprint": "model_hash",
         "choices[0].index": "UNKNOWN",
@@ -133,7 +133,7 @@
       "expected_labels": {
         "id": "response_id",
         "object": "UNKNOWN",
-        "created": "UNKNOWN",
+        "created": "response_timestamp",
         "model": "model",
         "system_fingerprint": "model_hash",
         "choices[0].index": "UNKNOWN",

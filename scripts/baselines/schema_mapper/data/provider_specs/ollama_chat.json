@@ -24,7 +24,7 @@
       },
       "expected_labels": {
         "model": "model",
-        "created_at": "UNKNOWN",
+        "created_at": "response_timestamp",
         "message.role": "UNKNOWN",
         "message.content": "content",
         "done_reason": "finish_reason",
@@ -36,7 +36,7 @@
         "eval_count": "completion_tokens",
         "eval_duration": "timing_value"
       },
-      "notes": "Plain non-streaming Ollama /api/chat response. Ollama returns FOUR distinct timing_value fields (total/load/prompt_eval/eval durations, all nanoseconds). Ollama does NOT return cached_tokens or total_tokens; downstream code computes total. `done` boolean is a streaming-completion flag, not a finish reason — `done_reason` is the canonical finish_reason. `created_at` is wall-clock response time, not a duration → UNKNOWN."
+      "notes": "Plain non-streaming Ollama /api/chat response. Ollama returns FOUR distinct timing_value fields (total/load/prompt_eval/eval durations, all nanoseconds). Ollama does NOT return cached_tokens or total_tokens; downstream code computes total. `done` boolean is a streaming-completion flag, not a finish reason — `done_reason` is the canonical finish_reason. `created_at` is wall-clock response time → response_timestamp (ISO-8601 string variant, distinct from timing_value durations)."
     },
     {
       "raw": {
@@ -50,7 +50,7 @@
       },
       "expected_labels": {
         "model": "model",
-        "created_at": "UNKNOWN",
+        "created_at": "response_timestamp",
         "message.role": "UNKNOWN",
         "message.content": "content",
         "done": "UNKNOWN"
@@ -84,7 +84,7 @@
       },
       "expected_labels": {
         "model": "model",
-        "created_at": "UNKNOWN",
+        "created_at": "response_timestamp",
         "message.role": "UNKNOWN",
         "message.content": "content",
         "message.tool_calls[0].function.name": "tool_call_name",
