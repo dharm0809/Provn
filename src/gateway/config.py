@@ -327,7 +327,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("WALACOR_LIFECYCLE_EVENTS_ETID", "walacor_lifecycle_events_etid"),
     )
     walacor_agent_run_manifests_etid: int = Field(
-        default=9000005,
+        default=9000034,
         description="Walacor ETId for agent-run manifests (Pillar 4 of agent tracing)",
         validation_alias=AliasChoices(
             "WALACOR_AGENT_RUN_MANIFESTS_ETID",

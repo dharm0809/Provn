@@ -45,6 +45,7 @@ if not all([SERVER, USERNAME, PASSWORD]):
 EXECUTIONS_ETID = 9000031
 ATTEMPTS_ETID = 9000032
 TOOL_EVENTS_ETID = 9000033
+AGENT_RUN_MANIFESTS_ETID = 9000034   # Pillar 4 — signed agent-run manifests
 
 # ── Schema definitions ──────────────────────────────────────────────────────
 # POST /schemas uses: {ETId: 50, SV: 1, Schema: {ETId: <your_id>, Fields: [...]}}
@@ -136,10 +137,38 @@ TOOL_EVENTS_FIELDS = [
     {"FieldName": "content_analysis",   "DataType": "TEXT", "MaxLength": 65535, "Required": False},
 ]
 
+AGENT_RUN_MANIFEST_FIELDS = [
+    # Identity
+    {"FieldName": "run_id",                   "DataType": "TEXT", "MaxLength": 255,   "Required": True},
+    {"FieldName": "tenant_id",                "DataType": "TEXT", "MaxLength": 255,   "Required": False},
+    {"FieldName": "trace_id",                 "DataType": "TEXT", "MaxLength": 255,   "Required": False},
+    # Caller — keep the JSON blob; queries can JSON-extract
+    {"FieldName": "caller_identity",          "DataType": "TEXT", "MaxLength": 4096,  "Required": False},
+    # Framework guess (rule-based v1; ONNX in v2)
+    {"FieldName": "framework_guess",          "DataType": "TEXT", "MaxLength": 1024,  "Required": False},
+    # Lifecycle
+    {"FieldName": "start_ts",                 "DataType": "TEXT", "MaxLength": 64,    "Required": False},
+    {"FieldName": "end_ts",                   "DataType": "TEXT", "MaxLength": 64,    "Required": False},
+    {"FieldName": "end_reason",               "DataType": "TEXT", "MaxLength": 64,    "Required": False},
+    # Aggregated counts (also derivable from the lists, but cheap to filter on)
+    {"FieldName": "llm_call_count",           "DataType": "INTEGER",                  "Required": False},
+    {"FieldName": "tool_event_count",         "DataType": "INTEGER",                  "Required": False},
+    # The actual references — JSON arrays so you can keep schema flat. Larger
+    # bound because a long ReAct loop can carry dozens of tool events.
+    {"FieldName": "llm_calls",                "DataType": "TEXT", "MaxLength": 65535, "Required": False},
+    {"FieldName": "reconstructed_tool_events","DataType": "TEXT", "MaxLength": 65535, "Required": False},
+    # Tamper-evident integrity
+    {"FieldName": "message_chain_hash",       "DataType": "TEXT", "MaxLength": 128,   "Required": False},
+    {"FieldName": "signature",                "DataType": "TEXT", "MaxLength": 512,   "Required": False},
+    {"FieldName": "signed_at",                "DataType": "TEXT", "MaxLength": 64,    "Required": False},
+    {"FieldName": "signing_key_id",           "DataType": "TEXT", "MaxLength": 255,   "Required": False},
+]
+
 SCHEMAS = [
-    {"etid": EXECUTIONS_ETID,   "table": "gateway_executions",   "fields": EXECUTIONS_FIELDS},
-    {"etid": ATTEMPTS_ETID,     "table": "gateway_attempts",     "fields": ATTEMPTS_FIELDS},
-    {"etid": TOOL_EVENTS_ETID,  "table": "gateway_tool_events",  "fields": TOOL_EVENTS_FIELDS},
+    {"etid": EXECUTIONS_ETID,            "table": "gateway_executions",        "fields": EXECUTIONS_FIELDS},
+    {"etid": ATTEMPTS_ETID,              "table": "gateway_attempts",          "fields": ATTEMPTS_FIELDS},
+    {"etid": TOOL_EVENTS_ETID,           "table": "gateway_tool_events",       "fields": TOOL_EVENTS_FIELDS},
+    {"etid": AGENT_RUN_MANIFESTS_ETID,   "table": "gateway_agent_run_manifests", "fields": AGENT_RUN_MANIFEST_FIELDS},
 ]
 
 

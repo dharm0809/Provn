@@ -87,7 +87,7 @@ class WalacorClient:
         attempts_etid: int = 9000002,
         tool_events_etid: int = 9000003,
         lifecycle_events_etid: int = 9000024,
-        agent_run_manifests_etid: int = 9000005,
+        agent_run_manifests_etid: int = 9000034,
     ) -> None:
         self._server = server.rstrip("/")
         self._username = username
@@ -220,14 +220,27 @@ class WalacorClient:
                 await self._authenticate()
                 continue
             resp.raise_for_status()
-            # Walacor may return 200 with success=false for schema validation errors
+            # Walacor returns HTTP 200 even on rejections. Two failure shapes
+            # observed in the wild:
+            #   {"success": false, "error": {...}}             (schema validation)
+            #   {"errors": [{"reason":"dbError","message":...}, ...], "code": 4xx}
+            #                                                  (unknown ETId)
+            # Both must raise so callers see the failure — without this, an
+            # unregistered ETId silently drops every submission and our
+            # delivery counters report false success.
             try:
                 body = resp.json()
-                if isinstance(body, dict) and body.get("success") is False:
-                    err_detail = body.get("error", {})
-                    raise RuntimeError(
-                        f"Walacor submit rejected ETId={etid}: {err_detail}"
-                    )
+                if isinstance(body, dict):
+                    if body.get("success") is False:
+                        raise RuntimeError(
+                            f"Walacor submit rejected ETId={etid}: {body.get('error', {})}"
+                        )
+                    errs = body.get("errors")
+                    code = body.get("code")
+                    if (isinstance(errs, list) and errs) or (isinstance(code, int) and code >= 400):
+                        raise RuntimeError(
+                            f"Walacor submit rejected ETId={etid}: {body}"
+                        )
             except (ValueError, KeyError):
                 pass  # Non-JSON or unexpected shape — treat as success
             return
@@ -398,12 +411,14 @@ class WalacorClient:
     async def write_agent_run_manifest(self, manifest: dict[str, Any]) -> None:
         """Persist one signed agent-run manifest to Walacor (Pillar 4).
 
-        Best-effort: failures are logged at WARNING and swallowed so the
-        manifest never blocks the request path.
+        The internal _record_delivery snapshot tracks per-call success for the
+        /v1/connections walacor_delivery tile. We also re-raise on failure so
+        the caller's Prometheus delivery counter (agent_run_manifests_delivery_*)
+        reflects reality — without re-raising, the orchestrator's try/except
+        sees None-return and always increments the success label.
         """
         try:
             await self._submit(self._agent_run_manifests_etid, [dict(manifest)])
-            self._record_delivery("write_agent_run_manifest", ok=True, detail=None)
         except Exception as e:
             self._record_delivery(
                 "write_agent_run_manifest", ok=False, detail=classify_exception(e)
@@ -412,6 +427,8 @@ class WalacorClient:
                 "Walacor write_agent_run_manifest failed run_id=%s: %s",
                 manifest.get("run_id"), e,
             )
+            raise
+        self._record_delivery("write_agent_run_manifest", ok=True, detail=None)
 
     # Fields defined in the Walacor gateway_tool_events schema (ETId 9000023).
     # Run scripts/setup_walacor_schemas.py to create schemas with all fields.
