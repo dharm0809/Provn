@@ -131,6 +131,7 @@ function readViewFromUrl() {
   if (v === 'compliance') return { name: 'compliance', params: {} };
   if (v === 'playground') return { name: 'playground', params: {} };
   if (v === 'connections') return { name: 'connections', params: {} };
+  if (v === 'agent-runs') return { name: 'agent-runs', params: { runId: sp.get('runId') || null } };
   return { name: 'overview', params: {} };
 }
 
@@ -231,6 +232,13 @@ export default function App() {
     if (name === 'connections') {
       const sp = new URLSearchParams();
       sp.set('view', 'connections');
+      window.history.replaceState({}, '', `${path}?${sp.toString()}`);
+      return;
+    }
+    if (name === 'agent-runs') {
+      const sp = new URLSearchParams();
+      sp.set('view', 'agent-runs');
+      if (params && params.runId) sp.set('runId', String(params.runId));
       window.history.replaceState({}, '', `${path}?${sp.toString()}`);
       return;
     }
