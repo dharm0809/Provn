@@ -30,12 +30,25 @@ const MODEL_META = {
 
 function enrichModel(m) {
   const meta = MODEL_META[m.model_name] || {};
+  // Provenance/cold-start fields come from the API. Treat anything that
+  // isn't an explicit "baseline" as locally-trained — older API responses
+  // without the field shouldn't paint cold-start UX onto a real promoted
+  // model.
+  const provenance = m.provenance === 'baseline' ? 'baseline' : 'trained_local';
+  const baselineVersion = m.baseline_version || null;
+  const coldStart = !!m.cold_start && provenance === 'baseline';
+  // Display version: prefer the explicit baseline tag for shipped models
+  // so dashboards never show "v000" for something that is actually a
+  // signed, versioned baseline.
+  const activeVersion = m.active_version
+    || baselineVersion
+    || `v${String(m.generation || 0).padStart(3, '0')}`;
   return {
     ...m,
     description: m.description || meta.description || '—',
     architecture: m.architecture || meta.architecture || '—',
     parameters: m.parameters || meta.parameters || '—',
-    active_version: m.active_version || `v${String(m.generation || 0).padStart(3, '0')}`,
+    active_version: activeVersion,
     // Backend returns null for these when we lack signal in the window
     // (cold start, no traffic yet). Preserve null so the UI can render
     // "—" instead of painting a misleading "0.0%" or "stable".
@@ -45,6 +58,11 @@ function enrichModel(m) {
     predictions_7d: m.predictions_7d ?? null,
     drift: m.drift ?? null,
     accuracy_series: m.accuracy_series || null,
+    provenance,
+    baseline_version: baselineVersion,
+    cold_start: coldStart,
+    samples_until_graduation: m.samples_until_graduation ?? null,
+    graduation_threshold: m.graduation_threshold ?? null,
   };
 }
 
@@ -104,7 +122,14 @@ function IntelHeader({ models, candidates }) {
       <div className="intel-metric">
         <div className="intel-metric-label">Production Models</div>
         <div className="intel-metric-value">{models.length}</div>
-        <div className="intel-metric-sub">all on chain</div>
+        <div className="intel-metric-sub">{(() => {
+          const baseline = models.filter(m => m.provenance === 'baseline').length;
+          const trained = models.length - baseline;
+          if (models.length === 0) return 'no models loaded';
+          if (baseline === 0) return `${trained} trained locally`;
+          if (trained === 0) return `${baseline} on shipped baseline`;
+          return `${trained} trained · ${baseline} baseline`;
+        })()}</div>
       </div>
       <div className="intel-metric">
         <div className="intel-metric-label">Avg Accuracy</div>
@@ -144,11 +169,32 @@ function ProductionView({ models, onForceRetrain }) {
   if (models.length === 0) {
     return <div className="card"><div className="empty">No production models yet.</div></div>;
   }
+  const baselines = models.filter(m => m.provenance === 'baseline');
+  const warming = baselines.filter(m => m.cold_start);
   return (
-    <div className="prod-grid">
+    <>
+      {warming.length > 0 && (
+        <div className="prod-coldstart-banner">
+          <div className="prod-coldstart-title">◇ Cold start — warming up on shipped baselines</div>
+          <div className="prod-coldstart-body">
+            {warming.length === models.length
+              ? `All ${models.length} production models are running the bundled baselines.`
+              : `${warming.length} of ${models.length} production models are running bundled baselines.`}
+            {' '}Baseline weights produce real verdicts immediately; trailing-window
+            accuracy fills in once each model has logged{' '}
+            <span className="mono">{warming[0].graduation_threshold ?? 200}</span>{' '}
+            local predictions. Until then, drift detection is suppressed and verdicts
+            are observer-only — declarative policies and rule fallbacks remain authoritative.
+          </div>
+        </div>
+      )}
+      <div className="prod-grid">
       {models.map(m => {
         const accTrend = m.accuracy_series;
-        const drift = m.drift || 'stable';
+        // Only trust drift when we have an accuracy signal to back it up.
+        // Otherwise the backend's null/absent drift means "unknown" — which
+        // must render as "awaiting samples", never as "STABLE".
+        const drift = m.accuracy != null ? (m.drift || 'stable') : null;
         return (
           <div key={m.model_name} className="card prod-card">
             <div className="prod-card-head">
@@ -157,20 +203,23 @@ function ProductionView({ models, onForceRetrain }) {
                 <div className="prod-model-desc">{m.description}</div>
               </div>
               {(() => {
-                // Tri-state health pill:
-                //   red   = file missing/unreadable on disk
-                //   amber = file ok but auto-rollback fired in the last 24h
-                //   green = file ok, no recent rollback
+                // Status pill — precedence:
+                //   missing/unreadable file > recent rollback > baseline cold-start >
+                //   baseline graduated > locally-trained active
                 let tone = 'active';
                 let label = `ACTIVE · GEN ${m.generation}`;
                 if (m.status === 'missing') { tone = 'missing'; label = 'MISSING FILE'; }
                 else if (m.status === 'unreadable') { tone = 'unreadable'; label = 'UNREADABLE'; }
-                else if (m.last_rollback?.timestamp) {
-                  const ageMs = Date.now() - new Date(m.last_rollback.timestamp).getTime();
-                  if (ageMs < 24 * 60 * 60 * 1000) {
-                    tone = 'rollback';
-                    label = `ROLLED BACK · ${timeAgo(m.last_rollback.timestamp)}`;
-                  }
+                else if (m.last_rollback?.timestamp
+                         && Date.now() - new Date(m.last_rollback.timestamp).getTime() < 24 * 60 * 60 * 1000) {
+                  tone = 'rollback';
+                  label = `ROLLED BACK · ${timeAgo(m.last_rollback.timestamp)}`;
+                } else if (m.provenance === 'baseline' && m.cold_start) {
+                  tone = 'baseline';
+                  label = 'BASELINE · WARMING UP';
+                } else if (m.provenance === 'baseline') {
+                  tone = 'baseline';
+                  label = 'BASELINE · GRADUATED';
                 }
                 return (
                   <div className={`prod-status-badge prod-status-${tone}`}>
@@ -211,7 +260,11 @@ function ProductionView({ models, onForceRetrain }) {
                 ? <div className={`prod-drift prod-drift-${drift}`}>
                     {drift === 'stable' ? '▬ STABLE' : drift === 'minor' ? '◆ MINOR DRIFT' : '▲ DRIFTING'}
                   </div>
-                : <div className="prod-drift" style={{ color: 'var(--text-muted)' }}>· awaiting samples ·</div>}
+                : m.cold_start && m.samples_until_graduation != null && m.graduation_threshold != null
+                  ? <div className="prod-drift prod-drift-baseline" title={`Need ${m.samples_until_graduation} more local predictions before trailing-window accuracy is meaningful.`}>
+                      ◇ {m.graduation_threshold - m.samples_until_graduation}/{m.graduation_threshold} samples
+                    </div>
+                  : <div className="prod-drift" style={{ color: 'var(--text-muted)' }}>· awaiting samples ·</div>}
             </div>
 
             <dl className="prod-dl">
@@ -227,8 +280,16 @@ function ProductionView({ models, onForceRetrain }) {
               <div className="prod-foot-left">
                 <div className="prod-foot-k">Last promoted</div>
                 <div className="prod-foot-v">
-                  <span className="mono">{m.last_promotion ? timeAgo(m.last_promotion.timestamp) : '—'}</span>
-                  {m.last_promotion?.approver && <span className="prod-approver">by {m.last_promotion.approver}</span>}
+                  {m.last_promotion
+                    ? <>
+                        <span className="mono">{timeAgo(m.last_promotion.timestamp)}</span>
+                        {m.last_promotion.approver && <span className="prod-approver">by {m.last_promotion.approver}</span>}
+                      </>
+                    : m.provenance === 'baseline'
+                      ? <span className="mono" style={{ color: 'var(--text-muted)' }}>
+                          shipped baseline · awaiting first promotion
+                        </span>
+                      : <span className="mono">—</span>}
                 </div>
               </div>
               <button className="btn-wal btn-ghost" onClick={() => onForceRetrain(m.model_name)}>
@@ -238,7 +299,8 @@ function ProductionView({ models, onForceRetrain }) {
           </div>
         );
       })}
-    </div>
+      </div>
+    </>
   );
 }
 

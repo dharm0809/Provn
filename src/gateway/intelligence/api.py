@@ -157,6 +157,35 @@ async def list_production_models(request: Request) -> JSONResponse:
             except Exception:
                 logger.warning("accuracy/verdict-count probe failed", exc_info=True)
 
+        # Provenance: "baseline" iff no model_promoted event has ever
+        # fired for this model AND the bundled-baseline sidecar is
+        # present. Either signal alone is insufficient — a sidecar that
+        # outlived a manual file swap, or a deployment that lost the
+        # sidecar, would otherwise mislead the dashboard.
+        from gateway.intelligence.baselines import (
+            cold_start_threshold,
+            read_sidecar,
+        )
+        sidecar = read_sidecar(prod_path)
+        promoted = last_promotions.get(name) is not None
+        if sidecar is not None and not promoted:
+            provenance = "baseline"
+            baseline_version = sidecar.get("baseline_version")
+        else:
+            provenance = "trained_local"
+            baseline_version = None
+
+        # Cold-start: a baseline that hasn't yet processed enough local
+        # samples for trailing-window accuracy to be meaningful. The
+        # observer-only verdicts still log; the dashboard just suppresses
+        # green "stable" badges and shows a graduation progress chip.
+        threshold = cold_start_threshold()
+        observed_7d = predictions_7d or 0
+        cold_start = provenance == "baseline" and observed_7d < threshold
+        samples_until_graduation = (
+            max(0, threshold - observed_7d) if provenance == "baseline" else 0
+        )
+
         models.append({
             "model_name": name,
             "path": str(prod_path),
@@ -172,6 +201,11 @@ async def list_production_models(request: Request) -> JSONResponse:
             "predictions_24h": predictions_24h,
             "predictions_7d": predictions_7d,
             "drift": drift,
+            "provenance": provenance,
+            "baseline_version": baseline_version,
+            "cold_start": cold_start,
+            "samples_until_graduation": samples_until_graduation,
+            "graduation_threshold": threshold,
         })
     return JSONResponse({"models": models})
 

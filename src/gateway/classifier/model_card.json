@@ -1,0 +1,197 @@
+{
+  "model_name": "intent",
+  "baseline_version": "baseline-v2.0",
+  "produced_at": "2026-04-27T17:38:14Z",
+  "base_model": "microsoft/MiniLM-L12-H384-uncased",
+  "torch_version": "2.11.0",
+  "device": "mps",
+  "training": {
+    "epochs": 3,
+    "batch_size": 32,
+    "lr": 5e-05,
+    "max_length": 128,
+    "label_smoothing": 0.1,
+    "weight_decay": 0.01,
+    "seed": 20260427
+  },
+  "datasets": [
+    {
+      "id": "clinc_oos/plus",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "PolyAI/banking77",
+      "license": "CC-BY-4.0"
+    },
+    {
+      "id": "AmazonScience/massive (en-US)",
+      "license": "CC-BY-SA-4.0"
+    },
+    {
+      "id": "synthetic:gateway",
+      "license": "internal"
+    }
+  ],
+  "metrics": {
+    "fp32": {
+      "macro_f1": 0.8965927551159458,
+      "micro_f1": 0.9001897533206831,
+      "ece": 0.06076011300313179,
+      "per_class": [
+        {
+          "label": "normal",
+          "precision": 0.9063670411985019,
+          "recall": 0.8417391304347827,
+          "f1": 0.872858431018936
+        },
+        {
+          "label": "rag",
+          "precision": 0.9037854889589906,
+          "recall": 0.9271844660194175,
+          "f1": 0.9153354632587859
+        },
+        {
+          "label": "reasoning",
+          "precision": 0.8672985781990521,
+          "recall": 0.8883495145631068,
+          "f1": 0.8776978417266187
+        },
+        {
+          "label": "system_task",
+          "precision": 0.9115755627009646,
+          "recall": 0.9174757281553398,
+          "f1": 0.9145161290322581
+        },
+        {
+          "label": "web_search",
+          "precision": 0.8911671924290221,
+          "recall": 0.9142394822006472,
+          "f1": 0.902555910543131
+        }
+      ],
+      "confusion_matrix": [
+        [
+          484,
+          33,
+          9,
+          24,
+          25
+        ],
+        [
+          20,
+          573,
+          3,
+          9,
+          13
+        ],
+        [
+          4,
+          4,
+          183,
+          4,
+          11
+        ],
+        [
+          19,
+          9,
+          3,
+          567,
+          20
+        ],
+        [
+          7,
+          15,
+          13,
+          18,
+          565
+        ]
+      ],
+      "report": "              precision    recall  f1-score   support\n\n      normal       0.91      0.84      0.87       575\n         rag       0.90      0.93      0.92       618\n   reasoning       0.87      0.89      0.88       206\n system_task       0.91      0.92      0.91       618\n  web_search       0.89      0.91      0.90       618\n\n    accuracy                           0.90      2635\n   macro avg       0.90      0.90      0.90      2635\nweighted avg       0.90      0.90      0.90      2635\n"
+    },
+    "int8": {
+      "macro_f1": 0.8878594604699475,
+      "micro_f1": 0.89146110056926,
+      "ece": 0.058424964077784844,
+      "per_class": [
+        {
+          "label": "normal",
+          "precision": 0.9131274131274131,
+          "recall": 0.8226086956521739,
+          "f1": 0.8655077767612077
+        },
+        {
+          "label": "rag",
+          "precision": 0.874051593323217,
+          "recall": 0.9320388349514563,
+          "f1": 0.9021143304620204
+        },
+        {
+          "label": "reasoning",
+          "precision": 0.8653846153846154,
+          "recall": 0.8737864077669902,
+          "f1": 0.8695652173913043
+        },
+        {
+          "label": "system_task",
+          "precision": 0.9019292604501608,
+          "recall": 0.9077669902912622,
+          "f1": 0.9048387096774193
+        },
+        {
+          "label": "web_search",
+          "precision": 0.8901273885350318,
+          "recall": 0.9045307443365695,
+          "f1": 0.8972712680577849
+        }
+      ],
+      "confusion_matrix": [
+        [
+          473,
+          43,
+          9,
+          27,
+          23
+        ],
+        [
+          15,
+          576,
+          4,
+          10,
+          13
+        ],
+        [
+          6,
+          5,
+          180,
+          4,
+          11
+        ],
+        [
+          16,
+          16,
+          3,
+          561,
+          22
+        ],
+        [
+          8,
+          19,
+          12,
+          20,
+          559
+        ]
+      ],
+      "report": "              precision    recall  f1-score   support\n\n      normal       0.91      0.82      0.87       575\n         rag       0.87      0.93      0.90       618\n   reasoning       0.87      0.87      0.87       206\n system_task       0.90      0.91      0.90       618\n  web_search       0.89      0.90      0.90       618\n\n    accuracy                           0.89      2635\n   macro avg       0.89      0.89      0.89      2635\nweighted avg       0.89      0.89      0.89      2635\n"
+    }
+  },
+  "labels": [
+    "normal",
+    "rag",
+    "reasoning",
+    "system_task",
+    "web_search"
+  ],
+  "max_length": 128,
+  "model_sha256": "4f2ca7bf7da26ba2a02b1f6e494d0e850340bea3ccbfc470613f7014d0387649",
+  "model_size_bytes": 33935972
+}

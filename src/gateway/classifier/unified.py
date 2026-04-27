@@ -212,6 +212,7 @@ class SchemaIntelligence:
     ) -> None:
         self._has_mcp_tools = has_mcp_tools
         self._onnx_session = None
+        self._onnx_tokenizer = None  # HF tokenizer; loaded lazily by _load_onnx
         self._label_map: dict[int, str] = {}
         self._verdict_buffer = verdict_buffer
         # shadow runner — when wired, every classified
@@ -487,13 +488,40 @@ class SchemaIntelligence:
             return IntentResult(NORMAL, 0.0, "ml_onnx", f"onnx_error: {e}")
 
     def _tokenize(self, text: str) -> dict:
-        """Tokenize for transformer ONNX input."""
+        """Tokenize for transformer ONNX input.
+
+        Preferred path uses the HF tokenizer loaded from tokenizer.json
+        next to the model. Falls back to a character-hash that mirrors
+        the original behaviour when the tokenizer is missing — but that
+        path produces garbage tokens and the model can't be expected to
+        predict accurately. _load_onnx logs WARN when this happens.
+        """
         import numpy as np
+
+        if self._onnx_tokenizer is not None:
+            enc = self._onnx_tokenizer.encode(text)
+            input_names = {inp.name for inp in self._onnx_session.get_inputs()}
+            feed: dict[str, Any] = {
+                "input_ids": np.array([enc.ids], dtype=np.int64),
+                "attention_mask": np.array([enc.attention_mask], dtype=np.int64),
+            }
+            # token_type_ids is required by BERT-shape models; optional
+            # ones (DistilBERT) don't include it in the input list.
+            if "token_type_ids" in input_names:
+                feed["token_type_ids"] = np.array([enc.type_ids], dtype=np.int64)
+            return {k: v for k, v in feed.items() if k in input_names}
+
+        # Fallback: character-hash. Will produce poor predictions; only
+        # exercised when an operator drops a transformer ONNX without a
+        # tokenizer sidecar.
         ids = [ord(c) % 30000 for c in text[:128]]
         ids = ids + [0] * (128 - len(ids))
         return {
             "input_ids": np.array([ids], dtype=np.int64),
-            "attention_mask": np.array([[1] * min(len(text), 128) + [0] * max(0, 128 - len(text))], dtype=np.int64),
+            "attention_mask": np.array(
+                [[1] * min(len(text), 128) + [0] * max(0, 128 - len(text))],
+                dtype=np.int64,
+            ),
         }
 
     # 3. RESPONSE NORMALIZATION
@@ -744,7 +772,17 @@ class SchemaIntelligence:
     # ONNX model loading
 
     def _load_onnx(self, path: str) -> None:
-        """Load ONNX intent model + label map."""
+        """Load ONNX intent model + label map + (optional) HF tokenizer.
+
+        Two model shapes are supported:
+          • Legacy sklearn pipeline (`input_name == "prompt"`): no tokenizer
+            needed, the ONNX op chain handles TF-IDF internally.
+          • Transformer (`input_ids` / `attention_mask`): requires a real
+            HuggingFace tokenizer. We look for `tokenizer.json` next to the
+            model file. If absent we leave `_onnx_tokenizer` as None and the
+            inference path falls back to the character-hash tokenizer
+            (intentionally crude — flagged at WARN so misconfig is loud).
+        """
         from onnxruntime import InferenceSession
         self._onnx_session = InferenceSession(path, providers=["CPUExecutionProvider"])
 
@@ -756,16 +794,59 @@ class SchemaIntelligence:
         else:
             self._label_map = {i: l for i, l in enumerate(ALL_INTENTS)}
 
+        # Tokenizer sidecar — only needed for the transformer shape.
+        # Search order: `{stem}_tokenizer.json` (per-model, written by
+        # the migration) → `tokenizer.json` (HF default, used at the
+        # source-tree path). The per-model name avoids collision when
+        # multiple transformer models share a production/ dir.
+        input_names = {inp.name for inp in self._onnx_session.get_inputs()}
+        needs_tokenizer = "input_ids" in input_names
+        if needs_tokenizer:
+            model_path = Path(path)
+            tok_candidates = [
+                model_path.with_name(f"{model_path.stem}_tokenizer.json"),
+                model_path.with_name("tokenizer.json"),
+            ]
+            tok_path = next((str(p) for p in tok_candidates if p.exists()), None)
+            if tok_path:
+                try:
+                    from tokenizers import Tokenizer
+                    self._onnx_tokenizer = Tokenizer.from_file(tok_path)
+                    self._onnx_tokenizer.enable_truncation(max_length=128)
+                    self._onnx_tokenizer.enable_padding(length=128)
+                    logger.info("Intent classifier: HF tokenizer loaded from %s", tok_path)
+                except Exception:
+                    logger.warning(
+                        "Intent classifier: tokenizer at %s failed to load — predictions "
+                        "will degrade", tok_path, exc_info=True,
+                    )
+                    self._onnx_tokenizer = None
+            else:
+                logger.warning(
+                    "Intent classifier: transformer ONNX at %s has no tokenizer sidecar "
+                    "(looked for %s and tokenizer.json) — falling back to character-hash "
+                    "tokenizer (degraded accuracy)",
+                    path, tok_candidates[0].name,
+                )
+
     def reload(self) -> None:
-        """Rebuild the `InferenceSession` from the registry's production path."""
+        """Rebuild the `InferenceSession` from the registry's production path.
+
+        Also re-runs the tokenizer + label-map load so a promoted candidate
+        gets its companion tokenizer.json picked up. We call _load_onnx
+        here (rather than just an InferenceSession constructor) so all the
+        side effects — tokenizer load, label map, fallback warning — happen
+        in one place.
+        """
         from gateway.intelligence.reload import maybe_reload
 
         def _build(path: str):
-            from onnxruntime import InferenceSession
-            return InferenceSession(path, providers=["CPUExecutionProvider"])
+            self._load_onnx(path)
+            return self._onnx_session
 
         def _adopt(session) -> None:
-            self._onnx_session = session
+            # _load_onnx already attached the new session; nothing more to do.
+            return None
 
         maybe_reload(self._reload_state, _build, _adopt, label="intent")
 

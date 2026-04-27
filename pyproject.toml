@@ -28,6 +28,12 @@ dependencies = [
   # advertised behaviour.
   "numpy>=1.24",
   "onnxruntime>=1.16",
+  # HuggingFace tokenizers (Rust, ~5MB wheel). Drives the real intent
+  # baseline shipped at src/gateway/classifier/. Without it the
+  # transformer ONNX falls back to a character-hash tokenizer which
+  # produces garbage tokens. Pinned >=0.15 for the BertWordPiece
+  # tokenizer.json contract written by scripts/baselines/intent/.
+  "tokenizers>=0.15",
 ]
 
 [project.optional-dependencies]

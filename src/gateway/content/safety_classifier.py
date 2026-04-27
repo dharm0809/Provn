@@ -131,11 +131,17 @@ class SafetyClassifier(ContentAnalyzer):
     ) -> None:
         self._session = None
         self._input_name = ""
+        # "tfidf" (legacy sklearn pipeline) or "transformer" (HF tokenizer
+        # → input_ids/attention_mask/token_type_ids). Detected at session
+        # load time from the input names. Different code paths in
+        # _featurize / analyze.
+        self._session_shape: str = "unknown"
         self._labels: list[str] = []
         self._vocab: dict[str, int] = {}
         self._idf: np.ndarray | None = None
         self._svd_components: np.ndarray | None = None
         self._ngram_range = (3, 5)
+        self._tokenizer = None  # HF tokenizer, used by transformer path
         self._loaded = False
         self._verdict_buffer = verdict_buffer
 
@@ -190,17 +196,75 @@ class SafetyClassifier(ContentAnalyzer):
                     len(self._labels), len(self._vocab),
                 )
             elif _ONNX_PATH.exists():
-                from onnxruntime import InferenceSession
-                self._session = InferenceSession(str(_ONNX_PATH), providers=["CPUExecutionProvider"])
-                self._input_name = self._session.get_inputs()[0].name
-                self._loaded = True
-                logger.info("SafetyClassifier: ONNX loaded (%d categories, %d vocab terms)",
-                            len(self._labels), len(self._vocab))
+                self._build_session(_ONNX_PATH)
+                logger.info(
+                    "SafetyClassifier: ONNX loaded shape=%s (%d categories)",
+                    self._session_shape, len(self._labels),
+                )
             else:
                 logger.warning("SafetyClassifier: ONNX model not found at %s", _ONNX_PATH)
 
         except Exception as e:
             logger.warning("SafetyClassifier: load failed (fail-open): %s", e)
+
+    def _build_session(self, onnx_path) -> None:
+        """Build ONNX session and detect shape (sklearn-tfidf vs transformer).
+
+        Transformer baselines write a `*_tokenizer.json` sidecar next to
+        the .onnx (e.g. `safety_classifier_tokenizer.json` or, when
+        registered into production/, `{stem}_tokenizer.json`). When that
+        sidecar exists AND the session has `input_ids` in its inputs, we
+        run the transformer path. Otherwise we fall back to the legacy
+        TF-IDF feature pipeline.
+        """
+        from pathlib import Path
+        from onnxruntime import InferenceSession
+
+        sess = InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+        input_names = {inp.name for inp in sess.get_inputs()}
+
+        if "input_ids" in input_names:
+            self._session_shape = "transformer"
+            self._session = sess
+            self._input_name = "input_ids"
+            # Look for tokenizer sidecar — search order matches main.py's
+            # migration: `{stem}_tokenizer.json` then plain `tokenizer.json`.
+            model_path = Path(onnx_path)
+            tok_candidates = [
+                model_path.with_name(f"{model_path.stem}_tokenizer.json"),
+                model_path.with_name("tokenizer.json"),
+            ]
+            tok_path = next((str(p) for p in tok_candidates if p.exists()), None)
+            if tok_path:
+                try:
+                    from tokenizers import Tokenizer
+                    self._tokenizer = Tokenizer.from_file(tok_path)
+                    self._tokenizer.enable_truncation(max_length=128)
+                    self._tokenizer.enable_padding(length=128)
+                    logger.info(
+                        "SafetyClassifier: HF tokenizer loaded from %s", tok_path,
+                    )
+                    self._loaded = True
+                except Exception:
+                    logger.warning(
+                        "SafetyClassifier: tokenizer at %s failed to load",
+                        tok_path, exc_info=True,
+                    )
+                    self._tokenizer = None
+                    self._loaded = False
+            else:
+                logger.warning(
+                    "SafetyClassifier: transformer ONNX has no tokenizer sidecar "
+                    "(looked for %s and tokenizer.json) — model unusable",
+                    tok_candidates[0].name,
+                )
+                self._loaded = False
+        else:
+            # Legacy sklearn path — input is a single feature vector.
+            self._session_shape = "tfidf"
+            self._session = sess
+            self._input_name = sess.get_inputs()[0].name
+            self._loaded = True
 
     def _tfidf_transform(self, text: str) -> np.ndarray:
         """Manual TF-IDF transform using saved vocabulary + IDF weights.
@@ -253,6 +317,44 @@ class SafetyClassifier(ContentAnalyzer):
 
         return combined.reshape(1, -1).astype(np.float32)
 
+    def _predict_tfidf(self, text: str, run_with_timeout) -> tuple[int, float]:
+        """Legacy sklearn pipeline path — TF-IDF + SVD + GradientBoosting."""
+        features = self._featurize(text)
+        features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+        outputs = run_with_timeout(
+            self._session.run, None, {self._input_name: features}, model="safety",
+        )
+        pred_idx = int(outputs[0][0])
+        confidence = 1.0
+        if len(outputs) > 1:
+            probs = outputs[1][0]
+            if isinstance(probs, dict):
+                confidence = float(max(probs.values())) if probs else 0.5
+            elif hasattr(probs, "__getitem__"):
+                confidence = float(probs[pred_idx])
+        return pred_idx, confidence
+
+    def _predict_transformer(self, text: str, run_with_timeout) -> tuple[int, float]:
+        """HF tokenizer + transformer ONNX path — outputs raw logits."""
+        enc = self._tokenizer.encode(text)
+        input_names = {inp.name for inp in self._session.get_inputs()}
+        feed: dict[str, Any] = {
+            "input_ids": np.array([enc.ids], dtype=np.int64),
+            "attention_mask": np.array([enc.attention_mask], dtype=np.int64),
+        }
+        if "token_type_ids" in input_names:
+            feed["token_type_ids"] = np.array([enc.type_ids], dtype=np.int64)
+        feed = {k: v for k, v in feed.items() if k in input_names}
+        outputs = run_with_timeout(
+            self._session.run, None, feed, model="safety",
+        )
+        logits = outputs[0][0]
+        # Stable softmax for confidence.
+        exp = np.exp(logits - np.max(logits))
+        probs = exp / exp.sum()
+        pred_idx = int(np.argmax(probs))
+        return pred_idx, float(probs[pred_idx])
+
     def analyze(self, text: str) -> Decision:
         """Classify text for safety. Returns Decision with verdict and category."""
         # refresh session from registry if a new version was promoted.
@@ -278,23 +380,11 @@ class SafetyClassifier(ContentAnalyzer):
                     run_with_timeout,
                 )
 
-                features = self._featurize(text)
-                features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
-
-                outputs = run_with_timeout(
-                    self._session.run, None, {self._input_name: features}, model="safety",
-                )
-                pred_idx = int(outputs[0][0])
+                if self._session_shape == "transformer":
+                    pred_idx, confidence = self._predict_transformer(text, run_with_timeout)
+                else:
+                    pred_idx, confidence = self._predict_tfidf(text, run_with_timeout)
                 label = self._labels[pred_idx] if pred_idx < len(self._labels) else "safe"
-
-                # Get confidence from probabilities if available
-                confidence = 1.0
-                if len(outputs) > 1:
-                    probs = outputs[1][0]
-                    if isinstance(probs, dict):
-                        confidence = float(max(probs.values())) if probs else 0.5
-                    elif hasattr(probs, '__getitem__'):
-                        confidence = float(probs[pred_idx])
 
                 # Determine verdict
                 if label == "safe":
@@ -381,22 +471,20 @@ class SafetyClassifier(ContentAnalyzer):
     def reload(self) -> None:
         """Rebuild the `InferenceSession` from the registry's production path.
 
-        Refreshes `_input_name` and flips `_loaded` so the fail-open branch
-        in `analyze` doesn't short-circuit after a successful swap. Fail-safe.
+        Routes through `_build_session` so the shape-detection + tokenizer
+        side effects fire identically to first-load. Fail-safe — old
+        session is kept if the rebuild raises.
         """
         from gateway.intelligence.reload import maybe_reload
 
         def _build(path: str):
-            from onnxruntime import InferenceSession
-            return InferenceSession(path, providers=["CPUExecutionProvider"])
+            self._build_session(path)
+            return self._session
 
         def _adopt(session) -> None:
-            self._session = session
-            try:
-                self._input_name = session.get_inputs()[0].name
-            except Exception:
-                logger.debug("SafetyClassifier.reload: could not refresh input_name", exc_info=True)
-            self._loaded = True
+            # _build_session already attached the session and set shape +
+            # tokenizer + _loaded. Nothing more to do here.
+            return None
 
         maybe_reload(self._reload_state, _build, _adopt, label="safety")
 

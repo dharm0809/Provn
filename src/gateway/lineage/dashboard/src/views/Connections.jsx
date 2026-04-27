@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import JsonView from '../components/JsonView.jsx';
 import CopyBtn from '../components/CopyBtn.jsx';
-import { getConnections } from '../api';
+import { getConnections, onControlKeyChange } from '../api';
 import '../styles/connections.css';
 
 /* ────────────────────────────────────────────────────────────
@@ -115,6 +115,7 @@ export default function Connections({ navigate }) {
   const [errorStatus, setErrorStatus] = useState(null); // HTTP status if known
   const [openTileId, setOpenTileId] = useState(null);
   const [nowTick, setNowTick] = useState(0); // forces "N ago" recomputation
+  const [keyEpoch, setKeyEpoch] = useState(0); // bumps on cp_api_key change → restart poll
 
   /* Real backend poll — 3s cadence. Stops on auth/disabled; exponential
      backoff (3s→30s) on network/5xx so a revoked key or backend outage
@@ -149,12 +150,19 @@ export default function Connections({ navigate }) {
         timer = setTimeout(poll, delay);
       }
     }
+    setErrorStatus(null);
+    setError(null);
     poll();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [keyEpoch]);
+
+  /* Recover from terminal 401/403 (or any state) when the API key
+     appears or changes — same tab via custom event, other tabs via
+     storage event. Bumping keyEpoch restarts the poll effect above. */
+  useEffect(() => onControlKeyChange(() => setKeyEpoch((n) => n + 1)), []);
 
   /* Wall-clock tick so "N ago" labels refresh between polls. */
   useEffect(() => {
