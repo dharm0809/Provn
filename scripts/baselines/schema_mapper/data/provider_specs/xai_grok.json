@@ -1,0 +1,63 @@
+{
+  "provider": "xai_grok",
+  "endpoint": "chat.completions",
+  "doc_url": "https://docs.x.ai/api/endpoints#chat-completions",
+  "captured_at": "2026-04-27T17:32:00Z",
+  "captured_from": "Public xAI API docs (OpenAI-compatible chat.completions).",
+  "holdout": "ADVERSARIAL — never include in train or val splits. Used in evaluate.py as the unseen-provider generalisation gate.",
+  "examples": [
+    {
+      "raw": {
+        "id": "0a1b2c3d-4e5f-6789-abcd-ef0123456789",
+        "object": "chat.completion",
+        "created": 1714234500,
+        "model": "grok-4",
+        "system_fingerprint": "fp_xai_xyz",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<assistant_reply>",
+              "reasoning_content": "<reasoning_trace>"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 16,
+          "completion_tokens": 7,
+          "total_tokens": 23,
+          "prompt_tokens_details": {"text_tokens": 16, "audio_tokens": 0, "image_tokens": 0, "cached_tokens": 0},
+          "completion_tokens_details": {"reasoning_tokens": 4, "audio_tokens": 0, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0},
+          "num_sources_used": 0
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].message.reasoning_content": "thinking_content",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "usage.prompt_tokens_details.text_tokens": "UNKNOWN",
+        "usage.prompt_tokens_details.audio_tokens": "UNKNOWN",
+        "usage.prompt_tokens_details.image_tokens": "UNKNOWN",
+        "usage.prompt_tokens_details.cached_tokens": "cached_tokens",
+        "usage.completion_tokens_details.reasoning_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.audio_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.accepted_prediction_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.rejected_prediction_tokens": "UNKNOWN",
+        "usage.num_sources_used": "UNKNOWN"
+      },
+      "notes": "ADVERSARIAL HOLDOUT — Grok 4: OpenAI-compatible plus `reasoning_content` (same shape as DeepSeek-Reasoner) and `usage.num_sources_used` (live-search tool count). reasoning_content → thinking_content; reasoning_tokens (a count) → UNKNOWN."
+    }
+  ]
+}
