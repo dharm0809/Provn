@@ -324,7 +324,7 @@ export default function App() {
       case 'playground':
         return (
           <Suspense fallback={viewFallback}>
-            <Playground />
+            <Playground navigate={navigate} />
           </Suspense>
         );
       case 'connections':
