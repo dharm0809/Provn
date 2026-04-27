@@ -351,8 +351,6 @@ export default function Execution({ navigate, executionId, sessionId }) {
                   </div>
                 )}
                 <div className="detail-grid" style={{ marginTop: 8 }}>
-                  {te.input_hash && <DetailRow label="Input Hash" value={te.input_hash} className="hash-gold" copyable />}
-                  {te.output_hash && <DetailRow label="Output Hash" value={te.output_hash} className="hash-gold" copyable />}
                   <DetailRow label="Timestamp" value={formatTime(te.timestamp)} />
                   {te.iteration && <DetailRow label="Iteration" value={te.iteration} />}
                 </div>
