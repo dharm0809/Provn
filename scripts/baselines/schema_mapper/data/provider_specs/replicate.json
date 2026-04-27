@@ -1,0 +1,39 @@
+{
+  "provider": "replicate",
+  "endpoint": "predictions",
+  "doc_url": "https://replicate.com/docs/reference/http#predictions.create",
+  "captured_at": "2026-04-27T17:58:00Z",
+  "captured_from": "Public Replicate API docs (predictions object).",
+  "holdout": "ADVERSARIAL — never include in train or val splits. Used in evaluate.py as the unseen-provider generalisation gate.",
+  "examples": [
+    {
+      "raw": {
+        "id": "abcd1234efgh5678",
+        "model": "meta/meta-llama-3.1-70b-instruct",
+        "version": "fp_replicate_v1abcdef",
+        "status": "succeeded",
+        "input": {"prompt": "<echoed_prompt>"},
+        "output": "<assistant_reply>",
+        "logs": "<stdout_logs>",
+        "metrics": {"predict_time": 1.234},
+        "created_at": "2026-04-27T15:00:00.000Z",
+        "started_at": "2026-04-27T15:00:00.100Z",
+        "completed_at": "2026-04-27T15:00:01.334Z"
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "model": "model",
+        "version": "model_hash",
+        "status": "UNKNOWN",
+        "input.prompt": "UNKNOWN",
+        "output": "content",
+        "logs": "UNKNOWN",
+        "metrics.predict_time": "timing_value",
+        "created_at": "response_timestamp",
+        "started_at": "UNKNOWN",
+        "completed_at": "UNKNOWN"
+      },
+      "notes": "ADVERSARIAL HOLDOUT — Replicate predictions: completely different shape from chat-completions. `output` is a single string (or list, model-dependent) holding the assistant reply. `version` is the immutable model-version hash (Replicate's content-addressed model identifier) → model_hash. Three timestamps (created_at/started_at/completed_at) — only created_at gets the canonical response_timestamp; started/completed are queue-internal milestones (UNKNOWN). predict_time is a duration → timing_value. logs are stdout (operator artifact, not assistant content) → UNKNOWN."
+    }
+  ]
+}
