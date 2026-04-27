@@ -56,6 +56,41 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_timestamp"
         " ON gateway_attempts (timestamp)"
     )
+    # Pillar 1 — events the message-diff engine inferred from successive
+    # ``messages[]`` arrays. ``source='reconstructed'`` distinguishes them from
+    # the gateway's own active-tool-loop ``tool_events``.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS reconstructed_tool_events (
+            event_id        TEXT    PRIMARY KEY,
+            execution_id    TEXT,
+            tenant_id       TEXT    NOT NULL,
+            caller_key      TEXT    NOT NULL,
+            timestamp       TEXT    NOT NULL,
+            kind            TEXT    NOT NULL,
+            tool_name       TEXT,
+            tool_call_id    TEXT,
+            args_hash       TEXT,
+            content_hash    TEXT,
+            trace_id        TEXT,
+            agent_run_id    TEXT,
+            turn_seq        INTEGER,
+            source          TEXT    NOT NULL DEFAULT 'reconstructed'
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recon_tool_events_caller"
+        " ON reconstructed_tool_events (caller_key, timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recon_tool_events_trace"
+        " ON reconstructed_tool_events (trace_id, timestamp)"
+        " WHERE trace_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recon_tool_events_run"
+        " ON reconstructed_tool_events (agent_run_id, timestamp)"
+        " WHERE agent_run_id IS NOT NULL"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
         " ON gateway_attempts (tenant_id, disposition)"
@@ -486,6 +521,36 @@ class WALWriter:
     def enqueue_write_tool_event(self, record: dict[str, Any]) -> None:
         """Non-blocking enqueue of a tool event record to the dedicated writer thread."""
         self._queue.put((self._do_write_tool_event, (record,)))
+
+    @staticmethod
+    def _do_write_recon_event(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO reconstructed_tool_events
+               (event_id, execution_id, tenant_id, caller_key, timestamp, kind,
+                tool_name, tool_call_id, args_hash, content_hash,
+                trace_id, agent_run_id, turn_seq, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record["event_id"],
+                record.get("execution_id"),
+                record.get("tenant_id") or "",
+                record.get("caller_key") or "",
+                record.get("timestamp"),
+                record.get("kind"),
+                record.get("tool_name"),
+                record.get("tool_call_id"),
+                record.get("args_hash"),
+                record.get("content_hash"),
+                record.get("trace_id"),
+                record.get("agent_run_id"),
+                record.get("turn_seq"),
+                record.get("source", "reconstructed"),
+            ),
+        )
+
+    def enqueue_write_recon_event(self, record: dict[str, Any]) -> None:
+        """Non-blocking enqueue for a Pillar-1 reconstructed_tool_events row."""
+        self._queue.put((self._do_write_recon_event, (record,)))
 
     # ------------------------------------------------------------------
     # Synchronous public API (used by delivery worker, startup, health, batch writer)

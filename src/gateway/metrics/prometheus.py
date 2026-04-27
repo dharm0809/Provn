@@ -19,6 +19,20 @@ gateway_attempts_total = Counter(
     ["disposition"],
 )
 
+# Agent tracing — Pillar 1 (wire reconstruction)
+agent_reconstructor_evictions_total = Counter(
+    "walacor_agent_reconstructor_evictions_total",
+    "LRU evictions from the per-caller messages[] cache",
+)
+agent_reconstructor_events_total = Counter(
+    "walacor_agent_reconstructor_events_total",
+    "Reconstruction events emitted (tool_call/tool_result/new_user_turn)",
+)
+agent_reconstructor_oversize_skipped_total = Counter(
+    "walacor_agent_reconstructor_oversize_skipped_total",
+    "Requests where messages[] exceeded the 500 KB ceiling and was skipped",
+)
+
 # Pipeline timing
 pipeline_duration = Histogram(
     "walacor_gateway_pipeline_duration_seconds",

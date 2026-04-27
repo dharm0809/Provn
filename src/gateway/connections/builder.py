@@ -45,6 +45,7 @@ TILE_ORDER: tuple[str, ...] = (
     "readiness",
     "streaming",
     "intelligence_worker",
+    "agent_reconstructor",
 )
 
 
@@ -824,6 +825,54 @@ def compute_rollup(tiles: list[dict]) -> str:
     return "green"
 
 
+def build_agent_reconstructor_tile(ctx: Any) -> dict:
+    """Pillar 1 — surface message-diff engine health.
+
+    Tile is amber once eviction pressure exists and red if the cache exceeds
+    1 GB (the §11.4 kill criterion); operators should see degradation before
+    users do.
+    """
+    try:
+        from gateway.pipeline.agent_reconstructor import get_engine
+        snap = get_engine().snapshot()
+    except Exception as exc:  # pragma: no cover — defensive
+        return _unknown_tile("agent_reconstructor", exc)
+
+    bytes_now = int(snap.get("cache_bytes_now") or 0)
+    bytes_peak = int(snap.get("cache_bytes_peak") or 0)
+    evictions = int(snap.get("evictions") or 0)
+    oversize = int(snap.get("oversize_skipped") or 0)
+    requests = int(snap.get("requests") or 0)
+    hit_rate = float(snap.get("hit_rate") or 0.0)
+    events = int(snap.get("events_emitted") or 0)
+    one_gb = 1024 * 1024 * 1024
+    if bytes_now > one_gb:
+        status = "red"
+    elif evictions > 0 or oversize > 0:
+        status = "amber"
+    else:
+        status = "green"
+    headline = f"{events} events / {requests} reqs"
+    subline = f"cache {bytes_now / 1024 / 1024:.1f} MB · hit {hit_rate:.0%}"
+    return _tile(
+        "agent_reconstructor",
+        status=status,
+        headline=headline,
+        subline=subline,
+        detail={
+            "requests": requests,
+            "events_emitted": events,
+            "hit_rate": hit_rate,
+            "evictions": evictions,
+            "oversize_skipped": oversize,
+            "cache_entries": int(snap.get("cache_entries") or 0),
+            "cache_bytes_now": bytes_now,
+            "cache_bytes_peak": bytes_peak,
+            "last_event_ts": snap.get("last_event_ts"),
+        },
+    )
+
+
 _SYNC_BUILDERS: dict[str, Any] = {
     "providers": build_providers_tile,
     "walacor_delivery": build_walacor_delivery_tile,
@@ -833,6 +882,7 @@ _SYNC_BUILDERS: dict[str, Any] = {
     "control_plane": build_control_plane_tile,
     "auth": build_auth_tile,
     "streaming": build_streaming_tile,
+    "agent_reconstructor": build_agent_reconstructor_tile,
 }
 
 _ASYNC_BUILDERS: dict[str, Any] = {

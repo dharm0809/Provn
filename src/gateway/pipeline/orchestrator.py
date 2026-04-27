@@ -604,6 +604,39 @@ async def _store_execution(record, request: Request, ctx) -> None:
             execution_id_var.set(eid)
             request.state.walacor_execution_id = eid
 
+    # Pillar 1 — persist any reconstructed_tool_events the diff engine emitted
+    # for this request, now that we have the execution_id to anchor them to.
+    _recon_events = getattr(request.state, "walacor_recon_events", None)
+    if _recon_events and ctx.wal_writer is not None:
+        try:
+            import uuid as _uuid
+            from datetime import datetime as _dt, timezone as _tz
+            _now = _dt.now(_tz.utc).isoformat()
+            _meta = (record.get("metadata") or {}) if isinstance(record, dict) else {}
+            _trace_id = _meta.get("trace_id")
+            _agent_run_id = _meta.get("agent_run_id")
+            _tenant = record.get("tenant_id") if isinstance(record, dict) else ""
+            _caller = getattr(request.state, "walacor_recon_caller", "")
+            for ev in _recon_events:
+                ctx.wal_writer.enqueue_write_recon_event({
+                    "event_id": _uuid.uuid4().hex,
+                    "execution_id": eid,
+                    "tenant_id": _tenant,
+                    "caller_key": _caller,
+                    "timestamp": _now,
+                    "kind": ev.kind,
+                    "tool_name": ev.tool_name,
+                    "tool_call_id": ev.tool_call_id,
+                    "args_hash": ev.args_hash,
+                    "content_hash": ev.content_hash,
+                    "trace_id": _trace_id,
+                    "agent_run_id": _agent_run_id,
+                    "turn_seq": ev.turn_seq,
+                    "source": "reconstructed",
+                })
+        except Exception:
+            logger.debug("recon-event persistence failed (non-fatal)", exc_info=True)
+
 
 # ── Post-stream background tasks ─────────────────────────────────────────────
 
@@ -2004,6 +2037,23 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # Extract messages from request body for prompt extraction
     _body = body_dict if isinstance(body_dict, dict) else {}
     _messages = _body.get("messages", [])
+
+    # Pillar 1 of agent tracing — diff this request's messages[] against the
+    # caller's last cached turn to materialise tool calls / results / new user
+    # turns the gateway never proxied. Fail-open: any error here is non-fatal.
+    try:
+        from gateway.pipeline.agent_reconstructor import (
+            caller_key_for,
+            get_engine,
+        )
+        _recon_engine = get_engine()
+        _recon_caller = caller_key_for(call.metadata, settings.gateway_tenant_id)
+        _recon_events = _recon_engine.observe(_recon_caller, _messages, time.time())
+        if _recon_events:
+            request.state.walacor_recon_caller = _recon_caller
+            request.state.walacor_recon_events = _recon_events
+    except Exception:
+        logger.debug("agent_reconstructor.observe failed (non-fatal)", exc_info=True)
 
     # process_request() does prompt extraction + intent classification in one pass
     # Wrapped in try/except — SI failure must NEVER block the request pipeline.
