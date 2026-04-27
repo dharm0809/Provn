@@ -1,0 +1,156 @@
+{
+  "provider": "openai",
+  "endpoint": "chat.completions",
+  "doc_url": "https://platform.openai.com/docs/api-reference/chat/object",
+  "captured_at": "2026-04-27T17:00:00Z",
+  "captured_from": "Public OpenAI API docs (chat.completions object) — synthetic anonymised examples mirroring documented shape; WAL sampling deferred (see Phase 2 checkpoint notes).",
+  "examples": [
+    {
+      "raw": {
+        "id": "chatcmpl-AbCdEfGhIjKl",
+        "object": "chat.completion",
+        "created": 1714233600,
+        "model": "gpt-4o-2024-08-06",
+        "system_fingerprint": "fp_a1b2c3d4e5",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<assistant_reply>",
+              "refusal": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 12,
+          "completion_tokens": 7,
+          "total_tokens": 19,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "UNKNOWN",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].message.refusal": "UNKNOWN",
+        "choices[0].logprobs": "UNKNOWN",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "usage.prompt_tokens_details.cached_tokens": "cached_tokens",
+        "usage.prompt_tokens_details.audio_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.reasoning_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.audio_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.accepted_prediction_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.rejected_prediction_tokens": "UNKNOWN"
+      },
+      "notes": "Plain non-streaming chat-completions response. `created` is a unix timestamp (response creation), distinct from `timing_value` which is a latency/duration. `reasoning_tokens` is a token *count*, not the reasoning *content*, so UNKNOWN. `refusal` is a free-text refusal field, not a safety category label."
+    },
+    {
+      "raw": {
+        "id": "chatcmpl-AbCdEfGhIjKl",
+        "object": "chat.completion.chunk",
+        "created": 1714233601,
+        "model": "gpt-4o-2024-08-06",
+        "system_fingerprint": "fp_a1b2c3d4e5",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<delta>"
+            },
+            "logprobs": null,
+            "finish_reason": null
+          }
+        ]
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "UNKNOWN",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].delta.content": "content",
+        "choices[0].logprobs": "UNKNOWN",
+        "choices[0].finish_reason": "finish_reason"
+      },
+      "notes": "Streaming chunk shape (chat.completion.chunk). Delta-shaped content is still `content` — incremental tokens of the assistant reply. `finish_reason` is null mid-stream but the path/label is still finish_reason."
+    },
+    {
+      "raw": {
+        "id": "chatcmpl-ZyXwVuTsRqPo",
+        "object": "chat.completion",
+        "created": 1714233700,
+        "model": "gpt-4o-2024-08-06",
+        "system_fingerprint": "fp_a1b2c3d4e5",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_QwErTyUiOp",
+                  "type": "function",
+                  "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"<placeholder>\"}"
+                  }
+                }
+              ],
+              "refusal": null
+            },
+            "logprobs": null,
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 64,
+          "completion_tokens": 18,
+          "total_tokens": 82
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "UNKNOWN",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].message.tool_calls[0].id": "tool_call_id",
+        "choices[0].message.tool_calls[0].type": "tool_call_type",
+        "choices[0].message.tool_calls[0].function.name": "tool_call_name",
+        "choices[0].message.tool_calls[0].function.arguments": "tool_call_arguments",
+        "choices[0].message.refusal": "UNKNOWN",
+        "choices[0].logprobs": "UNKNOWN",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens"
+      },
+      "notes": "Tool-calls response. `content` is null (no assistant text) but path exists and label is content. tool_calls[0] has all four canonical sub-labels (id/type/name/arguments). `arguments` is a JSON-encoded string per OpenAI spec — labelled tool_call_arguments regardless of contents."
+    }
+  ]
+}
