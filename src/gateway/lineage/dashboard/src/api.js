@@ -48,6 +48,18 @@ export async function getSession(sessionId) {
   return data;
 }
 
+export async function getAgentRuns(limit = 50, offset = 0) {
+  const sp = new URLSearchParams();
+  sp.set('limit', String(limit));
+  sp.set('offset', String(offset));
+  return fetchJSON(`${API}/agent-runs?${sp.toString()}`);
+}
+
+export async function getAgentRun(runId) {
+  const enc = encodeURIComponent(String(runId ?? ''));
+  return fetchJSON(`${API}/agent-runs/${enc}`);
+}
+
 export async function getExecution(executionId) {
   return fetchJSON(`${API}/executions/${executionId}`);
 }

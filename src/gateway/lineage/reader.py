@@ -909,3 +909,115 @@ class LineageReader:
             })
 
         return {"test_name": test_name, "variants": variants, "total_requests": sum(v["request_count"] for v in variants)}
+
+    # ── Agent tracing v1 (Pillars 1 + 4) ─────────────────────────────────────
+
+    def list_agent_runs(self, *, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Return signed AgentRunManifests, newest first."""
+        conn = self._ensure_conn()
+        # Table created by Pillar 4 migration. New deploys see it; old WALs
+        # without the migration applied yet would 500 — we surface a clean
+        # empty list instead so the dashboard renders an empty state.
+        try:
+            cur = conn.execute(
+                """SELECT run_id, tenant_id, trace_id, start_ts, end_ts, end_reason,
+                          framework_name, llm_call_count, tool_event_count,
+                          signature, manifest_json
+                   FROM agent_run_manifests
+                   ORDER BY end_ts DESC
+                   LIMIT ? OFFSET ?""",
+                (limit, offset),
+            )
+        except sqlite3.OperationalError:
+            return []
+        out: list[dict] = []
+        for row in cur.fetchall():
+            try:
+                manifest = json.loads(row["manifest_json"])
+            except Exception:
+                manifest = None
+            out.append({
+                "run_id": row["run_id"],
+                "tenant_id": row["tenant_id"],
+                "trace_id": row["trace_id"],
+                "start_ts": row["start_ts"],
+                "end_ts": row["end_ts"],
+                "end_reason": row["end_reason"],
+                "framework_name": row["framework_name"],
+                "llm_call_count": row["llm_call_count"],
+                "tool_event_count": row["tool_event_count"],
+                "signed": bool(row["signature"]),
+                "manifest": manifest,
+            })
+        return out
+
+    def count_agent_runs(self) -> int:
+        conn = self._ensure_conn()
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM agent_run_manifests")
+            return int(cur.fetchone()[0] or 0)
+        except sqlite3.OperationalError:
+            return 0
+
+    def get_agent_run(self, run_id: str) -> dict | None:
+        """Return one manifest with its reconstructed_tool_events tree."""
+        conn = self._ensure_conn()
+        try:
+            row = conn.execute(
+                """SELECT run_id, tenant_id, trace_id, start_ts, end_ts, end_reason,
+                          framework_name, llm_call_count, tool_event_count,
+                          signature, manifest_json
+                   FROM agent_run_manifests WHERE run_id = ?""",
+                (run_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        try:
+            manifest = json.loads(row["manifest_json"])
+        except Exception:
+            manifest = None
+
+        # Recon events keyed off agent_run_id (stamped at recon-event write)
+        events: list[dict] = []
+        try:
+            ev_cur = conn.execute(
+                """SELECT event_id, execution_id, caller_key, timestamp, kind,
+                          tool_name, tool_call_id, args_hash, content_hash,
+                          turn_seq
+                   FROM reconstructed_tool_events
+                   WHERE agent_run_id = ?
+                   ORDER BY timestamp ASC""",
+                (run_id,),
+            )
+            for r in ev_cur.fetchall():
+                events.append({
+                    "event_id": r["event_id"],
+                    "execution_id": r["execution_id"],
+                    "caller_key": r["caller_key"],
+                    "timestamp": r["timestamp"],
+                    "kind": r["kind"],
+                    "tool_name": r["tool_name"],
+                    "tool_call_id": r["tool_call_id"],
+                    "args_hash": r["args_hash"],
+                    "content_hash": r["content_hash"],
+                    "turn_seq": r["turn_seq"],
+                })
+        except sqlite3.OperationalError:
+            events = []
+
+        return {
+            "run_id": row["run_id"],
+            "tenant_id": row["tenant_id"],
+            "trace_id": row["trace_id"],
+            "start_ts": row["start_ts"],
+            "end_ts": row["end_ts"],
+            "end_reason": row["end_reason"],
+            "framework_name": row["framework_name"],
+            "llm_call_count": row["llm_call_count"],
+            "tool_event_count": row["tool_event_count"],
+            "signed": bool(row["signature"]),
+            "manifest": manifest,
+            "reconstructed_tool_events": events,
+        }

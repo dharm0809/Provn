@@ -7,6 +7,7 @@ import truzenaiLogoDark from './assets/branding/truzenai-logo-dark.png';
 import Overview from './views/Overview';
 const Intelligence = lazy(() => import('./views/Intelligence'));
 const Sessions = lazy(() => import('./views/Sessions'));
+const AgentRuns = lazy(() => import('./views/AgentRuns'));
 const Timeline = lazy(() => import('./views/Timeline'));
 const Execution = lazy(() => import('./views/Execution'));
 const Attempts = lazy(() => import('./views/Attempts'));
@@ -19,6 +20,7 @@ const NAV_ITEMS = [
   { key: 'overview', label: 'Overview' },
   { key: 'intelligence', label: 'Governance' },
   { key: 'sessions', label: 'Sessions' },
+  { key: 'agent-runs', label: 'Agent runs' },
   { key: 'attempts', label: 'Attempts' },
   { key: 'connections', label: 'Connections' },
   { key: 'control', label: 'Control' },
@@ -30,6 +32,7 @@ const VIEW_LABELS = {
   overview: 'Overview',
   intelligence: 'Governance',
   sessions: 'Sessions',
+  'agent-runs': 'Agent runs',
   attempts: 'Attempts',
   connections: 'Connections',
   control: 'Control',
@@ -285,6 +288,12 @@ export default function App() {
         return (
           <Suspense fallback={viewFallback}>
             <Sessions navigate={navigate} params={view.params} />
+          </Suspense>
+        );
+      case 'agent-runs':
+        return (
+          <Suspense fallback={viewFallback}>
+            <AgentRuns navigate={navigate} params={view.params} />
           </Suspense>
         );
       case 'timeline':

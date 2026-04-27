@@ -182,6 +182,41 @@ async def lineage_session_timeline(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def classify_execution_intent(record: dict) -> dict:
+    """Run the §9.4 cascade against one execution to derive a per-row badge.
+
+    Returns ``{"intent": <label>, "reason": <human string>}``.
+
+    Labels: ``chat`` | ``tool_call_emitted`` | ``tool_loop_step`` |
+    ``agent_run_step``. The first matching tier wins.
+    """
+    meta = record.get("metadata") or {}
+    # Tier A — declared / definitional ────────────────────────────────────────
+    if meta.get("trace_id"):
+        return {"intent": "agent_run_step", "reason": "traceparent / trace_id present"}
+    if meta.get("agent_run_id"):
+        return {"intent": "agent_run_step", "reason": "agent_run_id declared in metadata"}
+    if meta.get("previous_response_id") or meta.get("conversation_id"):
+        return {
+            "intent": "agent_run_step",
+            "reason": "OpenAI Responses API conversation chain",
+        }
+    messages = (meta.get("_request_messages") or []) if isinstance(meta, dict) else []
+    if any((m or {}).get("role") == "tool" for m in messages):
+        return {
+            "intent": "tool_loop_step",
+            "reason": "request carries a tool-result message — mid-loop turn",
+        }
+    # Tier B — strong hints ─────────────────────────────────────────────────
+    response_tool_calls = meta.get("response_tool_calls")
+    if response_tool_calls:
+        return {
+            "intent": "tool_call_emitted",
+            "reason": "response includes tool_calls[]",
+        }
+    return {"intent": "chat", "reason": "no agentic signals on the wire"}
+
+
 def _enrich_execution_record(record: dict) -> dict:
     """Enrich execution record with derived fields for API consumers.
 
@@ -203,7 +238,49 @@ def _enrich_execution_record(record: dict) -> dict:
     if not record.get("file_metadata") and meta.get("file_metadata"):
         record["file_metadata"] = meta.pop("file_metadata")
 
+    # Agent-tracing v1 — derive the §9.4 classification badge so every row
+    # in the timeline view can render with its trigger reason on hover.
+    if not record.get("agent_intent"):
+        record["agent_intent"] = classify_execution_intent(record)
+
     return record
+
+
+# ── Agent-runs endpoints (Pillars 1 + 4) ─────────────────────────────────────
+
+
+async def lineage_agent_runs(request: Request) -> JSONResponse:
+    """GET /v1/lineage/agent-runs — list signed agent-run manifests."""
+    reader = _reader_or_503()
+    if reader is None:
+        return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
+    limit = min(_safe_int(request.query_params.get("limit"), 50), 200)
+    offset = max(0, _safe_int(request.query_params.get("offset"), 0))
+    try:
+        runs = await _call(reader.list_agent_runs, limit=limit, offset=offset)
+        total = await _call(reader.count_agent_runs)
+        return JSONResponse({
+            "runs": runs, "total": total, "limit": limit, "offset": offset,
+        })
+    except Exception as e:  # pragma: no cover — defensive
+        logger.error("lineage_agent_runs error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def lineage_agent_run_detail(request: Request) -> JSONResponse:
+    """GET /v1/lineage/agent-runs/{run_id} — full manifest + recon-event tree."""
+    reader = _reader_or_503()
+    if reader is None:
+        return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
+    run_id = request.path_params["run_id"]
+    try:
+        run = await _call(reader.get_agent_run, run_id)
+        if run is None:
+            return JSONResponse({"error": "Agent run not found", "run_id": run_id}, status_code=404)
+        return JSONResponse(run)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.error("lineage_agent_run_detail error: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 async def lineage_execution(request: Request) -> JSONResponse:

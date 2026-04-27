@@ -29,6 +29,8 @@ from gateway.middleware.completeness import completeness_middleware
 from gateway.middleware.ip_rate_limiter import IPRateLimiter
 from gateway.lineage.api import (
     lineage_sessions,
+    lineage_agent_runs,
+    lineage_agent_run_detail,
     lineage_session_timeline,
     lineage_execution,
     lineage_attempts,
@@ -1993,6 +1995,8 @@ def create_app() -> Starlette:
         Route("/metrics", metrics_response, methods=["GET"]),
         # Lineage API
         Route("/v1/lineage/sessions", lineage_sessions, methods=["GET"]),
+        Route("/v1/lineage/agent-runs", lineage_agent_runs, methods=["GET"]),
+        Route("/v1/lineage/agent-runs/{run_id:path}", lineage_agent_run_detail, methods=["GET"]),
         Route("/v1/lineage/sessions/{session_id:path}", lineage_session_timeline, methods=["GET"]),
         Route("/v1/lineage/executions/{execution_id:path}", lineage_execution, methods=["GET"]),
         Route("/v1/lineage/attempts", lineage_attempts, methods=["GET"]),
