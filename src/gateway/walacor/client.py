@@ -408,6 +408,22 @@ class WalacorClient:
             )
             # Swallow — attempt records are best-effort
 
+    # Fields registered in scripts/setup_walacor_schemas.py for ETId 9000034.
+    # The aggregator's manifest.to_dict() includes v2 placeholders such as
+    # intent_drift_score that the registered schema does not yet contain.
+    # Submitting unknown fields makes Walacor return {success:false} and the
+    # whole manifest is silently rejected — filter on the way out so v2
+    # additions don't break v1 anchoring.
+    _AGENT_RUN_MANIFEST_SCHEMA_FIELDS = frozenset({
+        "run_id", "tenant_id", "trace_id",
+        "caller_identity", "framework_guess",
+        "start_ts", "end_ts", "end_reason",
+        "llm_call_count", "tool_event_count",
+        "llm_calls", "reconstructed_tool_events",
+        "message_chain_hash", "signature",
+        "signed_at", "signing_key_id",
+    })
+
     async def write_agent_run_manifest(self, manifest: dict[str, Any]) -> None:
         """Persist one signed agent-run manifest to Walacor (Pillar 4).
 
@@ -416,9 +432,18 @@ class WalacorClient:
         the caller's Prometheus delivery counter (agent_run_manifests_delivery_*)
         reflects reality — without re-raising, the orchestrator's try/except
         sees None-return and always increments the success label.
+
+        The manifest is JSON-serialised on the way out so nested fields
+        (caller_identity, llm_calls, reconstructed_tool_events) survive
+        Walacor's flat-record schema, which declares them as TEXT.
         """
+        filtered = {
+            k: (json.dumps(v, default=str) if isinstance(v, (dict, list)) else v)
+            for k, v in manifest.items()
+            if k in self._AGENT_RUN_MANIFEST_SCHEMA_FIELDS and v is not None
+        }
         try:
-            await self._submit(self._agent_run_manifests_etid, [dict(manifest)])
+            await self._submit(self._agent_run_manifests_etid, [filtered])
         except Exception as e:
             self._record_delivery(
                 "write_agent_run_manifest", ok=False, detail=classify_exception(e)

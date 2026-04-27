@@ -84,6 +84,10 @@ class AgentRunManifest:
             "start_ts": self.start_ts,
             "end_ts": self.end_ts,
             "end_reason": self.end_reason,
+            # Aggregated counts — declared in the registered Walacor schema
+            # so queries can filter without parsing the JSON arrays.
+            "llm_call_count": len(self.llm_calls),
+            "tool_event_count": len(self.reconstructed_tool_events),
             "llm_calls": [c.__dict__ for c in self.llm_calls],
             "reconstructed_tool_events": [
                 e.__dict__ for e in self.reconstructed_tool_events
