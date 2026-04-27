@@ -137,7 +137,7 @@ class AgentRunAggregator:
         trace_id: str | None = None,
         user_agent: str | None = None,
         walacor_dh: str | None = None,
-        record_hash: str | None = None,
+        record_signature: str | None = None,
         is_final_assistant: bool = False,
     ) -> None:
         if not run_key:
@@ -173,7 +173,7 @@ class AgentRunAggregator:
             run.last_activity_ts = now
             run.llm_calls.append(LLMCallRef(
                 record_id=record_id,
-                record_hash=record_hash,
+                record_signature=record_signature,
                 walacor_dh=walacor_dh,
                 model=model,
                 timestamp=timestamp_iso,

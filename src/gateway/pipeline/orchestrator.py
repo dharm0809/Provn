@@ -704,10 +704,10 @@ async def _store_execution(record, request: Request, ctx) -> None:
                 trace_id=_trace_id,
                 user_agent=_ua,
                 is_final_assistant=_is_final,
-                # Gateway-local content hash, available synchronously from
+                # Gateway-local Ed25519 signature, populated synchronously by
                 # _apply_session_chain. Walacor DH stays None until the
                 # post-anchor enrichment worker (v1.1) lands.
-                record_hash=record.get("record_hash"),
+                record_signature=record.get("record_signature"),
             )
             from gateway.metrics.prometheus import (
                 agent_run_manifests_delivered_total as _agm_ok,
