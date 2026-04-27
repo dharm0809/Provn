@@ -149,9 +149,57 @@ function forceDownload(url, filename) {
     .catch(err => alert(`Download failed: ${err.message}`));
 }
 
+// Flatten the per-framework mapping shapes into uniform rows the drawer
+// can render. Backend keys differ by framework:
+//   EU AI Act → framework_mapping.articles  (object of articles, each with requirements[])
+//   NIST RMF  → framework_mapping.functions (object of functions, each with evidence[])
+//   SOC 2     → framework_mapping.criteria  (object of criteria,  each with evidence[])
+//   ISO 42001 → framework_mapping.clauses   (object of clauses,   each with evidence[])
+function flattenControlMapping(mapping) {
+  if (!mapping || typeof mapping !== 'object') return [];
+  const rows = [];
+  const flattenSection = (sectionId, section, childKey, childIdField) => {
+    const title = section?.title || sectionId;
+    const status = section?.status || null;
+    rows.push({
+      kind: 'section', id: sectionId, title, status,
+      description: section?.description || null,
+    });
+    const children = Array.isArray(section?.[childKey]) ? section[childKey] : [];
+    for (const c of children) {
+      rows.push({
+        kind: 'item',
+        id: c[childIdField] || '—',
+        title: c.description || c.title || '',
+        status: c.status || null,
+        evidence_ref: c.evidence_ref || null,
+      });
+    }
+  };
+  if (mapping.articles && typeof mapping.articles === 'object') {
+    for (const [id, sec] of Object.entries(mapping.articles)) {
+      flattenSection(id, sec, 'requirements', 'requirement');
+    }
+  } else if (mapping.functions && typeof mapping.functions === 'object') {
+    for (const [id, sec] of Object.entries(mapping.functions)) {
+      flattenSection(id, sec, 'evidence', 'control');
+    }
+  } else if (mapping.criteria && typeof mapping.criteria === 'object') {
+    for (const [id, sec] of Object.entries(mapping.criteria)) {
+      flattenSection(id, sec, 'evidence', 'control');
+    }
+  } else if (mapping.clauses && typeof mapping.clauses === 'object') {
+    for (const [id, sec] of Object.entries(mapping.clauses)) {
+      flattenSection(id, sec, 'evidence', 'control');
+    }
+  }
+  return rows;
+}
+
 function PreviewDrawer({ framework, report, onClose }) {
   const readiness = report?.audit_readiness || null;
-  const articles = report?.framework_mapping?.articles || [];
+  const controlRows = flattenControlMapping(report?.framework_mapping);
+  const sectionCount = controlRows.filter(r => r.kind === 'section').length;
   const chain = report?.chain_integrity || null;
   return (
     <div className="cx-overlay-wrap" onClick={onClose}>
@@ -216,24 +264,44 @@ function PreviewDrawer({ framework, report, onClose }) {
           </>
         )}
 
-        {articles.length > 0 && (
+        {controlRows.length > 0 && (
           <>
-            <div className="intel-card-sub" style={{ marginBottom: 8 }}>◇ control mapping ({articles.length})</div>
+            <div className="intel-card-sub" style={{ marginBottom: 8 }}>◇ control mapping ({sectionCount})</div>
             <div style={{ display: 'grid', gap: 6 }}>
-              {articles.map((a, i) => (
+              {controlRows.map((row, i) => row.kind === 'section' ? (
                 <div key={i} style={{
                   fontFamily: 'var(--mono)', fontSize: 11,
                   padding: '8px 10px',
                   background: 'var(--surface-sunken, rgba(0,0,0,0.2))',
                   borderRadius: 4,
+                  marginTop: i === 0 ? 0 : 8,
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span>{a.id || a.article || '—'} {a.title ? `· ${a.title}` : ''}</span>
-                    <span style={{ color: gradeColor(a.status === 'compliant' ? 'A' : a.status === 'partial' ? 'C' : 'F') }}>
-                      {a.status || '—'}
+                    <span><strong>{row.id}</strong> {row.title ? `· ${row.title}` : ''}</span>
+                    <span style={{ color: gradeColor(row.status === 'compliant' ? 'A' : row.status === 'partial' ? 'C' : row.status ? 'F' : null) }}>
+                      {row.status || '—'}
                     </span>
                   </div>
-                  {a.description && <div style={{ color: 'var(--text-muted)', marginTop: 3 }}>{a.description}</div>}
+                  {row.description && <div style={{ color: 'var(--text-muted)', marginTop: 3 }}>{row.description}</div>}
+                </div>
+              ) : (
+                <div key={i} style={{
+                  fontFamily: 'var(--mono)', fontSize: 11,
+                  padding: '4px 10px 4px 22px',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <span>· <span style={{ color: 'var(--text-muted)' }}>{row.id}</span> {row.title}</span>
+                    {row.status && (
+                      <span style={{ color: gradeColor(row.status === 'compliant' ? 'A' : row.status === 'partial' ? 'C' : 'F') }}>
+                        {row.status}
+                      </span>
+                    )}
+                  </div>
+                  {row.evidence_ref && (
+                    <div style={{ color: 'var(--text-muted)', fontSize: 10, marginTop: 2 }}>
+                      evidence: {row.evidence_ref}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
