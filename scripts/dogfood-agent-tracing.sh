@@ -26,6 +26,13 @@ ssh_run "echo connected as \$(whoami) on \$(hostname); uptime"
 echo "==> [2/7] fetch + checkout $BRANCH"
 ssh_run "cd $GW_DIR && git fetch --all --prune && git checkout $BRANCH && git pull --ff-only origin $BRANCH && git log --oneline | head -6"
 
+echo "==> [2.5/7] rebuild dashboard static bundle"
+# .gitignore excludes built PNGs from src/gateway/lineage/static/, so a fresh
+# pull leaves new branding assets (e.g. truzenai-logo-*) missing — Vite's
+# hashed filenames in index.html would 404. Rebuilding deterministically
+# regenerates the static dir with the current source. Cheap (~3s).
+ssh_run "cd $GW_DIR/src/gateway/lineage/dashboard && npm install --silent 2>&1 | tail -1 && npm run build 2>&1 | tail -3"
+
 echo "==> [3/7] capture pre-deploy version + Prometheus baseline"
 ssh_run "cd $GW_DIR && git rev-parse --short HEAD > /tmp/gateway_dharm_version_before.txt; \
   curl -s http://127.0.0.1:$GW_PORT/metrics 2>/dev/null \
