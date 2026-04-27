@@ -17,7 +17,6 @@ import '../styles/connections.css';
    ──────────────────────────────────────────────────────────── */
 
 const POLL_MS = 3000;
-const EMPTY_WINDOW_MINUTES = 10;
 
 /* Fixed tile order per design spec §Tiles. */
 const TILE_ORDER = [
@@ -370,7 +369,7 @@ export default function Connections({ navigate }) {
         </div>
 
         {events.length === 0 ? (
-          <EmptyState minutes={EMPTY_WINDOW_MINUTES} />
+          <EmptyState />
         ) : (
           <div className="cx-events-list">
             {events.map((ev, idx) => (
@@ -519,14 +518,16 @@ function EventRow({ ev, onClick }) {
 
 /* ── Empty state (reassuring copy per spec) ──────────────────────── */
 
-function EmptyState({ minutes }) {
+function EmptyState() {
   return (
     <div className="cx-empty">
       <div className="cx-empty-icon">✓</div>
-      <div className="cx-empty-title">No silent failures in the last {minutes} minutes.</div>
+      <div className="cx-empty-title">No silent failures in the recent event buffer.</div>
       <div className="cx-empty-sub">
         Fail-open analyzers, dropped Walacor writes, and swallowed tool exceptions
-        would all show up here. Nothing so far.
+        would all show up here. Buffer holds the most recent ~50 events per
+        subsystem (deque-bounded, not time-bounded), so the visible window
+        shrinks under load.
       </div>
     </div>
   );
