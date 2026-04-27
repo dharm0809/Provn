@@ -115,8 +115,24 @@ function forceDownload(url, filename) {
   // header. fetch→blob→<a download> preserves that; a plain <a href> loses
   // the X-API-Key.
   fetch(url, key ? { headers: { 'X-API-Key': key } } : {})
-    .then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    .then(async r => {
+      if (!r.ok) {
+        // PDF export returns 501 with a JSON body when system libraries
+        // (Pango/Cairo) are missing — surface that hint instead of a
+        // bare HTTP code.
+        let detail = '';
+        try {
+          const ct = r.headers.get('Content-Type') || '';
+          if (ct.includes('application/json')) {
+            const body = await r.json();
+            detail = body?.error || body?.detail || '';
+          }
+        } catch { /* ignore body-parse failures */ }
+        if (r.status === 501) {
+          throw new Error(detail || 'PDF export unavailable on this gateway (Pango/Cairo not installed). Use HTML or JSON export instead.');
+        }
+        throw new Error(detail ? `HTTP ${r.status}: ${detail}` : `HTTP ${r.status}`);
+      }
       return r.blob().then(b => ({ blob: b, resp: r }));
     })
     .then(({ blob, resp }) => {
