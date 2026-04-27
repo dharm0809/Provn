@@ -82,8 +82,20 @@ def _parse_manifest_row(row: dict) -> dict:
     back here. Output matches reader.LineageReader.list_agent_runs so
     the dashboard sees the same shape regardless of which reader is
     serving the route. Strips Walacor internal columns (_id/ORGId/etc.).
+
+    When the query joined the envelopes collection ($lookup), the row
+    carries an `env` array — we surface BlockId / TransId / DH / BL so
+    the dashboard can show the blockchain anchor for each manifest.
     """
     r = dict(row)
+    # Pull anchor metadata BEFORE stripping internal cols. env_list comes
+    # from the $lookup; first element is the matching envelope row.
+    env_list = r.pop("env", None) or []
+    env = env_list[0] if env_list else {}
+    walacor_block_id = env.get("BlockId")
+    walacor_trans_id = env.get("TransId")
+    walacor_dh = env.get("DH")
+    walacor_bl = env.get("BL")
     for k in ("_id", "ORGId", "UID", "IsDeleted", "SV", "LastModifiedBy", "EId", "ES"):
         r.pop(k, None)
     for k in ("caller_identity", "framework_guess", "llm_calls", "reconstructed_tool_events"):
@@ -105,6 +117,10 @@ def _parse_manifest_row(row: dict) -> dict:
         "llm_call_count": r.get("llm_call_count") or 0,
         "tool_event_count": r.get("tool_event_count") or 0,
         "signed": bool(r.get("signature")),
+        "walacor_block_id": walacor_block_id,
+        "walacor_trans_id": walacor_trans_id,
+        "walacor_dh": walacor_dh,
+        "walacor_bl": walacor_bl,
         "manifest": r,
     }
 
@@ -946,6 +962,17 @@ class WalacorLineageReader:
             {"$sort": {"end_ts": -1}},
             {"$skip": max(0, int(offset))},
             {"$limit": min(200, max(1, int(limit)))},
+            # $lookup the envelope so each manifest row carries its
+            # blockchain-anchor metadata (BlockId / TransId / DH / BL).
+            # Without this join the summary collection returns only the
+            # data fields, never the anchor proof. Same pattern as
+            # list_sessions/get_execution above.
+            {"$lookup": {
+                "from": "envelopes",
+                "localField": "EId",
+                "foreignField": "EId",
+                "as": "env",
+            }},
         ]
         try:
             rows = await self._client.query_complex(self._manifests_etid, pipeline)
@@ -967,6 +994,12 @@ class WalacorLineageReader:
         pipeline: list[dict[str, Any]] = [
             {"$match": {"run_id": run_id}},
             {"$limit": 1},
+            {"$lookup": {
+                "from": "envelopes",
+                "localField": "EId",
+                "foreignField": "EId",
+                "as": "env",
+            }},
         ]
         try:
             rows = await self._client.query_complex(self._manifests_etid, pipeline)
