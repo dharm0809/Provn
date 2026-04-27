@@ -49,3 +49,27 @@ def test_cooccur_bias_use_known_labels_and_floats():
         assert a in CANONICAL_LABELS
         assert b in CANONICAL_LABELS
         assert isinstance(w, float)
+
+
+def test_primary_content_group_removed():
+    """Regression: ('content', 'thinking_content') was REMOVED from
+    EXCLUSIVE_GROUPS because DeepSeek-Reasoner / xAI Grok 4 return both
+    under the same parent `choices[0].message`. They are co-occurring,
+    not exclusive."""
+    for group_name, members in EXCLUSIVE_GROUPS.items():
+        members_set = set(members)
+        assert not (
+            "content" in members_set and "thinking_content" in members_set
+        ), (
+            f"EXCLUSIVE_GROUPS[{group_name!r}] re-introduced (content, thinking_content) — "
+            "they co-occur on reasoning models, see deepseek.json example[1]."
+        )
+
+
+def test_content_thinking_cooccur_bias_present():
+    """The pair lives in COOCCUR_BIAS instead of EXCLUSIVE_GROUPS."""
+    pairs = {(a, b) for a, b, _ in COOCCUR_BIAS}
+    assert ("content", "thinking_content") in pairs or (
+        "thinking_content",
+        "content",
+    ) in pairs
