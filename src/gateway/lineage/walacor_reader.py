@@ -74,6 +74,41 @@ def _deserialize_record(r: dict) -> dict:
     return r
 
 
+def _parse_manifest_row(row: dict) -> dict:
+    """Convert a Walacor agent-run manifest row back to the dashboard shape.
+
+    Nested fields were JSON-serialised to TEXT on the way in
+    (WalacorClient._AGENT_RUN_MANIFEST_SCHEMA_FIELDS) so we parse them
+    back here. Output matches reader.LineageReader.list_agent_runs so
+    the dashboard sees the same shape regardless of which reader is
+    serving the route. Strips Walacor internal columns (_id/ORGId/etc.).
+    """
+    r = dict(row)
+    for k in ("_id", "ORGId", "UID", "IsDeleted", "SV", "LastModifiedBy", "EId", "ES"):
+        r.pop(k, None)
+    for k in ("caller_identity", "framework_guess", "llm_calls", "reconstructed_tool_events"):
+        v = r.get(k)
+        if isinstance(v, str):
+            try:
+                r[k] = json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                pass
+    fg = r.get("framework_guess") if isinstance(r.get("framework_guess"), dict) else None
+    return {
+        "run_id": r.get("run_id"),
+        "tenant_id": r.get("tenant_id"),
+        "trace_id": r.get("trace_id"),
+        "start_ts": r.get("start_ts"),
+        "end_ts": r.get("end_ts"),
+        "end_reason": r.get("end_reason"),
+        "framework_name": (fg or {}).get("name") if fg else None,
+        "llm_call_count": r.get("llm_call_count") or 0,
+        "tool_event_count": r.get("tool_event_count") or 0,
+        "signed": bool(r.get("signature")),
+        "manifest": r,
+    }
+
+
 class WalacorLineageReader:
     """Async read interface for lineage data stored in Walacor."""
 
@@ -83,11 +118,13 @@ class WalacorLineageReader:
         executions_etid: int = 9000011,
         attempts_etid: int = 9000012,
         tool_events_etid: int = 9000013,
+        agent_run_manifests_etid: int = 9000034,
     ) -> None:
         self._client = client
         self._exec_etid = executions_etid
         self._att_etid = attempts_etid
         self._tool_etid = tool_events_etid
+        self._manifests_etid = agent_run_manifests_etid
 
     # ── Sessions ──────────────────────────────────────────────────────────
 
@@ -898,23 +935,46 @@ class WalacorLineageReader:
         }
 
     # ----- agent-run manifests (Pillar 4) ------------------------------------
-    # The local LineageReader serves these from the local sqlite WAL where
-    # manifests are written first by the AgentRunManifest aggregator.
-    # WalacorLineageReader runs against the remote backend, where manifests
-    # land via dual-write under their own ETId. Until that ETId-side query
-    # is implemented, return clean empty/None so the dashboard renders an
-    # empty state instead of 500ing — matches the OperationalError fallback
-    # pattern in reader.list_agent_runs.
-    # TODO(agent-tracing v1.1): query the manifest ETId via getcomplex and
-    # parse the same shape as reader.list_agent_runs returns.
+    # Mirror reader.LineageReader.list_agent_runs against the Walacor backend
+    # via the manifest ETId. Nested fields (caller_identity, framework_guess,
+    # llm_calls, reconstructed_tool_events) are stored as JSON-serialised TEXT
+    # in Walacor (see WalacorClient._AGENT_RUN_MANIFEST_SCHEMA_FIELDS); we
+    # parse them back on the way out so the dashboard sees the same dict
+    # shape it would from the local reader.
     async def list_agent_runs(self, *, limit: int = 50, offset: int = 0) -> list[dict]:
-        return []
+        pipeline: list[dict[str, Any]] = [
+            {"$sort": {"end_ts": -1}},
+            {"$skip": max(0, int(offset))},
+            {"$limit": min(200, max(1, int(limit)))},
+        ]
+        try:
+            rows = await self._client.query_complex(self._manifests_etid, pipeline)
+        except Exception:
+            return []
+        return [_parse_manifest_row(r) for r in (rows or [])]
 
     async def count_agent_runs(self) -> int:
+        pipeline: list[dict[str, Any]] = [{"$count": "total"}]
+        try:
+            rows = await self._client.query_complex(self._manifests_etid, pipeline)
+        except Exception:
+            return 0
+        if rows and isinstance(rows, list):
+            return int(rows[0].get("total") or 0)
         return 0
 
     async def get_agent_run(self, run_id: str) -> dict | None:
-        return None
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"run_id": run_id}},
+            {"$limit": 1},
+        ]
+        try:
+            rows = await self._client.query_complex(self._manifests_etid, pipeline)
+        except Exception:
+            return None
+        if not rows:
+            return None
+        return _parse_manifest_row(rows[0])
 
     def close(self) -> None:
         """No-op — WalacorClient lifecycle is managed by main.py."""

@@ -810,6 +810,7 @@ def _init_lineage(settings, ctx) -> None:
             executions_etid=settings.walacor_executions_etid,
             attempts_etid=settings.walacor_attempts_etid,
             tool_events_etid=settings.walacor_tool_events_etid,
+            agent_run_manifests_etid=settings.walacor_agent_run_manifests_etid,
         )
         logger.info(
             "Lineage dashboard enabled: reading from Walacor API (ETId %d/%d/%d)",
