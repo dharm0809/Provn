@@ -495,15 +495,24 @@ For each provider with live traffic on EC2 (`gateway_dharm`):
 
 ```bash
 # example: pull 5 anonymised OpenAI responses from the WAL
+# NOTE: response bodies live in wal_records.record_json (JSON envelope),
+# NOT gateway_attempts (which is the light per-request audit row and has
+# no response body column).
 ssh -i AWS/gateway_key.pem ec2-user@35.165.21.8 \
   "sqlite3 /tmp/walacor-wal-dharm/lineage.db \"
-   SELECT response_text FROM gateway_attempts
-   WHERE provider='openai' AND status_code=200
+   SELECT record_json FROM wal_records
+   WHERE event_type='execution' AND provider='openai'
    ORDER BY timestamp DESC LIMIT 5
-  \"" | jq '.' > /tmp/openai_samples.json
+  \"" > /tmp/openai_samples.jsonl
 ```
 
-Then redact via the PII detector before transcribing into the spec file.
+Each `record_json` is the full audit envelope; the provider response
+body is at `.payload.response` (or similar — confirm against the
+envelope shape on first run). Pipe through `src/gateway/content/
+pii_sanitizer.py:sanitize()` to scrub user-visible content fields
+before transcribing into the spec file. Keep response IDs, model
+hashes, and timing values verbatim; replace `content` / `text` fields
+with short synthetic placeholders preserving the structural shape.
 
 **Step 3: Add fixture test for each provider**
 
