@@ -666,6 +666,57 @@ async def _store_execution(record, request: Request, ctx) -> None:
         except Exception:
             logger.debug("recon/fingerprint persistence failed (non-fatal)", exc_info=True)
 
+    # Pillar 4 — observe this request into the AgentRunAggregator and sweep
+    # for any runs that hit run-end. Manifests are dual-written: local WAL
+    # (via wal_writer) AND Walacor (via walacor_client). Best-effort; never
+    # raises into the request path.
+    try:
+        from gateway.agent_tracing.aggregator import get_aggregator
+        import time as _time
+        _now_f = _time.time()
+        _meta = (record.get("metadata") or {}) if isinstance(record, dict) else {}
+        _trace_id = _meta.get("trace_id")
+        _agent_run_id = _meta.get("agent_run_id")
+        _caller = getattr(request.state, "walacor_recon_caller", "")
+        _run_key = _agent_run_id or _trace_id or _caller
+        if _run_key:
+            _agg = get_aggregator()
+            _ua = request.headers.get("user-agent")
+            _caller_identity = {
+                "user": _meta.get("user"),
+                "team": _meta.get("team"),
+                "api_key_id": _meta.get("api_key_id"),
+            }
+            # is_final_assistant: response_content present and no tool_calls in
+            # the response. Cheap heuristic; the aggregator only uses this to
+            # arm inactivity-based run-end detection.
+            _is_final = bool(record.get("response_content")) and not _meta.get("response_tool_calls")
+            _agg.observe(
+                tenant_id=record.get("tenant_id") or "",
+                run_key=str(_run_key),
+                record_id=eid,
+                model=record.get("model_id"),
+                timestamp_iso=record.get("timestamp") or "",
+                now=_now_f,
+                messages=getattr(request.state, "_parsed_body", {}).get("messages", []) or [],
+                recon_events=getattr(request.state, "walacor_recon_events", []) or [],
+                caller_identity=_caller_identity,
+                trace_id=_trace_id,
+                user_agent=_ua,
+                is_final_assistant=_is_final,
+            )
+            for manifest in _agg.sweep(_now_f):
+                _m_dict = manifest.to_dict()
+                if ctx.wal_writer is not None:
+                    try:
+                        ctx.wal_writer.enqueue_write_agent_run_manifest(_m_dict)
+                    except Exception:
+                        logger.debug("manifest local persist failed (non-fatal)", exc_info=True)
+                if ctx.walacor_client is not None:
+                    asyncio.create_task(ctx.walacor_client.write_agent_run_manifest(_m_dict))
+    except Exception:
+        logger.debug("agent_run_aggregator observe/sweep failed (non-fatal)", exc_info=True)
+
 
 # ── Post-stream background tasks ─────────────────────────────────────────────
 

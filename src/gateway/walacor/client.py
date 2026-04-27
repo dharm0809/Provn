@@ -87,6 +87,7 @@ class WalacorClient:
         attempts_etid: int = 9000002,
         tool_events_etid: int = 9000003,
         lifecycle_events_etid: int = 9000024,
+        agent_run_manifests_etid: int = 9000005,
     ) -> None:
         self._server = server.rstrip("/")
         self._username = username
@@ -95,6 +96,7 @@ class WalacorClient:
         self._attempts_etid = attempts_etid
         self._tool_events_etid = tool_events_etid
         self._lifecycle_events_etid = lifecycle_events_etid
+        self._agent_run_manifests_etid = agent_run_manifests_etid
         self._token: str | None = None
         self._http: httpx.AsyncClient | None = None
         self._auth_lock: asyncio.Lock = asyncio.Lock()
@@ -392,6 +394,24 @@ class WalacorClient:
                 request_id, e,
             )
             # Swallow — attempt records are best-effort
+
+    async def write_agent_run_manifest(self, manifest: dict[str, Any]) -> None:
+        """Persist one signed agent-run manifest to Walacor (Pillar 4).
+
+        Best-effort: failures are logged at WARNING and swallowed so the
+        manifest never blocks the request path.
+        """
+        try:
+            await self._submit(self._agent_run_manifests_etid, [dict(manifest)])
+            self._record_delivery("write_agent_run_manifest", ok=True, detail=None)
+        except Exception as e:
+            self._record_delivery(
+                "write_agent_run_manifest", ok=False, detail=classify_exception(e)
+            )
+            logger.warning(
+                "Walacor write_agent_run_manifest failed run_id=%s: %s",
+                manifest.get("run_id"), e,
+            )
 
     # Fields defined in the Walacor gateway_tool_events schema (ETId 9000023).
     # Run scripts/setup_walacor_schemas.py to create schemas with all fields.

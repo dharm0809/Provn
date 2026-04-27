@@ -126,6 +126,39 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         " ON tool_fingerprints (tenant_id, trace_id)"
         " WHERE trace_id IS NOT NULL"
     )
+    # Pillar 4 — signed AgentRunManifest. Stored as the canonical JSON the
+    # signature was computed over plus the signature itself; one row per run.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS agent_run_manifests (
+            run_id          TEXT    PRIMARY KEY,
+            tenant_id       TEXT    NOT NULL,
+            trace_id        TEXT,
+            start_ts        TEXT    NOT NULL,
+            end_ts          TEXT    NOT NULL,
+            end_reason      TEXT    NOT NULL,
+            framework_name  TEXT,
+            llm_call_count  INTEGER NOT NULL DEFAULT 0,
+            tool_event_count INTEGER NOT NULL DEFAULT 0,
+            signature       TEXT,
+            manifest_json   TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL,
+            delivered       INTEGER NOT NULL DEFAULT 0,
+            delivered_at    TEXT
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manifests_tenant_end"
+        " ON agent_run_manifests (tenant_id, end_ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manifests_trace"
+        " ON agent_run_manifests (trace_id)"
+        " WHERE trace_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manifests_pending"
+        " ON agent_run_manifests (delivered, created_at)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
         " ON gateway_attempts (tenant_id, disposition)"
@@ -613,6 +646,37 @@ class WALWriter:
     def enqueue_write_fingerprint(self, record: dict[str, Any]) -> None:
         """Non-blocking enqueue for a Pillar-2 tool_fingerprints row."""
         self._queue.put((self._do_write_fingerprint, (record,)))
+
+    @staticmethod
+    def _do_write_agent_run_manifest(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+        manifest_json = json.dumps(record["manifest"])
+        d = record["manifest"]
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_run_manifests
+               (run_id, tenant_id, trace_id, start_ts, end_ts, end_reason,
+                framework_name, llm_call_count, tool_event_count, signature,
+                manifest_json, created_at, delivered)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            (
+                d["run_id"], d.get("tenant_id") or "", d.get("trace_id"),
+                d["start_ts"], d["end_ts"], d.get("end_reason"),
+                (d.get("framework_guess") or {}).get("name"),
+                len(d.get("llm_calls") or []),
+                len(d.get("reconstructed_tool_events") or []),
+                d.get("signature"),
+                manifest_json, now,
+            ),
+        )
+
+    def enqueue_write_agent_run_manifest(self, manifest: dict[str, Any]) -> None:
+        """Non-blocking enqueue for a Pillar-4 agent_run_manifests row.
+
+        ``manifest`` is the dict produced by ``AgentRunManifest.to_dict()``.
+        """
+        self._queue.put((
+            self._do_write_agent_run_manifest, ({"manifest": manifest},),
+        ))
 
     # ------------------------------------------------------------------
     # Synchronous public API (used by delivery worker, startup, health, batch writer)

@@ -326,6 +326,14 @@ class Settings(BaseSettings):
         description="Walacor ETId for ONNX lifecycle event records (training fingerprint, candidate, shadow, promote, reject)",
         validation_alias=AliasChoices("WALACOR_LIFECYCLE_EVENTS_ETID", "walacor_lifecycle_events_etid"),
     )
+    walacor_agent_run_manifests_etid: int = Field(
+        default=9000005,
+        description="Walacor ETId for agent-run manifests (Pillar 4 of agent tracing)",
+        validation_alias=AliasChoices(
+            "WALACOR_AGENT_RUN_MANIFESTS_ETID",
+            "walacor_agent_run_manifests_etid",
+        ),
+    )
 
     # Phase 14: Tool-aware gateway
     tool_aware_enabled: bool = Field(default=True, description="Enable tool-call awareness and auditing")

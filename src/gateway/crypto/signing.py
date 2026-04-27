@@ -98,6 +98,24 @@ def _canonical_bytes(
     ]).encode("utf-8")
 
 
+def sign_bytes(canonical: bytes, private_key: Any = None) -> str | None:
+    """Sign an arbitrary canonical byte string with Ed25519.
+
+    Used by Pillar 4 of agent tracing (AgentRunManifest) — the manifest's
+    canonical layout differs from the execution-chain shape baked into
+    :func:`sign_canonical`, but the underlying key and base64-encoding
+    convention are shared.
+    """
+    key = private_key if private_key is not None else _signing_key
+    if key is None:
+        return None
+    try:
+        return base64.b64encode(key.sign(canonical)).decode("ascii")
+    except Exception as e:  # pragma: no cover — fail-open path
+        logger.warning("sign_bytes failed (fail-open): %s", e)
+        return None
+
+
 def sign_canonical(
     *,
     record_id: str | None,
