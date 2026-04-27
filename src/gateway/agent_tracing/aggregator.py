@@ -35,6 +35,10 @@ from gateway.agent_tracing.manifest import (
     message_chain_hash,
     sign_manifest,
 )
+from gateway.metrics.prometheus import (
+    agent_run_aggregator_open_runs,
+    agent_run_manifests_total,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +114,10 @@ class AgentRunAggregator:
         self.inactivity_seconds = inactivity_seconds
         self.ttl_seconds = ttl_seconds
         self._open: dict[tuple[str, str], _OpenRun] = {}
+        # Manifests that observe() finalised in-line (because the request
+        # itself triggered run-end). Drained on the next sweep() so the
+        # existing call-sites collect them alongside sweep-finalised runs.
+        self._pending_finalised: list[AgentRunManifest] = []
         self._lock = threading.Lock()
 
     # ── observe ──────────────────────────────────────────────────────────────
@@ -136,6 +144,20 @@ class AgentRunAggregator:
         key = (tenant_id, run_key)
         with self._lock:
             run = self._open.get(key)
+            # Inactivity check BEFORE we mutate state. Without this, the very
+            # request that should trigger run-end (because it arrived after
+            # the inactivity window) instead extends the existing run by
+            # bumping last_activity_ts. The pre-existing run is closed first
+            # and a fresh one opens for the new turn — which is the correct
+            # semantics for "the next conversation from the same caller".
+            if (
+                run is not None
+                and run.last_assistant_final_ts is not None
+                and (now - run.last_assistant_final_ts) >= self.inactivity_seconds
+            ):
+                self._pending_finalised.append(self._finalise(run, "inactivity", now))
+                self._open.pop(key, None)
+                run = None
             if run is None:
                 run = _OpenRun(
                     run_id=uuid.uuid4().hex,
@@ -167,12 +189,15 @@ class AgentRunAggregator:
     # ── sweep / close ────────────────────────────────────────────────────────
 
     def sweep(self, now: float) -> list[AgentRunManifest]:
-        """Close any runs whose inactivity or TTL expired. Returns finalised
-        manifests; the caller is responsible for delivering them to Walacor +
-        the WAL."""
+        """Close any runs whose inactivity or TTL expired. Also drains any
+        manifests observe() finalised in-line. Returns finalised manifests;
+        the caller is responsible for delivering them to Walacor + the WAL."""
         manifests: list[AgentRunManifest] = []
         to_close: list[tuple[tuple[str, str], _OpenRun, str]] = []
         with self._lock:
+            if self._pending_finalised:
+                manifests.extend(self._pending_finalised)
+                self._pending_finalised.clear()
             for key, run in list(self._open.items()):
                 if (now - run.start_ts) >= self.ttl_seconds:
                     to_close.append((key, run, "ttl"))
@@ -227,6 +252,14 @@ class AgentRunAggregator:
             message_chain_hash=message_chain_hash(run.messages_seen),
         )
         sign_manifest(manifest)
+        agent_run_manifests_total.labels(end_reason=reason).inc()
+        # Best-effort gauge update; sweep() callers re-set this on every
+        # invocation, but observe()-side finalisation should also reflect
+        # the change immediately.
+        try:
+            agent_run_aggregator_open_runs.set(len(self._open))
+        except Exception:  # pragma: no cover — gauge set is infallible
+            pass
         return manifest
 
 

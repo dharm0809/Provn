@@ -83,6 +83,9 @@ class PipelineContext:
         # Phase 18 (Task 18): Batch WAL writer
         self.batch_writer: Any | None = None
         self.merkle_checkpoint_task: Any | None = None
+        # Pillar 4 — periodic AgentRunAggregator sweep task; see
+        # gateway.main._agent_run_sweep_loop.
+        self.agent_run_sweep_task: Any | None = None
         # Multimodal audit: attachment notification cache
         self.attachment_cache: Any | None = None
         # Multimodal audit: image OCR analyzer

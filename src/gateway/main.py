@@ -1404,6 +1404,51 @@ async def _event_loop_lag_monitor():
         event_loop_lag_seconds.set(max(0.0, lag))
 
 
+async def _agent_run_sweep_loop(ctx, interval_seconds: float = 5.0) -> None:
+    """Periodically drain the AgentRunAggregator for inactivity/TTL closes.
+
+    The orchestrator already calls sweep() per request, but if a caller goes
+    silent the run never finalises without this background ticker. Cheap:
+    sweep() over an empty open-runs dict is a no-op.
+    """
+    from gateway.agent_tracing.aggregator import get_aggregator
+    from gateway.metrics.prometheus import (
+        agent_run_aggregator_open_runs,
+        agent_run_manifests_delivered_total,
+        agent_run_manifests_delivery_failures_total,
+    )
+    import time as _time
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            agg = get_aggregator()
+            agent_run_aggregator_open_runs.set(agg.open_runs())
+            for manifest in agg.sweep(_time.time()):
+                m_dict = manifest.to_dict()
+                if ctx.wal_writer is not None:
+                    try:
+                        ctx.wal_writer.enqueue_write_agent_run_manifest(m_dict)
+                        agent_run_manifests_delivered_total.labels(dest="local_wal").inc()
+                    except Exception:
+                        agent_run_manifests_delivery_failures_total.labels(dest="local_wal").inc()
+                        logger.debug("background manifest local persist failed", exc_info=True)
+                if ctx.walacor_client is not None:
+                    async def _deliver(c=ctx.walacor_client, payload=m_dict):
+                        try:
+                            await c.write_agent_run_manifest(payload)
+                            agent_run_manifests_delivered_total.labels(dest="walacor").inc()
+                        except Exception:
+                            agent_run_manifests_delivery_failures_total.labels(dest="walacor").inc()
+                            logger.debug("background manifest walacor delivery failed", exc_info=True)
+                    asyncio.create_task(_deliver())
+            agent_run_aggregator_open_runs.set(agg.open_runs())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("agent_run_sweep_loop iteration failed (non-fatal)", exc_info=True)
+
+
 async def _merkle_checkpoint_loop(ctx, interval: int) -> None:
     """Periodically build Merkle tree checkpoint from recent session chain hashes."""
     from gateway.crypto.merkle_tree import build_merkle_tree
@@ -1658,6 +1703,12 @@ async def on_startup() -> None:
             )
         # Event loop lag monitor (RED metrics)
         ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
+        # Pillar 4 — periodic sweep for the AgentRunAggregator. Without this
+        # background loop, runs whose caller has gone silent never close —
+        # observe()-driven sweep only fires when a NEW request arrives.
+        ctx.agent_run_sweep_task = asyncio.create_task(
+            _agent_run_sweep_loop(ctx, interval_seconds=5.0)
+        )
         # Multimodal audit: attachment notification cache
         if settings.attachment_tracking_enabled:
             from gateway.middleware.attachment_tracker import AttachmentNotificationCache
@@ -1887,6 +1938,19 @@ async def on_shutdown() -> None:
             pass
         except Exception as e:
             errors.append(f"merkle_checkpoint_task: {e}")
+
+    # Pillar 4 background sweep — drain pending finalisations one last time
+    # before cancelling so manifests for runs that just hit inactivity get
+    # delivered instead of dropped on shutdown.
+    _agent_sweep_task = getattr(ctx, "agent_run_sweep_task", None)
+    if _agent_sweep_task and not _agent_sweep_task.done():
+        _agent_sweep_task.cancel()
+        try:
+            await _agent_sweep_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            errors.append(f"agent_run_sweep_task: {e}")
 
     # Intelligence flush worker — stop() flips the running flag,
     # await drains any in-flight tick. Short timeout so shutdown never hangs

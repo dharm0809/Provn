@@ -705,15 +705,28 @@ async def _store_execution(record, request: Request, ctx) -> None:
                 user_agent=_ua,
                 is_final_assistant=_is_final,
             )
+            from gateway.metrics.prometheus import (
+                agent_run_manifests_delivered_total as _agm_ok,
+                agent_run_manifests_delivery_failures_total as _agm_fail,
+            )
             for manifest in _agg.sweep(_now_f):
                 _m_dict = manifest.to_dict()
                 if ctx.wal_writer is not None:
                     try:
                         ctx.wal_writer.enqueue_write_agent_run_manifest(_m_dict)
+                        _agm_ok.labels(dest="local_wal").inc()
                     except Exception:
+                        _agm_fail.labels(dest="local_wal").inc()
                         logger.debug("manifest local persist failed (non-fatal)", exc_info=True)
                 if ctx.walacor_client is not None:
-                    asyncio.create_task(ctx.walacor_client.write_agent_run_manifest(_m_dict))
+                    async def _deliver_manifest(c=ctx.walacor_client, payload=_m_dict):
+                        try:
+                            await c.write_agent_run_manifest(payload)
+                            _agm_ok.labels(dest="walacor").inc()
+                        except Exception:
+                            _agm_fail.labels(dest="walacor").inc()
+                            logger.debug("manifest walacor delivery failed (non-fatal)", exc_info=True)
+                    asyncio.create_task(_deliver_manifest())
     except Exception:
         logger.debug("agent_run_aggregator observe/sweep failed (non-fatal)", exc_info=True)
 

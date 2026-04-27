@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from gateway.metrics.prometheus import (
+    agent_reconstructor_cache_bytes,
+    agent_reconstructor_cache_entries,
     agent_reconstructor_evictions_total,
     agent_reconstructor_events_total,
     agent_reconstructor_oversize_skipped_total,
@@ -232,6 +234,11 @@ class MessageDiffEngine:
             self.stats.cache_entries = len(self._cache)
             if self._bytes > self.stats.cache_bytes_peak:
                 self.stats.cache_bytes_peak = self._bytes
+            # Mirror in-flight cache size to the Prometheus gauges so the
+            # §11.4 cache>1GB kill criterion has an alertable signal — the
+            # tile JSON only shows it after a UI poll.
+            agent_reconstructor_cache_bytes.set(self._bytes)
+            agent_reconstructor_cache_entries.set(len(self._cache))
             if events:
                 self.stats.events_emitted += len(events)
                 self.stats.last_event_ts = now

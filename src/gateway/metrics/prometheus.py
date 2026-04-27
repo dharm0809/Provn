@@ -33,6 +33,39 @@ agent_reconstructor_oversize_skipped_total = Counter(
     "Requests where messages[] exceeded the 500 KB ceiling and was skipped",
 )
 
+# Gauges for §11.4 kill criterion #1 (cache > 1 GB). Counter-only export
+# misses the in-flight cache size — operators need a gauge to alert on.
+agent_reconstructor_cache_bytes = Gauge(
+    "walacor_agent_reconstructor_cache_bytes",
+    "Current bytes held by the per-caller messages[] cache (LRU)",
+)
+agent_reconstructor_cache_entries = Gauge(
+    "walacor_agent_reconstructor_cache_entries",
+    "Current number of distinct callers in the messages[] cache",
+)
+
+# Agent tracing — Pillar 4 (signed manifests). Counters for §11.4 kill
+# criterion #3 (Walacor delivery latency) and run-end-reason distribution.
+agent_run_manifests_total = Counter(
+    "walacor_agent_run_manifests_total",
+    "AgentRunManifests finalised (run-end fired)",
+    ["end_reason"],  # inactivity | explicit_close | ttl
+)
+agent_run_manifests_delivered_total = Counter(
+    "walacor_agent_run_manifests_delivered_total",
+    "AgentRunManifests successfully delivered to Walacor",
+    ["dest"],  # local_wal | walacor
+)
+agent_run_manifests_delivery_failures_total = Counter(
+    "walacor_agent_run_manifests_delivery_failures_total",
+    "AgentRunManifest delivery failures",
+    ["dest"],
+)
+agent_run_aggregator_open_runs = Gauge(
+    "walacor_agent_run_aggregator_open_runs",
+    "Number of in-progress agent runs in the aggregator",
+)
+
 # Pipeline timing
 pipeline_duration = Histogram(
     "walacor_gateway_pipeline_duration_seconds",
