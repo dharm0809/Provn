@@ -37,9 +37,10 @@ class LLMCallRef:
     # cryptographic anchor we own end-to-end.
     record_signature: str | None
     # Walacor blockchain anchor hash. Populated post-anchor by the
-    # lineage normalize step (env.DH); on sandbox this is permanently
-    # null per the well-known sandbox-doesn't-anchor constraint.
-    # A v1.1 background enrichment worker will fold this back into the
+    # lineage normalize step which $lookup-joins the envelopes collection
+    # (env.DH). Always None at manifest signing time because anchoring
+    # happens on the Walacor backend after submit. A v1.1 background
+    # enrichment worker will fold the anchor metadata back into the
     # manifest as a side-record (we never re-sign the original).
     walacor_dh: str | None
     model: str | None

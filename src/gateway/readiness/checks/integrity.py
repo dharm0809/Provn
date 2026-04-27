@@ -186,13 +186,15 @@ class _Int04WalacorAnchoringActive:
     id = "INT-04"
     name = "Walacor anchoring active"
     category = Category.integrity
-    # Anchoring happens on the Walacor backend — the gateway cannot speed it
-    # up or force it. A missing BlockId/TransId/DH is reportable (we still
-    # want the dashboard to show it) but not a reason to remove the gateway
-    # from the load balancer: signing + WAL + chain continuity still hold
-    # locally. Downgrade to warn so the check surfaces without forcing the
-    # rollup to "unready".
-    severity = Severity.warn
+    # Severity restored to `int` after fixing the underlying check.
+    # Background: this check was previously demoted to `warn` based on the
+    # belief that Walacor sandbox doesn't anchor — that diagnosis was wrong.
+    # Sandbox does anchor; the prior implementation queried BlockId/TransId/DH
+    # against the data collection where those fields don't exist (they live
+    # on the envelopes collection). With the $lookup join below, the check
+    # actually inspects the anchor fields and tamper-evident integrity is a
+    # local invariant the gateway owns, so failure should keep the LB out.
+    severity = Severity.int
 
     async def run(self, ctx: "PipelineContext") -> CheckResult:
         t0 = time.monotonic()
@@ -201,11 +203,6 @@ class _Int04WalacorAnchoringActive:
 
         if not settings.walacor_storage_enabled:
             return CheckResult(status="amber", detail="Walacor storage not configured", elapsed_ms=elapsed_ms())
-        # Anchor fields (BlockId/TransId/DH) are populated by Walacor when
-        # records are read back — they never live in the pre-submit local
-        # WAL. Query Walacor directly for recent records and inspect the
-        # envelope. If there's no client, we can't judge anchoring so this
-        # check stays amber.
         client = getattr(ctx, "walacor_client", None)
         if client is None:
             return CheckResult(status="amber", detail="Walacor client not available", elapsed_ms=elapsed_ms())
@@ -216,14 +213,19 @@ class _Int04WalacorAnchoringActive:
             # 2 minutes of headroom before counting an un-anchored record as
             # a failure.
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+            # Anchor fields live on the envelopes collection, NOT on the
+            # data collection — must $lookup to surface them.
             pipeline = [
                 {"$match": {"timestamp": {"$lte": cutoff}}},
                 {"$sort": {"timestamp": -1}},
                 {"$limit": 20},
-                {"$project": {
-                    "execution_id": 1,
-                    "BlockId": 1, "TransId": 1, "DH": 1,
+                {"$lookup": {
+                    "from": "envelopes",
+                    "localField": "EId",
+                    "foreignField": "EId",
+                    "as": "env",
                 }},
+                {"$project": {"execution_id": 1, "env": 1, "EId": 1}},
             ]
             raw = await client.query_complex(settings.walacor_executions_etid, pipeline)
         except Exception as exc:
@@ -236,9 +238,14 @@ class _Int04WalacorAnchoringActive:
                 elapsed_ms=elapsed_ms(),
             )
 
+        def _env(row):
+            env_list = row.get("env") or []
+            return env_list[0] if env_list else {}
+
         sampled = len(raw)
         anchored = sum(
-            1 for r in raw if r.get("BlockId") and r.get("TransId") and r.get("DH")
+            1 for r in raw
+            if (e := _env(r)).get("BlockId") and e.get("TransId") and e.get("DH")
         )
         pct = anchored / sampled
         status = "green" if pct >= 0.95 else ("amber" if pct >= 0.5 else "red")
