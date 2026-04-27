@@ -1,0 +1,44 @@
+{
+  "provider": "bedrock",
+  "endpoint": "converse(anthropic.claude-*)",
+  "doc_url": "https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html",
+  "captured_at": "2026-04-27T17:38:00Z",
+  "captured_from": "Public AWS Bedrock Converse API docs (with Anthropic Claude foundation model).",
+  "examples": [
+    {
+      "raw": {
+        "output": {
+          "message": {
+            "role": "assistant",
+            "content": [
+              {"text": "<assistant_reply>"}
+            ]
+          }
+        },
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 17,
+          "outputTokens": 8,
+          "totalTokens": 25,
+          "cacheReadInputTokens": 0,
+          "cacheWriteInputTokens": 0
+        },
+        "metrics": {
+          "latencyMs": 1234
+        }
+      },
+      "expected_labels": {
+        "output.message.role": "UNKNOWN",
+        "output.message.content[0].text": "content",
+        "stopReason": "finish_reason",
+        "usage.inputTokens": "prompt_tokens",
+        "usage.outputTokens": "completion_tokens",
+        "usage.totalTokens": "total_tokens",
+        "usage.cacheReadInputTokens": "cached_tokens",
+        "usage.cacheWriteInputTokens": "cache_creation_tokens",
+        "metrics.latencyMs": "timing_value"
+      },
+      "notes": "Bedrock Converse API (Anthropic Claude): camelCase fields (inputTokens not input_tokens). The Converse API is provider-agnostic and DOES return totalTokens (Anthropic's native API does not). `cacheReadInputTokens` → cached_tokens; `cacheWriteInputTokens` → cache_creation_tokens. Note: no top-level response_id in Converse; the AWS request id lives in HTTP response metadata (not the body) — no leaf to label. No `model` field either (Converse echoes the modelId in the request, not the response body)."
+    }
+  ]
+}
