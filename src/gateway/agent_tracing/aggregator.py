@@ -137,6 +137,7 @@ class AgentRunAggregator:
         trace_id: str | None = None,
         user_agent: str | None = None,
         walacor_dh: str | None = None,
+        record_hash: str | None = None,
         is_final_assistant: bool = False,
     ) -> None:
         if not run_key:
@@ -171,7 +172,11 @@ class AgentRunAggregator:
                 self._open[key] = run
             run.last_activity_ts = now
             run.llm_calls.append(LLMCallRef(
-                record_id=record_id, walacor_dh=walacor_dh, model=model, timestamp=timestamp_iso,
+                record_id=record_id,
+                record_hash=record_hash,
+                walacor_dh=walacor_dh,
+                model=model,
+                timestamp=timestamp_iso,
             ))
             for ev in recon_events:
                 run.tool_events.append(ReconstructedToolRef(

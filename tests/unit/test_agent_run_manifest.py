@@ -218,8 +218,15 @@ def test_manifest_persists_to_local_wal(tmp_path):
         writer.stop()
 
 
-def test_default_etid_is_9000005():
+def test_default_etid_is_9000034():
+    """Manifest ETId 9000034 is the gateway-managed default.
+
+    Originally 9000005 in v1 dev, but that ETId was never registered with
+    Walacor (sandbox returned 'Invalid ETId' on submit). Moved to 9000034
+    so it sits next to the existing gateway ETIds (9000031/32/33) and is
+    registered alongside them by scripts/setup_walacor_schemas.py.
+    """
     from gateway.config import Settings
 
     s = Settings()
-    assert s.walacor_agent_run_manifests_etid == 9000005
+    assert s.walacor_agent_run_manifests_etid == 9000034

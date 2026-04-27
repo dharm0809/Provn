@@ -27,6 +27,16 @@ from gateway.crypto.signing import sign_bytes
 @dataclass(frozen=True)
 class LLMCallRef:
     record_id: str
+    # Gateway-side SHA-256 over the canonical execution record. Populated
+    # synchronously by _apply_session_chain at write time, so the manifest
+    # always carries a content-bound hash for every LLM call it references —
+    # independent of whether Walacor has anchored the record yet.
+    record_hash: str | None
+    # Walacor blockchain anchor hash. Populated post-anchor by the
+    # lineage normalize step (env.DH); on sandbox this is permanently
+    # null per the well-known sandbox-doesn't-anchor constraint.
+    # A v1.1 background enrichment worker will fold this back into the
+    # manifest as a side-record (we never re-sign the original).
     walacor_dh: str | None
     model: str | None
     timestamp: str
