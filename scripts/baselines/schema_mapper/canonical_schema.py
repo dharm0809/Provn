@@ -21,6 +21,7 @@ CANONICAL_LABELS: tuple[str, ...] = (
     "model_hash",
     "prompt_tokens",
     "response_id",
+    "response_timestamp",
     "safety_category",
     "thinking_content",
     "timing_value",
@@ -45,6 +46,7 @@ LABEL_DESCRIPTIONS: dict[str, str] = {
     "model":                 "Model identifier string (e.g. 'gpt-4o', 'claude-opus-4-7')",
     "model_hash":            "Model fingerprint or version-pin hash",
     "response_id":           "Unique provider-side response/request identifier",
+    "response_timestamp":    "Wall-clock time the provider stamped the response (unix int OR ISO-8601 string). Distinct from timing_value (a duration/latency) — used for audit correlation, clock-drift detection, and replay defense.",
     "prompt_tokens":         "Input/prompt token count",
     "completion_tokens":     "Output/completion token count",
     "total_tokens":          "Sum of prompt + completion tokens",
@@ -53,7 +55,7 @@ LABEL_DESCRIPTIONS: dict[str, str] = {
     "citation_url":          "URL of a cited source (web search / RAG)",
     "safety_category":       "Provider-side safety classification label",
     "timing_value":          "Latency / duration value (ms or s)",
-    "tool_call_arguments":   "JSON-encoded tool-call argument string",
+    "tool_call_arguments":   "Tool-call argument data — either the JSON-encoded string (OpenAI/Anthropic) OR a leaf field within a structured argument dict (Ollama). Per-leaf labelling: every leaf under arguments.* carries this label regardless of nesting depth.",
     "tool_call_id":          "Per-call identifier for tool invocations",
     "tool_call_name":        "Name of the tool being invoked",
     "tool_call_type":        "Tool-call type (function / web_search / code_interpreter)",
@@ -68,9 +70,27 @@ CRF_FORBIDDEN_TRANSITIONS: tuple[tuple[str, str], ...] = (
     ("content", "content"),
 )
 
-# Mutually-exclusive groups: at most one member of each group can be
-# the prediction for any single field's siblings AT THE SAME PATH DEPTH.
-# Used by the CRF as a hard constraint when computing per-field marginals.
+# Mutually-exclusive groups.
+#
+# Exclusion is PER-PARENT-OBJECT — two fields are mutually exclusive ONLY
+# if they share the same direct parent object path. NOT per-depth. NOT
+# per-dict-tree. The "parent object path" is the full path with the
+# trailing leaf segment AND any trailing [N] index stripped.
+#
+# Examples (assume `primary_content` group = (content, thinking_content)):
+#   - choices[0].message.content + choices[0].message.thinking_content
+#       → SAME parent (choices[0].message) → EXCLUSION FIRES
+#         (a single message cannot be both)
+#   - content[0].thinking + content[1].text
+#       → DIFFERENT parents (content[0] vs content[1]) → NO EXCLUSION
+#         (Anthropic returns one thinking block AND one text block
+#         as siblings under the top-level `content` array)
+#   - choices[0].message.content + choices[1].message.content
+#       → DIFFERENT parents → NO EXCLUSION (n>1 sampling)
+#
+# The CRF (Phase 4) groups fields by parent-object path before applying
+# these masks. See `parent_object_path()` in paths.py for the canonical
+# stripping rule used by both training-time and runtime code paths.
 EXCLUSIVE_GROUPS: dict[str, tuple[str, ...]] = {
     "primary_content": ("content", "thinking_content"),
     "token_count":     ("prompt_tokens", "completion_tokens", "total_tokens",

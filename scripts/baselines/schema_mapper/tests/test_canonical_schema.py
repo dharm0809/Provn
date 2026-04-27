@@ -15,10 +15,11 @@ from canonical_schema import (  # noqa: E402
 
 
 def test_label_count():
-    assert len(CANONICAL_LABELS) == 19
+    assert len(CANONICAL_LABELS) == 20
     assert "UNKNOWN" in CANONICAL_LABELS
     assert "content" in CANONICAL_LABELS
     assert "tool_call_arguments" in CANONICAL_LABELS
+    assert "response_timestamp" in CANONICAL_LABELS
 
 
 def test_label_round_trip():
