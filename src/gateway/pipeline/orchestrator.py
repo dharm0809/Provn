@@ -1796,6 +1796,19 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             body_dict = json.loads(call.raw_body) if call.raw_body else {}
         except (json.JSONDecodeError, UnicodeDecodeError):
             body_dict = {}
+
+    # Tier 0 of agent tracing — re-extract correlation IDs now that the body is
+    # parsed. The completeness middleware already set a header-only version on
+    # request.state; this overwrites with the merged header+body view so attempt
+    # rows and execution rows agree on the same fields.
+    from gateway.util.agent_correlation import extract_correlation as _extract_corr
+    _correlation = _extract_corr(dict(request.headers), body_dict if isinstance(body_dict, dict) else None)
+    request.state.walacor_correlation = _correlation
+    if not _correlation.is_empty:
+        for _k, _v in _correlation.to_dict().items():
+            if _v is not None:
+                extra[_k] = _v
+
     if _meta_rt:
         extra["request_type"] = _meta_rt
     elif _rc:

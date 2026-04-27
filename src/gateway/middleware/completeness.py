@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from gateway.config import get_settings
 from gateway.pipeline.context import get_pipeline_context
+from gateway.util.agent_correlation import AgentCorrelation, extract_correlation
 from gateway.util.request_context import (
     new_request_id,
     disposition_var,
@@ -50,9 +51,22 @@ async def completeness_middleware(request: Request, call_next) -> Response:
     if request.url.path in ("/", "/health", "/metrics", "/v1/models", "/v1/connections", "/v1/readiness") or request.url.path.startswith(("/lineage", "/v1/lineage", "/v1/control", "/v1/attestation-proofs", "/v1/policies", "/v1/compliance", "/v1/openwebui", "/v1/attachments", "/api")):
         return await call_next(request)
     rid = new_request_id()
+    # Tier 0 of agent tracing — capture caller-supplied correlation IDs from
+    # request headers (W3C traceparent) before call_next runs. Body-derived
+    # fields are filled in later by the orchestrator after it parses the body;
+    # if the orchestrator runs, it overrides this on request.state.
+    request.state.walacor_correlation = extract_correlation(
+        dict(request.headers), None
+    )
     response: Response | None = None  # set only on success; None if call_next raises
     try:
         response = await call_next(request)
+        # Echo the gateway record id back to the caller so OTel/agent-SDK
+        # callers can stitch their own span tree to our chain.
+        if response is not None:
+            _exec_id = getattr(request.state, "walacor_execution_id", None) or execution_id_var.get()
+            if _exec_id:
+                response.headers["X-Walacor-Record-Id"] = str(_exec_id)
         return response
     finally:
         settings = get_settings()
@@ -68,6 +82,9 @@ async def completeness_middleware(request: Request, call_next) -> Response:
             execution_id = getattr(request.state, "walacor_execution_id", execution_id_var.get())
             user_id = getattr(request.state, "walacor_user_id", None)
             reason = getattr(request.state, "walacor_reason", None)
+            correlation: AgentCorrelation = getattr(
+                request.state, "walacor_correlation", AgentCorrelation()
+            )
             record = {
                 "request_id": rid,
                 "tenant_id": tenant_id,
@@ -79,6 +96,14 @@ async def completeness_middleware(request: Request, call_next) -> Response:
                 "execution_id": execution_id,
                 "user": user_id,
                 "reason": reason,
+                "trace_id": correlation.trace_id,
+                "parent_span_id": correlation.parent_span_id,
+                "agent_run_id": correlation.agent_run_id,
+                "agent_name": correlation.agent_name,
+                "parent_observation_id": correlation.parent_observation_id,
+                "parent_record_id": correlation.parent_record_id,
+                "previous_response_id": correlation.previous_response_id,
+                "conversation_id": correlation.conversation_id,
             }
             # Fire-and-forget: response is already queued to the client by the
             # time this runs (we're in the `finally` after `return response`).

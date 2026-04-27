@@ -331,6 +331,14 @@ class WalacorClient:
         execution_id: str | None = None,
         user: str | None = None,
         reason: str | None = None,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_name: str | None = None,
+        parent_observation_id: str | None = None,
+        parent_record_id: str | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> None:
         """Persist one gateway_attempts row to Walacor (ETId=walacor_attempts_etid).
 
@@ -355,6 +363,21 @@ class WalacorClient:
             record["user"] = user
         if reason:
             record["reason"] = reason
+        # Tier 0 of agent tracing — caller-supplied correlation IDs. Persist
+        # only when present so the schema stays sparse for uninstrumented
+        # callers.
+        for _k, _v in (
+            ("trace_id", trace_id),
+            ("parent_span_id", parent_span_id),
+            ("agent_run_id", agent_run_id),
+            ("agent_name", agent_name),
+            ("parent_observation_id", parent_observation_id),
+            ("parent_record_id", parent_record_id),
+            ("previous_response_id", previous_response_id),
+            ("conversation_id", conversation_id),
+        ):
+            if _v:
+                record[_k] = _v
         try:
             await self._submit(self._attempts_etid, [record])
             self._record_delivery("write_attempt", ok=True, detail=None)

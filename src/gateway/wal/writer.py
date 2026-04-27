@@ -66,6 +66,20 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         # gateway_attempts (Phase 21)
         ("gateway_attempts", "user", "TEXT"),
         ("gateway_attempts", "reason", "TEXT"),
+        # Tier 0 of agent tracing — caller-supplied correlation IDs.
+        # All nullable; uninstrumented agents leave them blank.
+        ("gateway_attempts", "trace_id", "TEXT"),
+        ("gateway_attempts", "parent_span_id", "TEXT"),
+        ("gateway_attempts", "agent_run_id", "TEXT"),
+        ("gateway_attempts", "agent_name", "TEXT"),
+        ("gateway_attempts", "parent_observation_id", "TEXT"),
+        ("gateway_attempts", "parent_record_id", "TEXT"),
+        ("gateway_attempts", "previous_response_id", "TEXT"),
+        ("gateway_attempts", "conversation_id", "TEXT"),
+        # Mirror onto wal_records so executions can be queried by trace.
+        ("wal_records", "trace_id", "TEXT"),
+        ("wal_records", "agent_run_id", "TEXT"),
+        ("wal_records", "agent_name", "TEXT"),
         # wal_records — extracted hot columns for indexed lineage queries
         ("wal_records", "event_type", "TEXT NOT NULL DEFAULT 'execution'"),
         ("wal_records", "session_id", "TEXT"),
@@ -118,6 +132,29 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_wal_session_request_type"
         " ON wal_records (session_id, request_type)"
         " WHERE event_type = 'execution'"
+    )
+    # Tier 0 of agent tracing — index only when the caller tagged traffic, so
+    # the indexes stay tiny on uninstrumented workloads. Created here, AFTER
+    # the ALTER TABLE migrations above have added the referenced columns.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_trace"
+        " ON gateway_attempts (trace_id, timestamp)"
+        " WHERE trace_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_agent_run"
+        " ON gateway_attempts (agent_run_id, timestamp)"
+        " WHERE agent_run_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_records_trace"
+        " ON wal_records (trace_id, timestamp)"
+        " WHERE trace_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wal_records_agent_run"
+        " ON wal_records (agent_run_id, timestamp)"
+        " WHERE agent_run_id IS NOT NULL"
     )
 
     # ── Backfill: populate extracted columns from existing record_json ────
@@ -318,21 +355,31 @@ class WALWriter:
         record_json = json.dumps(data)
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
+        # Tier 0 of agent tracing — pull caller-supplied correlation IDs out of
+        # the metadata bag onto hot columns so /v1/lineage queries by trace can
+        # use the partial index instead of json_extract.
+        _meta = data.get("metadata") or {}
+        _trace_id = _meta.get("trace_id") if isinstance(_meta, dict) else None
+        _agent_run_id = _meta.get("agent_run_id") if isinstance(_meta, dict) else None
+        _agent_name = _meta.get("agent_name") if isinstance(_meta, dict) else None
         conn.execute(
             """INSERT OR REPLACE INTO wal_records
                (execution_id, record_json, created_at, delivered,
                 event_type, session_id, timestamp, model_id, provider, user,
                 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                sequence_number, policy_result)
+                sequence_number, policy_result,
+                trace_id, agent_run_id, agent_name)
                VALUES (?, ?, ?, 0,
                        'execution', ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?)""",
             (execution_id, record_json, now,
              data.get("session_id"), data.get("timestamp") or now,
              data.get("model_id"), data.get("provider"), data.get("user"),
              data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
              data.get("total_tokens") or 0, data.get("latency_ms"),
-             data.get("sequence_number"), data.get("policy_result")),
+             data.get("sequence_number"), data.get("policy_result"),
+             _trace_id, _agent_run_id, _agent_name),
         )
         logger.debug("WAL (thread) write execution_id=%s", execution_id)
 
@@ -349,13 +396,31 @@ class WALWriter:
         execution_id: str | None = None,
         user: str | None = None,
         reason: str | None = None,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_name: str | None = None,
+        parent_observation_id: str | None = None,
+        parent_record_id: str | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition,
+                execution_id, status_code, user, reason,
+                trace_id, parent_span_id, agent_run_id, agent_name,
+                parent_observation_id, parent_record_id,
+                previous_response_id, conversation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                request_id, now, tenant_id, provider or None, model_id or None, path, disposition,
+                execution_id or None, status_code, user or None, reason or None,
+                trace_id or None, parent_span_id or None, agent_run_id or None, agent_name or None,
+                parent_observation_id or None, parent_record_id or None,
+                previous_response_id or None, conversation_id or None,
+            ),
         )
         logger.debug("WAL (thread) gateway_attempts request_id=%s disposition=%s", request_id, disposition)
 
@@ -397,11 +462,25 @@ class WALWriter:
         execution_id: str | None = None,
         user: str | None = None,
         reason: str | None = None,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_name: str | None = None,
+        parent_observation_id: str | None = None,
+        parent_record_id: str | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> None:
         """Non-blocking enqueue of an attempt record to the dedicated writer thread."""
         self._queue.put((
             self._do_write_attempt,
-            (request_id, tenant_id, path, disposition, status_code, provider, model_id, execution_id, user, reason),
+            (
+                request_id, tenant_id, path, disposition, status_code,
+                provider, model_id, execution_id, user, reason,
+                trace_id, parent_span_id, agent_run_id, agent_name,
+                parent_observation_id, parent_record_id,
+                previous_response_id, conversation_id,
+            ),
         ))
 
     def enqueue_write_tool_event(self, record: dict[str, Any]) -> None:
@@ -589,15 +668,33 @@ class WALWriter:
         execution_id: str | None = None,
         user: str | None = None,
         reason: str | None = None,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_name: str | None = None,
+        parent_observation_id: str | None = None,
+        parent_record_id: str | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> None:
         """Append one row to gateway_attempts for the completeness invariant."""
         conn = self._ensure_conn()
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
+               (request_id, timestamp, tenant_id, provider, model_id, path, disposition,
+                execution_id, status_code, user, reason,
+                trace_id, parent_span_id, agent_run_id, agent_name,
+                parent_observation_id, parent_record_id,
+                previous_response_id, conversation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                request_id, now, tenant_id, provider or None, model_id or None, path, disposition,
+                execution_id or None, status_code, user or None, reason or None,
+                trace_id or None, parent_span_id or None, agent_run_id or None, agent_name or None,
+                parent_observation_id or None, parent_record_id or None,
+                previous_response_id or None, conversation_id or None,
+            ),
         )
         conn.commit()
         logger.debug("gateway_attempts request_id=%s disposition=%s user=%s", request_id, disposition, user)
