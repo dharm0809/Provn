@@ -897,6 +897,25 @@ class WalacorLineageReader:
             "total_requests": sum(v["request_count"] for v in variants),
         }
 
+    # ----- agent-run manifests (Pillar 4) ------------------------------------
+    # The local LineageReader serves these from the local sqlite WAL where
+    # manifests are written first by the AgentRunManifest aggregator.
+    # WalacorLineageReader runs against the remote backend, where manifests
+    # land via dual-write under their own ETId. Until that ETId-side query
+    # is implemented, return clean empty/None so the dashboard renders an
+    # empty state instead of 500ing — matches the OperationalError fallback
+    # pattern in reader.list_agent_runs.
+    # TODO(agent-tracing v1.1): query the manifest ETId via getcomplex and
+    # parse the same shape as reader.list_agent_runs returns.
+    async def list_agent_runs(self, *, limit: int = 50, offset: int = 0) -> list[dict]:
+        return []
+
+    async def count_agent_runs(self) -> int:
+        return 0
+
+    async def get_agent_run(self, run_id: str) -> dict | None:
+        return None
+
     def close(self) -> None:
         """No-op — WalacorClient lifecycle is managed by main.py."""
         pass
