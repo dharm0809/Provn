@@ -17,7 +17,7 @@ labelling. Produce {n_variations} plausible variations that:
 
 For EACH variation, output a JSON object with EXACTLY these keys:
   raw: the JSON dict
-  expected_labels: flat dict {dotted_path: canonical_label}
+  expected_labels: flat dict {{dotted_path: canonical_label}}
 
 Path syntax: dot-separated keys with bracket array indices.
   - choices[0].message.content

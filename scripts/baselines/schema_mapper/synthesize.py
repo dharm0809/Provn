@@ -152,6 +152,14 @@ def _build_label_descriptions_block() -> str:
 
 
 def _build_prompt(seed_example: dict, provider: str, endpoint: str, n_variations: int) -> str:
+    # The template uses Python str.format() with five named placeholders:
+    # {provider}, {endpoint}, {n_variations}, {label_descriptions},
+    # {seed_raw_json}, {seed_labels_json}. ANY OTHER literal `{` in the
+    # template body must be escaped as `{{` (and `}` as `}}`) — otherwise
+    # str.format treats it as a placeholder and raises KeyError. The
+    # template currently includes one such literal: `{{dotted_path:
+    # canonical_label}}` in the output-format spec. test_prompt_render
+    # is the regression guard.
     template = PROMPT_TEMPLATE_PATH.read_text()
     return template.format(
         provider=provider,
