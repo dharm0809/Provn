@@ -653,10 +653,23 @@ Add three new feature dimensions documented in the literature as high-value:
 **Step 1: Test for new dims**
 
 ```python
-def test_feature_dim_increased_to_228():
-    from gateway.schema.features import FEATURE_DIM
-    assert FEATURE_DIM >= 228   # 200 original + ≥28 new
+def test_v2_dim_is_legacy_plus_28():
+    from gateway.schema.features import FEATURE_DIM, FEATURE_DIM_V2
+    assert FEATURE_DIM_V2 == FEATURE_DIM + 28
 ```
+
+(The 200/228 numbers in the plan's earlier draft were based on an
+incorrect read of the deployed baseline; actual baseline is 139, so
+v2 is 167. The 28-dim DELTA — 16 parent-path + 4 sibling-cardinality
++ 8 numeric stats — is exactly what the three feature blocks above
+specify.)
+
+**Approach: additive, not destructive.** `extract_features_v2()` is
+added alongside the existing `extract_features()` so the deployed
+139-dim ONNX keeps loading on the legacy path. The new transformer
+schema-mapper uses `_v2`; once Phase 10 ships the new ONNX and
+production has soaked it for 2 weeks (target 2026-05-15), legacy
+`extract_features` is removed in baseline-v2.1.
 
 **Step 2: Implement, test, commit.**
 
