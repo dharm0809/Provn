@@ -175,7 +175,7 @@ def map_soc2(summary: dict, attestations: list, executions: list) -> dict:
                 "description": "The entity evaluates detected anomalies and security events",
                 "status": _compliance_status(has_records),
                 "evidence": [
-                    {"description": "Session chain integrity verification via Merkle hashing",
+                    {"description": "Session chain integrity verification via UUIDv7 ID-pointer chain + Ed25519 signatures",
                      "evidence_ref": "chain_verification"},
                     {"description": "Policy enforcement with allow/deny disposition tracking",
                      "evidence_ref": "policy_stats"},
