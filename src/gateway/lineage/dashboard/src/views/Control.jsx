@@ -204,22 +204,17 @@ function Empty({ icon = '◇', title, body }) {
 function StatusPanel({ status, events, onOpenAuditLog }) {
   if (!status) return <Loading />;
 
+  // Counters reflect what the control plane actually stores. Runtime
+  // breach/health telemetry is not tracked backend-side here — the
+  // Connections tab is the source of truth for provider liveness, and
+  // budget breach detection lives in the request path, not the
+  // control-plane store.
   const stats = [
-    { k: 'Enforcement', v: status.enforcement_mode, foot: 'active', tone: 'ok' },
-    { k: 'Attestations', v: status.attestations_active, foot: 'signed · in-force', tone: 'ok' },
-    { k: 'Policies', v: status.policies_active, foot: 'enforce + warn', tone: 'ok' },
-    {
-      k: 'Budgets',
-      v: `${status.budgets_active - (status.budgets_breached || 0)}/${status.budgets_active}`,
-      foot: status.budgets_breached ? `${status.budgets_breached} at breach` : 'all within cap',
-      tone: status.budgets_breached ? 'warn' : 'ok',
-    },
-    {
-      k: 'Providers',
-      v: `${status.providers_healthy}/${status.provider_count}`,
-      foot: 'healthy',
-      tone: status.providers_healthy === status.provider_count ? 'ok' : 'warn',
-    },
+    { k: 'Enforcement', v: status.enforcement_mode, foot: 'active mode', tone: 'ok' },
+    { k: 'Attestations', v: status.attestations_active, foot: 'active in registry', tone: 'ok' },
+    { k: 'Policies', v: status.policies_active, foot: 'configured', tone: 'ok' },
+    { k: 'Budgets', v: status.budgets_active, foot: 'configured · runtime usage on Connections', tone: 'ok' },
+    { k: 'Providers', v: status.provider_count, foot: 'configured · liveness on Connections', tone: 'ok' },
     { k: 'Analyzers', v: status.analyzer_count, foot: 'attached', tone: 'ok' },
     { k: 'Uptime', v: fmtUptime(status.uptime_seconds), foot: status.version, tone: 'ok' },
     { k: 'Last change', v: status.last_config_change ? timeAgo(status.last_config_change) : '—', foot: 'config ledger', tone: 'ok' },
@@ -418,8 +413,8 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh, onMutate, tena
                 <th>Model</th>
                 <th>Purpose</th>
                 <th>Signer</th>
-                <th>Signed</th>
-                <th>Expires</th>
+                <th>Created</th>
+                <th>Updated</th>
                 <th style={{ width: 100 }}>Status</th>
                 <th style={{ width: 220 }}></th>
               </tr>
@@ -436,8 +431,8 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh, onMutate, tena
                   </td>
                   <td className="cp-mono">{a.purpose}</td>
                   <td className="cp-mono cp-muted">{a.signer}</td>
-                  <td className="cp-mono cp-dim">{a.signed_at ? timeAgo(a.signed_at) : '—'}</td>
-                  <td className="cp-mono cp-dim">{a.expires_at ? timeAgo(a.expires_at) : '—'}</td>
+                  <td className="cp-mono cp-dim">{a.created_at ? timeAgo(a.created_at) : '—'}</td>
+                  <td className="cp-mono cp-dim">{a.updated_at ? timeAgo(a.updated_at) : '—'}</td>
                   <td><Badge kind={a.status}>{a.status}</Badge></td>
                   <td>
                     <div className="cp-row-actions">
@@ -1315,9 +1310,7 @@ export default function Control({ navigate }) {
         attestations_active: attRows.filter(a => a.status === 'active').length,
         policies_active: polRows.filter(p => (p.status ?? 'active') === 'active').length,
         budgets_active: budRows.length,
-        budgets_breached: 0,
         provider_count: providerList.length,
-        providers_healthy: providerList.length,
         analyzer_count: analyzerCount,
         uptime_seconds: s.uptime_seconds,
         version: s.gateway_id ? `gw · ${String(s.gateway_id).slice(0, 8)}` : 'gateway',
@@ -1344,8 +1337,8 @@ export default function Control({ navigate }) {
         purpose: a.provider,
         signer: a.verification_level,
         fingerprint: a.attestation_id,
-        signed_at: a.created_at,
-        expires_at: a.updated_at,
+        created_at: a.created_at,
+        updated_at: a.updated_at,
         status: a.status,
         notes: a.notes || '',
         _raw: a,
