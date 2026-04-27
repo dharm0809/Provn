@@ -71,8 +71,14 @@ def parent_object_path(path: str) -> str:
 def flatten_json(obj: Any, _prefix: str = "", _depth: int = 0) -> list[FlatField]:
     """Walk a JSON-shaped Python value and return one FlatField per leaf.
 
-    A "leaf" is anything that is not a dict and not a non-empty list. Empty
-    lists and empty dicts are NOT emitted (no leaf path).
+    A "leaf" is anything that is not a non-empty dict and not a non-empty
+    list. Scalars (str/int/float/bool/None) ARE leaves; empty lists and
+    empty dicts ARE leaves (they have a value of `[]` / `{}` and a
+    well-defined path). Only non-empty containers are recursed into.
+
+    This convention preserves "this path exists and has empty contents"
+    as a signal — the schema-mapper sees `prompt: []` or `tool_calls: null`
+    and learns to label them appropriately (typically UNKNOWN).
 
     Sibling computation:
         For a leaf at path ``parent.key`` (or ``parent[N].key``), siblings
