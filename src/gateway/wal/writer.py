@@ -91,6 +91,41 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         " ON reconstructed_tool_events (agent_run_id, timestamp)"
         " WHERE agent_run_id IS NOT NULL"
     )
+    # Pillar 2 — content fingerprints over tool calls + results. Kept in its
+    # own table because the join shape is "find rows with the same hash in a
+    # different caller_key" which dominates the WHERE clauses; a partial
+    # index per hash kind keeps the lookups O(log n).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS tool_fingerprints (
+            fp_id          TEXT    PRIMARY KEY,
+            tenant_id      TEXT    NOT NULL,
+            record_id      TEXT,
+            caller_key     TEXT,
+            tool_call_id   TEXT,
+            tool_name      TEXT,
+            tc_hash        TEXT,
+            tr_hash        TEXT,
+            trace_id       TEXT,
+            agent_run_id   TEXT,
+            kind           TEXT    NOT NULL,
+            seen_at        TEXT    NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fp_tenant_tc"
+        " ON tool_fingerprints (tenant_id, tc_hash)"
+        " WHERE tc_hash IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fp_tenant_tr"
+        " ON tool_fingerprints (tenant_id, tr_hash)"
+        " WHERE tr_hash IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fp_tenant_trace"
+        " ON tool_fingerprints (tenant_id, trace_id)"
+        " WHERE trace_id IS NOT NULL"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_gateway_attempts_tenant_disp"
         " ON gateway_attempts (tenant_id, disposition)"
@@ -551,6 +586,33 @@ class WALWriter:
     def enqueue_write_recon_event(self, record: dict[str, Any]) -> None:
         """Non-blocking enqueue for a Pillar-1 reconstructed_tool_events row."""
         self._queue.put((self._do_write_recon_event, (record,)))
+
+    @staticmethod
+    def _do_write_fingerprint(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO tool_fingerprints
+               (fp_id, tenant_id, record_id, caller_key, tool_call_id, tool_name,
+                tc_hash, tr_hash, trace_id, agent_run_id, kind, seen_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record["fp_id"],
+                record.get("tenant_id") or "",
+                record.get("record_id"),
+                record.get("caller_key"),
+                record.get("tool_call_id"),
+                record.get("tool_name"),
+                record.get("tc_hash"),
+                record.get("tr_hash"),
+                record.get("trace_id"),
+                record.get("agent_run_id"),
+                record.get("kind"),
+                record.get("seen_at"),
+            ),
+        )
+
+    def enqueue_write_fingerprint(self, record: dict[str, Any]) -> None:
+        """Non-blocking enqueue for a Pillar-2 tool_fingerprints row."""
+        self._queue.put((self._do_write_fingerprint, (record,)))
 
     # ------------------------------------------------------------------
     # Synchronous public API (used by delivery worker, startup, health, batch writer)

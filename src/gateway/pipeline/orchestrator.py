@@ -634,8 +634,37 @@ async def _store_execution(record, request: Request, ctx) -> None:
                     "turn_seq": ev.turn_seq,
                     "source": "reconstructed",
                 })
+            # Pillar 2 — same events become fingerprint rows so cross-caller
+            # stitching (intra-tenant) can corroborate. Failures are logged
+            # but never block the response.
+            from gateway.pipeline.tool_fingerprints import (
+                fingerprints_from_recon_events as _fp_from_events,
+            )
+            for fp in _fp_from_events(
+                _recon_events,
+                tenant_id=_tenant,
+                record_id=eid,
+                caller_key=_caller,
+                trace_id=_trace_id,
+                agent_run_id=_agent_run_id,
+                seen_at=_now,
+            ):
+                ctx.wal_writer.enqueue_write_fingerprint({
+                    "fp_id": fp.fp_id,
+                    "tenant_id": fp.tenant_id,
+                    "record_id": fp.record_id,
+                    "caller_key": fp.caller_key,
+                    "tool_call_id": fp.tool_call_id,
+                    "tool_name": fp.tool_name,
+                    "tc_hash": fp.tc_hash,
+                    "tr_hash": fp.tr_hash,
+                    "trace_id": fp.trace_id,
+                    "agent_run_id": fp.agent_run_id,
+                    "kind": fp.kind,
+                    "seen_at": fp.seen_at,
+                })
         except Exception:
-            logger.debug("recon-event persistence failed (non-fatal)", exc_info=True)
+            logger.debug("recon/fingerprint persistence failed (non-fatal)", exc_info=True)
 
 
 # ── Post-stream background tasks ─────────────────────────────────────────────
