@@ -492,7 +492,7 @@ function SessionTimelineView({ session, onBack }) {
       }
       const allOk = res?.valid !== false && results.every(Boolean);
       setVerifyResult(allOk
-        ? { valid: true, message: `Chain verified — ${records.length} records, all hashes match, all signatures valid.` }
+        ? { valid: true, message: `Chain verified — ${records.length} records, ID-pointer chain intact, all Ed25519 signatures valid.` }
         : { valid: false, message: res?.message || `Chain invalid — ${results.filter(x => !x).length} mismatch(es)`, errors: res?.errors || [] }
       );
     } catch (e) {
