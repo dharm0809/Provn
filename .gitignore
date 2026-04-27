@@ -104,3 +104,11 @@ CLAUDE.md
 
 # --- Open WebUI (separate project, runs locally only) ---
 /open-webui/
+
+# --- Baseline build artifacts (training-time only) ---
+# scripts/baselines/{model}/out/ holds HF checkpoints (~hundreds of MB),
+# intermediate FP32/INT8 ONNX, and a release/ mirror of what already
+# ships under src/gateway/{classifier,content,schema}/. The release/
+# copies are redundant and the ckpt/ ones are way too big for git.
+# Re-create them locally with `python build_<model>.py`.
+scripts/baselines/*/out/

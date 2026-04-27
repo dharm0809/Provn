@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   getComplianceReport,
   complianceExportUrl,
+  onControlKeyChange,
 } from '../api';
 import '../styles/stubs.css';
 
@@ -319,6 +320,9 @@ export default function Compliance() {
   const [reports, setReports] = useState({});   // { framework_id: report | { error } }
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState(null); // { framework, report }
+  const [keyEpoch, setKeyEpoch] = useState(0);  // refetch on cp_api_key change
+
+  useEffect(() => onControlKeyChange(() => setKeyEpoch((n) => n + 1)), []);
 
   // Preset change recomputes window from "now"; custom leaves the window
   // untouched for the user to edit via date inputs.
@@ -344,7 +348,7 @@ export default function Compliance() {
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [start, end]);
+  }, [start, end, keyEpoch]);
 
   const chainPanel = useMemo(() => {
     // Pick any successful report's chain_integrity — all four share the

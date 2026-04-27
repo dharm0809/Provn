@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Bundled baseline ONNX weights shipped with the wheel. Self-learning loop treats these as gen 0; trained candidates promote on top of them. Sha256 is computed at package build time and verified at boot.",
+  "baselines": {
+    "intent": {
+      "version": "baseline-v2.0",
+      "source_path": "classifier/model.onnx",
+      "sha256": "4f2ca7bf7da26ba2a02b1f6e494d0e850340bea3ccbfc470613f7014d0387649",
+      "size_bytes": 33935972,
+      "architecture": "microsoft/MiniLM-L12-H384-uncased",
+      "parameters": "33M",
+      "task": "classification",
+      "labels_path": "classifier/model_labels.json",
+      "trained_on": "clinc150 + banking77 + massive-en + synthetic",
+      "notes": "MiniLM-L12 fine-tuned on hand-mapped public NLU corpora plus synthetic gateway prompts. macro-F1=0.897, ECE=0.061."
+    },
+    "safety": {
+      "version": "baseline-v1.0",
+      "source_path": "content/safety_classifier.onnx",
+      "sha256": "7dc204479fc8a9f8b458e83381b44508e52f669500537b5f3d5a23245ca3fc88",
+      "size_bytes": 1588401,
+      "architecture": "MiniLM-v6",
+      "parameters": "14M",
+      "task": "classification",
+      "labels_path": "content/safety_classifier_labels.json",
+      "trained_on": "shipped_corpus",
+      "notes": "Backed by a deterministic rule-based fallback (rule_fallbacks/safety.py) so the observer signal is non-zero even before local samples accumulate."
+    },
+    "schema_mapper": {
+      "version": "baseline-v1.0",
+      "source_path": "schema/schema_mapper.onnx",
+      "sha256": "ec9a0d08296de7438d93bebcc630f8e022e38739137f360670555df24a26cdb6",
+      "size_bytes": 2950767,
+      "architecture": "T5-small-distilled",
+      "parameters": "44M",
+      "task": "seq2seq",
+      "labels_path": "schema/schema_mapper_labels.json",
+      "trained_on": "shipped_corpus",
+      "notes": "Maps freeform queries to canonical schema fields."
+    }
+  },
+  "cold_start": {
+    "samples_until_graduation": 200,
+    "policy": "When a model has provenance=baseline AND predictions_7d < samples_until_graduation, the dashboard renders a 'cold start' state. ONNX verdicts still log to the verdict buffer (observer-only; never enforce); declarative policies and rule fallbacks remain authoritative."
+  }
+}

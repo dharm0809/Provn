@@ -986,6 +986,12 @@ def _migrate_packaged_models_to_registry(registry) -> None:
     """
     import shutil
 
+    from gateway.intelligence.baselines import (
+        baseline_for,
+        file_sha256,
+        write_sidecar,
+    )
+
     copied = 0
     for model_name, src in _PACKAGED_MODEL_SOURCES.items():
         dst = registry.production_path(model_name)
@@ -1004,6 +1010,45 @@ def _migrate_packaged_models_to_registry(registry) -> None:
                 "Model registry migration: seeded production/%s from %s",
                 dst.name, src,
             )
+            # Companion files (tokenizer + labels + card) live alongside
+            # the source .onnx. Copy them into production/ with a stem-
+            # qualified name so multiple transformer models can coexist
+            # without trampling each other's tokenizers. Loader contract:
+            # look for `{stem}_tokenizer.json` first, fall back to plain
+            # `tokenizer.json` for legacy bundles.
+            stem = dst.stem  # e.g. "intent"
+            for src_name, dst_name in (
+                ("tokenizer.json",   f"{stem}_tokenizer.json"),
+                ("model_labels.json", f"{stem}_labels.json"),
+                ("model_card.json",  f"{stem}_card.json"),
+            ):
+                comp_src = src.parent / src_name
+                if comp_src.exists():
+                    shutil.copy2(comp_src, dst.parent / dst_name)
+                    logger.info(
+                        "Model registry migration: seeded production/%s",
+                        dst_name,
+                    )
+            # Tag the freshly-seeded file as a baseline so the API can
+            # render an honest "cold-start" state until a locally-trained
+            # candidate promotes on top of it. Sidecar removal is the
+            # registry's job at promotion time.
+            baseline = baseline_for(model_name)
+            if baseline is not None:
+                try:
+                    src_hash = file_sha256(src)
+                    if src_hash != baseline.sha256:
+                        logger.warning(
+                            "baseline sha256 mismatch for %r: manifest=%s actual=%s "
+                            "(seeded anyway; provenance still 'baseline')",
+                            model_name, baseline.sha256, src_hash,
+                        )
+                    write_sidecar(dst, baseline, src_hash)
+                except OSError:
+                    logger.warning(
+                        "baseline sidecar write failed for %r", model_name,
+                        exc_info=True,
+                    )
         except Exception:
             # Never let migration break startup. The client will fail-open
             # to heuristics / no session if no production file exists.
@@ -1013,6 +1058,45 @@ def _migrate_packaged_models_to_registry(registry) -> None:
             )
     if copied == 0:
         logger.debug("Model registry migration: nothing to seed (all destinations present)")
+
+    # Backfill: existing deployments that pre-date baseline-tagging need
+    # sidecars too. If a production file exists, no sidecar is present,
+    # and the on-disk sha256 matches the manifest's expected baseline
+    # hash, write the sidecar. Hash-match is the safety check — without
+    # it we'd risk mis-labelling a manually-replaced or self-trained
+    # model as "baseline".
+    from gateway.intelligence.baselines import (
+        baseline_for as _bf,
+        baseline_sidecar_path,
+        file_sha256 as _sha,
+        write_sidecar as _ws,
+    )
+    for model_name in _PACKAGED_MODEL_SOURCES:
+        baseline = _bf(model_name)
+        if baseline is None:
+            continue
+        prod_path = registry.production_path(model_name)
+        if not prod_path.exists():
+            continue
+        if baseline_sidecar_path(prod_path).exists():
+            continue
+        try:
+            actual = _sha(prod_path)
+        except OSError:
+            continue
+        if actual != baseline.sha256:
+            # Production file diverges from the bundled baseline — most
+            # likely a self-trained model promoted before sidecars existed.
+            # Don't tag it as baseline; the API will fall through to
+            # provenance="trained_local".
+            logger.debug(
+                "baseline backfill skipped for %r: hash diverged from manifest",
+                model_name,
+            )
+            continue
+        _ws(prod_path, baseline, actual)
+        logger.info("baseline backfill: tagged production/%s as %s",
+                    prod_path.name, baseline.version)
 
 
 def _init_model_registry(settings, ctx) -> None:

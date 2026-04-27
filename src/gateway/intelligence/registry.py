@@ -287,6 +287,14 @@ class ModelRegistry:
             if prod_path.exists():
                 os.rename(prod_path, self._archive_filename(model))
             os.rename(cand_path, prod_path)
+            # The new production file is locally-trained, not the bundled
+            # baseline. Drop the sidecar so the API stops reporting
+            # provenance="baseline" for this model.
+            try:
+                from gateway.intelligence.baselines import remove_sidecar
+                remove_sidecar(prod_path)
+            except Exception:
+                pass
             # Only bump after both renames succeed — partial state must not
             # trigger client reloads onto a half-swapped production file.
             self._generations[model] += 1

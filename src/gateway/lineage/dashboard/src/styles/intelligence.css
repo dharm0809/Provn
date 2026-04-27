@@ -251,6 +251,44 @@
 .prod-drift-stable { color: var(--green); border-color: rgba(52,211,153,0.25); background: var(--green-bg); }
 .prod-drift-minor { color: var(--amber); border-color: rgba(245,158,11,0.25); background: var(--amber-bg); }
 .prod-drift-major { color: var(--red); border-color: rgba(239,68,68,0.3); background: var(--red-bg); }
+.prod-drift-baseline {
+  color: var(--gold);
+  border-color: rgba(193,154,107,0.30);
+  background: rgba(193,154,107,0.08);
+}
+
+/* Baseline status pill — shipped weights, distinct from "active locally-trained". */
+.prod-status-baseline {
+  color: var(--gold);
+  border-color: rgba(193,154,107,0.40);
+  background: rgba(193,154,107,0.08);
+}
+.prod-status-baseline .prod-status-dot {
+  background: var(--gold);
+  box-shadow: 0 0 6px rgba(193,154,107,0.55);
+}
+
+/* Cold-start banner above the production grid. Communicates that the
+   "warming up" state is intentional — verdicts are observer-only and
+   declarative policies still enforce. */
+.prod-coldstart-banner {
+  border: 1px solid rgba(193,154,107,0.30);
+  background: rgba(193,154,107,0.06);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.prod-coldstart-title {
+  color: var(--gold);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.prod-coldstart-body { color: var(--text-secondary, var(--text-muted)); }
 
 .prod-dl {
   padding: 10px 0;

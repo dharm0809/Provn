@@ -202,17 +202,37 @@ function getControlKey() {
   return (localStorage.getItem('cp_api_key') || sessionStorage.getItem('cp_api_key')) || '';
 }
 
+function emitKeyChange() {
+  try {
+    window.dispatchEvent(new CustomEvent('cp-key-changed', { detail: { hasKey: hasControlKey() } }));
+  } catch (_e) { /* non-browser env */ }
+}
+
 export function setControlKey(key) {
   localStorage.setItem('cp_api_key', key);
+  emitKeyChange();
 }
 
 export function clearControlKey() {
   localStorage.removeItem('cp_api_key');
   sessionStorage.removeItem('cp_api_key');
+  emitKeyChange();
 }
 
 export function hasControlKey() {
-  return !!getControlKey();
+  return !!(localStorage.getItem('cp_api_key') || sessionStorage.getItem('cp_api_key'));
+}
+
+/* Subscribe to key changes from this tab (CustomEvent) and other tabs (storage event). */
+export function onControlKeyChange(handler) {
+  const local = () => handler();
+  const cross = (e) => { if (e.key === 'cp_api_key') handler(); };
+  window.addEventListener('cp-key-changed', local);
+  window.addEventListener('storage', cross);
+  return () => {
+    window.removeEventListener('cp-key-changed', local);
+    window.removeEventListener('storage', cross);
+  };
 }
 
 export { fetchControlJSON as fetchAuthJSON };
