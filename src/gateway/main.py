@@ -1016,19 +1016,28 @@ def _migrate_packaged_models_to_registry(registry) -> None:
             # without trampling each other's tokenizers. Loader contract:
             # look for `{stem}_tokenizer.json` first, fall back to plain
             # `tokenizer.json` for legacy bundles.
-            stem = dst.stem  # e.g. "intent"
-            for src_name, dst_name in (
-                ("tokenizer.json",   f"{stem}_tokenizer.json"),
-                ("model_labels.json", f"{stem}_labels.json"),
-                ("model_card.json",  f"{stem}_card.json"),
+            stem = dst.stem  # e.g. "intent" / "safety"
+            # Each entry: list of source candidates (by priority) and the
+            # destination filename. Models that ship under a non-stem
+            # filename (safety = `safety_classifier.onnx` paired with
+            # `safety_classifier_tokenizer.json`) are handled by the
+            # `src.stem`-prefixed candidates. The plain `tokenizer.json`
+            # candidate covers HF-default bundles.
+            src_stem = src.stem  # e.g. "model" (intent), "safety_classifier"
+            for src_candidates, dst_name in (
+                ((f"{src_stem}_tokenizer.json", "tokenizer.json"),     f"{stem}_tokenizer.json"),
+                ((f"{src_stem}_labels.json", "model_labels.json"),     f"{stem}_labels.json"),
+                ((f"{src_stem}_card.json", "model_card.json"),         f"{stem}_card.json"),
             ):
-                comp_src = src.parent / src_name
-                if comp_src.exists():
-                    shutil.copy2(comp_src, dst.parent / dst_name)
-                    logger.info(
-                        "Model registry migration: seeded production/%s",
-                        dst_name,
-                    )
+                for cand in src_candidates:
+                    comp_src = src.parent / cand
+                    if comp_src.exists():
+                        shutil.copy2(comp_src, dst.parent / dst_name)
+                        logger.info(
+                            "Model registry migration: seeded production/%s (from %s)",
+                            dst_name, cand,
+                        )
+                        break
             # Tag the freshly-seeded file as a baseline so the API can
             # render an honest "cold-start" state until a locally-trained
             # candidate promotes on top of it. Sidecar removal is the
