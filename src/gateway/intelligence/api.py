@@ -92,6 +92,14 @@ async def list_production_models(request: Request) -> JSONResponse:
     last_promotions = _last_promotion_per_model(db)
     last_rollbacks = _last_rollback_per_model(db)
 
+    # Rolling-window metrics. The 24h window drives drift detection
+    # (compare 24h accuracy to 7d baseline). When the DB is unavailable
+    # all metrics fall through to None and the dashboard renders "—".
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    win_24h = (now - timedelta(hours=24), now)
+    win_7d = (now - timedelta(days=7), now)
+
     models = []
     for name in sorted(production):
         prod_path = registry.production_path(name)
@@ -116,6 +124,39 @@ async def list_production_models(request: Request) -> JSONResponse:
             size = 0
             mtime = None
             error = f"stat failed: {exc}"
+
+        accuracy_24h: float | None = None
+        accuracy_7d: float | None = None
+        predictions_24h: int | None = None
+        predictions_7d: int | None = None
+        drift: str | None = None
+        if db is not None:
+            try:
+                acc24 = db.accuracy_in_window(name, start=win_24h[0], end=win_24h[1])
+                acc7 = db.accuracy_in_window(name, start=win_7d[0], end=win_7d[1])
+                predictions_24h = db.count_verdicts_in_window(name, start=win_24h[0], end=win_24h[1])
+                predictions_7d = db.count_verdicts_in_window(name, start=win_7d[0], end=win_7d[1])
+                # Only report accuracy when we actually have signal — a
+                # 0.0 from sample_count==0 is "no data", not a regression.
+                if acc24.sample_count > 0:
+                    accuracy_24h = acc24.accuracy
+                if acc7.sample_count > 0:
+                    accuracy_7d = acc7.accuracy
+                # Drift label: stable when 24h accuracy is within 5pp of
+                # the 7d baseline; minor when within 10pp; otherwise drifting.
+                # Reported as None when either window lacks signal so the
+                # UI doesn't paint a bogus "stable" badge on cold-start.
+                if accuracy_24h is not None and accuracy_7d is not None:
+                    delta = abs(accuracy_24h - accuracy_7d)
+                    if delta < 0.05:
+                        drift = "stable"
+                    elif delta < 0.10:
+                        drift = "minor"
+                    else:
+                        drift = "drifting"
+            except Exception:
+                logger.warning("accuracy/verdict-count probe failed", exc_info=True)
+
         models.append({
             "model_name": name,
             "path": str(prod_path),
@@ -126,6 +167,11 @@ async def list_production_models(request: Request) -> JSONResponse:
             "last_rollback": last_rollbacks.get(name),
             "status": status,
             "error": error,
+            "accuracy": accuracy_7d,
+            "trailing_accuracy": accuracy_24h,
+            "predictions_24h": predictions_24h,
+            "predictions_7d": predictions_7d,
+            "drift": drift,
         })
     return JSONResponse({"models": models})
 

@@ -188,6 +188,27 @@ class IntelligenceDB:
             window_end=end,
         )
 
+    def count_verdicts_in_window(
+        self,
+        model: str,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> int:
+        """Number of onnx_verdicts rows for `model` in [start, end).
+
+        Used by the dashboard to surface "predictions in last 24h / 7d"
+        for each production model. Aggregates across all versions —
+        callers that want per-version counts can pass a tighter window.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM onnx_verdicts "
+                "WHERE model_name = ? AND timestamp >= ? AND timestamp < ?",
+                (model, start.isoformat(), end.isoformat()),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def write_lifecycle_event(
         self,
         event: "Any",

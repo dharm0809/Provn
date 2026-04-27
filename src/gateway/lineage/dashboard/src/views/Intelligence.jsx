@@ -36,11 +36,14 @@ function enrichModel(m) {
     architecture: m.architecture || meta.architecture || '—',
     parameters: m.parameters || meta.parameters || '—',
     active_version: m.active_version || `v${String(m.generation || 0).padStart(3, '0')}`,
-    accuracy: m.accuracy ?? 0,
-    trailing_accuracy: m.trailing_accuracy ?? m.accuracy ?? 0,
-    predictions_24h: m.predictions_24h ?? 0,
-    predictions_7d: m.predictions_7d ?? 0,
-    drift: m.drift || 'stable',
+    // Backend returns null for these when we lack signal in the window
+    // (cold start, no traffic yet). Preserve null so the UI can render
+    // "—" instead of painting a misleading "0.0%" or "stable".
+    accuracy: m.accuracy ?? null,
+    trailing_accuracy: m.trailing_accuracy ?? null,
+    predictions_24h: m.predictions_24h ?? null,
+    predictions_7d: m.predictions_7d ?? null,
+    drift: m.drift ?? null,
     accuracy_series: m.accuracy_series || null,
   };
 }
@@ -91,7 +94,10 @@ function IntelHeader({ models, candidates }) {
   const pendingShadow = candidates.filter(c => !c.shadow_validation?.completed).length;
   const failingGate = candidates.filter(c => c.shadow_validation?.completed && !c.shadow_validation?.passed).length;
   const ready = candidates.filter(c => c.shadow_validation?.passed === true).length;
-  const avgAcc = models.length > 0 ? models.reduce((s, m) => s + (m.accuracy || 0), 0) / models.length : 0;
+  // Average only over models that actually have a measurement; skip
+  // cold-start nulls so a single live model doesn't get diluted to 0.
+  const measured = models.filter(m => typeof m.accuracy === 'number');
+  const avgAcc = measured.length > 0 ? measured.reduce((s, m) => s + m.accuracy, 0) / measured.length : null;
 
   return (
     <div className="intel-metric-bar">
@@ -102,8 +108,12 @@ function IntelHeader({ models, candidates }) {
       </div>
       <div className="intel-metric">
         <div className="intel-metric-label">Avg Accuracy</div>
-        <div className="intel-metric-value gold">{(avgAcc * 100).toFixed(1)}<span className="intel-metric-unit">%</span></div>
-        <div className="intel-metric-sub">trailing 7d window</div>
+        <div className="intel-metric-value gold">
+          {avgAcc != null
+            ? <>{(avgAcc * 100).toFixed(1)}<span className="intel-metric-unit">%</span></>
+            : '—'}
+        </div>
+        <div className="intel-metric-sub">trailing 7d window{measured.length > 0 && measured.length < models.length ? ` · ${measured.length}/${models.length} measured` : ''}</div>
       </div>
       <div className="intel-metric">
         <div className="intel-metric-label">Candidates</div>
@@ -123,7 +133,7 @@ function IntelHeader({ models, candidates }) {
         <div className="intel-metric-value green">VERIFIED</div>
         <div className="intel-metric-sub">
           <span className="intel-dot-green" />
-          {(models.length * 12)} events on chain
+          lifecycle events sealed
         </div>
       </div>
     </div>
@@ -187,24 +197,30 @@ function ProductionView({ models, onForceRetrain }) {
 
             <div className="prod-hero">
               <div className="prod-hero-acc">
-                <div className="prod-hero-val gold">{((m.accuracy || 0) * 100).toFixed(1)}<span style={{fontSize:14, color:'var(--text-muted)'}}>%</span></div>
-                <div className="prod-hero-lbl">accuracy · 14d trend</div>
+                <div className="prod-hero-val gold">
+                  {m.accuracy != null
+                    ? <>{(m.accuracy * 100).toFixed(1)}<span style={{fontSize:14, color:'var(--text-muted)'}}>%</span></>
+                    : <span style={{fontSize:18, color:'var(--text-muted)'}}>no signal</span>}
+                </div>
+                <div className="prod-hero-lbl">accuracy · 7d window</div>
               </div>
               <div className="prod-hero-spark">
                 <MiniSpark data={accTrend} color="var(--gold)" w={120} h={36}/>
               </div>
-              <div className={`prod-drift prod-drift-${drift}`}>
-                {drift === 'stable' ? '▬ STABLE' : drift === 'minor' ? '◆ MINOR DRIFT' : '▲ DRIFTING'}
-              </div>
+              {drift
+                ? <div className={`prod-drift prod-drift-${drift}`}>
+                    {drift === 'stable' ? '▬ STABLE' : drift === 'minor' ? '◆ MINOR DRIFT' : '▲ DRIFTING'}
+                  </div>
+                : <div className="prod-drift" style={{ color: 'var(--text-muted)' }}>· awaiting samples ·</div>}
             </div>
 
             <dl className="prod-dl">
               <div><dt>Active version</dt><dd className="mono">{m.active_version}</dd></div>
               <div><dt>Architecture</dt><dd>{m.architecture} · {m.parameters}</dd></div>
               <div><dt>Size</dt><dd className="mono">{formatBytes(m.size_bytes)}</dd></div>
-              <div><dt>Predictions (24h)</dt><dd className="mono">{formatNumber(m.predictions_24h || 0)}</dd></div>
-              <div><dt>Predictions (7d)</dt><dd className="mono">{formatNumber(m.predictions_7d || 0)}</dd></div>
-              <div><dt>Trailing accuracy</dt><dd className="mono">{((m.trailing_accuracy || 0) * 100).toFixed(2)}%</dd></div>
+              <div><dt>Predictions (24h)</dt><dd className="mono">{m.predictions_24h != null ? formatNumber(m.predictions_24h) : '—'}</dd></div>
+              <div><dt>Predictions (7d)</dt><dd className="mono">{m.predictions_7d != null ? formatNumber(m.predictions_7d) : '—'}</dd></div>
+              <div><dt>Trailing accuracy (24h)</dt><dd className="mono">{m.trailing_accuracy != null ? `${(m.trailing_accuracy * 100).toFixed(2)}%` : '—'}</dd></div>
             </dl>
 
             <div className="prod-foot">
@@ -350,9 +366,14 @@ function eventBadge(ev) {
   const t = ev.event_type;
   const p = ev.payload || {};
   if (t === 'model_promoted') {
-    const isRb = String(p.candidate_version || '').startsWith('rollback:');
-    return <span className={`badge-wal ${isRb ? 'badge-warn' : 'badge-pass'}`}>{isRb ? '↺ rolled back' : '▲ promoted'}</span>;
+    // Legacy rollbacks (pre-2026-04-27) reused model_promoted with a
+    // synthetic candidate_version="rollback:<archive>". Real rollbacks
+    // now emit model_rolled_back; the legacy heuristic stays so we
+    // still surface old events correctly.
+    const isLegacyRb = String(p.candidate_version || '').startsWith('rollback:');
+    return <span className={`badge-wal ${isLegacyRb ? 'badge-warn' : 'badge-pass'}`}>{isLegacyRb ? '↺ rolled back' : '▲ promoted'}</span>;
   }
+  if (t === 'model_rolled_back') return <span className="badge-wal badge-warn">↺ rolled back</span>;
   if (t === 'model_rejected') return <span className="badge-wal badge-fail">✕ rejected</span>;
   if (t === 'candidate_created') return <span className="badge-wal badge-muted">◆ candidate</span>;
   if (t === 'training_dataset_fingerprint') return <span className="badge-wal badge-muted">◇ dataset</span>;
