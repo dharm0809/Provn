@@ -1,0 +1,50 @@
+{
+  "provider": "vertex_ai",
+  "endpoint": "predict(text-bison)",
+  "doc_url": "https://cloud.google.com/vertex-ai/docs/generative-ai/model-reference/text",
+  "captured_at": "2026-04-27T17:54:00Z",
+  "captured_from": "Public Vertex AI PaLM/text-bison /predict docs (legacy).",
+  "examples": [
+    {
+      "raw": {
+        "predictions": [
+          {
+            "content": "<assistant_reply>",
+            "safetyAttributes": {
+              "categories": ["Toxic", "Violent"],
+              "scores": [0.05, 0.03],
+              "blocked": false
+            },
+            "citationMetadata": {
+              "citations": [
+                {"startIndex": 0, "endIndex": 12, "url": "https://example.com/source"}
+              ]
+            }
+          }
+        ],
+        "metadata": {
+          "tokenMetadata": {
+            "inputTokenCount": {"totalTokens": 10, "totalBillableCharacters": 40},
+            "outputTokenCount": {"totalTokens": 5, "totalBillableCharacters": 20}
+          }
+        }
+      },
+      "expected_labels": {
+        "predictions[0].content": "content",
+        "predictions[0].safetyAttributes.categories[0]": "safety_category",
+        "predictions[0].safetyAttributes.categories[1]": "safety_category",
+        "predictions[0].safetyAttributes.scores[0]": "UNKNOWN",
+        "predictions[0].safetyAttributes.scores[1]": "UNKNOWN",
+        "predictions[0].safetyAttributes.blocked": "UNKNOWN",
+        "predictions[0].citationMetadata.citations[0].startIndex": "UNKNOWN",
+        "predictions[0].citationMetadata.citations[0].endIndex": "UNKNOWN",
+        "predictions[0].citationMetadata.citations[0].url": "citation_url",
+        "metadata.tokenMetadata.inputTokenCount.totalTokens": "prompt_tokens",
+        "metadata.tokenMetadata.inputTokenCount.totalBillableCharacters": "UNKNOWN",
+        "metadata.tokenMetadata.outputTokenCount.totalTokens": "completion_tokens",
+        "metadata.tokenMetadata.outputTokenCount.totalBillableCharacters": "UNKNOWN"
+      },
+      "notes": "Vertex AI PaLM (legacy text-bison): predictions[] array, deeply nested usage info. safetyAttributes.categories is a parallel-array shape (categories[i] aligned with scores[i]) — categories are the labels (safety_category), scores are the continuous risk numbers (UNKNOWN). citationMetadata.citations[].url is canonical citation_url; offsets are positions, not URLs (UNKNOWN). totalBillableCharacters is a Vertex billing metric, not a token count (UNKNOWN)."
+    }
+  ]
+}
