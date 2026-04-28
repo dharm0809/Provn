@@ -13,9 +13,11 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +31,7 @@ from gateway.schema.canonical import (
     CanonicalToolCall,
     CanonicalUsage,
     IDX_TO_LABEL,
+    LABEL_SCHEMA_VERSION,
     MappingReport,
     SINGLETON_FIELDS,
     USAGE_FIELDS,
@@ -113,6 +116,75 @@ def classify_overflow_path(path: str) -> str | None:
     return None
 
 
+class _DriftTracker:
+    """Bounded LRU of (provider, unmapped_path) tuples we've classified
+    before. The first time we see a path that isn't in the set, we emit
+    a drift signal — it means a provider added a new field shape we
+    haven't trained the model against. Resets on process restart by
+    design (drift-since-deploy is the relevant window for ops).
+
+    Bound is per-instance so a misbehaving tenant can't grow this
+    unboundedly. `max_seen` is generous (10K) because real production
+    has at most ~50 distinct unmapped paths per provider.
+    """
+
+    def __init__(self, max_seen: int = 10_000) -> None:
+        self._seen: set[tuple[str, str]] = set()
+        self._order: deque[tuple[str, str]] = deque(maxlen=max_seen)
+        self._novel_count: int = 0
+
+    def observe(self, provider: str, paths: list[str]) -> list[str]:
+        """Mark each path as seen for `provider`. Return the subset that
+        was novel (first time observed since process start)."""
+        novel: list[str] = []
+        for p in paths:
+            key = (provider or "unknown", p)
+            if key in self._seen:
+                continue
+            if len(self._order) == self._order.maxlen:
+                # LRU eviction — pop oldest from set too
+                evicted = self._order[0]
+                self._seen.discard(evicted)
+            self._seen.add(key)
+            self._order.append(key)
+            novel.append(p)
+            self._novel_count += 1
+        return novel
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "seen_unique": len(self._seen),
+            "novel_total": self._novel_count,
+        }
+
+
+def _compute_model_sha512(path: str) -> str | None:
+    """SHA-512 hex digest of the ONNX file. Pinned into every record so
+    audits can prove which model version produced a given mapping."""
+    try:
+        h = hashlib.sha512()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError as e:
+        logger.warning("SchemaMapper: failed to hash %s: %s", path, e)
+        return None
+
+
+def _resolve_model_version(model_path: str) -> str | None:
+    """Read sibling model_card.json's baseline_version, if present."""
+    card = Path(model_path).parent / "model_card.json"
+    if not card.exists():
+        return None
+    try:
+        data = json.loads(card.read_text())
+        return data.get("baseline_version") or data.get("model_version")
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug("SchemaMapper: model_card unreadable: %s", e)
+        return None
+
+
 class SchemaMapper:
     """Maps any LLM API response JSON to the canonical schema.
 
@@ -166,6 +238,22 @@ class SchemaMapper:
             from gateway.schema.canonical import CANONICAL_LABELS
             self._labels = CANONICAL_LABELS
             self._label_to_idx = {l: i for i, l in enumerate(self._labels)}
+
+        # Provenance pinning (gap 3): hash the loaded ONNX once and pin
+        # the version string. Both flow through every MappingReport so
+        # audit consumers can verify which model classified the record.
+        # Audit threshold (gap 2): late-bound from settings so test
+        # overrides via monkeypatch + cache_clear take effect on rebuild.
+        self._model_path = model_path
+        self._model_sha512: str | None = None
+        self._model_version: str | None = None
+        if Path(model_path).exists():
+            self._model_sha512 = _compute_model_sha512(model_path)
+            self._model_version = _resolve_model_version(model_path)
+
+        # Drift tracker (gap 4) — bounded set of (provider, unmapped_path)
+        # tuples we've classified. Resets on process restart.
+        self._drift = _DriftTracker()
 
     def map_response(self, raw: dict[str, Any]) -> CanonicalResponse:
         """Map a raw LLM API response to the canonical schema.
@@ -485,14 +573,67 @@ class SchemaMapper:
 
         # ── Mapping metadata ─────────────────────────────────────────
         confidences = [conf for _, (_, conf) in zip(fields, classifications) if _ != "UNKNOWN"]
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+
+        # Resolve audit threshold (gap 2). Late-bound from settings so
+        # `get_settings.cache_clear()` in tests + monkeypatched env take
+        # effect; falls back to dataclass default if settings unimportable.
+        threshold = MappingReport().audit_threshold
+        try:
+            from gateway.config import get_settings
+            threshold = float(get_settings().schema_mapper_audit_threshold)
+        except Exception:
+            pass
+        # confidence < 0.5 → "rejected" (model basically guessed); below
+        # threshold but ≥ 0.5 → "unverified"; ≥ threshold → "verified".
+        if avg_conf < 0.5:
+            audit_state = "rejected"
+        elif avg_conf < threshold:
+            audit_state = "unverified"
+        else:
+            audit_state = "verified"
+
+        # Drift detection (gap 4): track which unmapped paths are novel
+        # for this provider since process start. The provider key is best
+        # effort — `model` field if classified, else the raw `model_id`
+        # string from the response, else "unknown".
+        provider_key = (
+            cr.model
+            or (raw.get("model") if isinstance(raw, dict) else None)
+            or "unknown"
+        )
+        # Only track LEAF unmapped fields as drift — object/array
+        # containers always classify as UNKNOWN by design and would
+        # spam the drift signal otherwise.
+        leaf_unmapped = [
+            f.path for f, (label, _) in zip(fields, classifications)
+            if label == "UNKNOWN" and f.value_type not in ("object", "array")
+        ]
+        novel_paths = self._drift.observe(provider_key, leaf_unmapped)
+        if novel_paths:
+            logger.info(
+                "schema_mapper drift: provider=%s saw %d novel unmapped path(s): %s",
+                provider_key, len(novel_paths), novel_paths[:5],
+            )
+
         cr.mapping = MappingReport(
-            confidence=sum(confidences) / len(confidences) if confidences else 0.0,
+            confidence=avg_conf,
             incomplete=not cr.content and not cr.thinking_content,
             mapped_fields=mapped,
             unmapped_fields=unmapped,
+            audit_state=audit_state,
+            audit_threshold=threshold,
+            model_version=self._model_version,
+            model_sha512=self._model_sha512,
+            label_schema_version=LABEL_SCHEMA_VERSION,
+            drift_signals=novel_paths,
         )
 
         return cr
+
+    def get_drift_stats(self) -> dict[str, int]:
+        """Return drift-tracker counters; safe to call from /v1/connections."""
+        return self._drift.stats()
 
     def reload(self) -> None:
         """Rebuild the `InferenceSession` from the registry's production path.
