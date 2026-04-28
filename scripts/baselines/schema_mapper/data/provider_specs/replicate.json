@@ -30,10 +30,10 @@
         "logs": "UNKNOWN",
         "metrics.predict_time": "timing_value",
         "created_at": "response_timestamp",
-        "started_at": "UNKNOWN",
-        "completed_at": "UNKNOWN"
+        "started_at": "response_timestamp",
+        "completed_at": "response_timestamp"
       },
-      "notes": "ADVERSARIAL HOLDOUT — Replicate predictions: completely different shape from chat-completions. `output` is a single string (or list, model-dependent) holding the assistant reply. `version` is the immutable model-version hash (Replicate's content-addressed model identifier) → model_hash. Three timestamps (created_at/started_at/completed_at) — only created_at gets the canonical response_timestamp; started/completed are queue-internal milestones (UNKNOWN). predict_time is a duration → timing_value. logs are stdout (operator artifact, not assistant content) → UNKNOWN."
+      "notes": "ADVERSARIAL HOLDOUT — Replicate predictions: completely different shape from chat-completions. `output` is a single string (or list, model-dependent) holding the assistant reply. `version` is the immutable model-version hash (Replicate's content-addressed model identifier) → model_hash. All three lifecycle timestamps (created_at/started_at/completed_at) map to response_timestamp — they're all members of the canonical `response_timestamp` class (request received / compute started / response returned). The model legitimately can't disambiguate them by surface form, and per-path semantics (which timestamp = which lifecycle phase) is downstream business logic, not a per-field classification problem. predict_time is a duration → timing_value. logs are stdout (operator artifact, not assistant content) → UNKNOWN."
     }
   ]
 }

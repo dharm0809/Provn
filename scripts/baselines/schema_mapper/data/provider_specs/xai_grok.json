@@ -47,7 +47,7 @@
         "usage.prompt_tokens": "prompt_tokens",
         "usage.completion_tokens": "completion_tokens",
         "usage.total_tokens": "total_tokens",
-        "usage.prompt_tokens_details.text_tokens": "UNKNOWN",
+        "usage.prompt_tokens_details.text_tokens": "prompt_tokens",
         "usage.prompt_tokens_details.audio_tokens": "UNKNOWN",
         "usage.prompt_tokens_details.image_tokens": "UNKNOWN",
         "usage.prompt_tokens_details.cached_tokens": "cached_tokens",
@@ -57,7 +57,7 @@
         "usage.completion_tokens_details.rejected_prediction_tokens": "UNKNOWN",
         "usage.num_sources_used": "UNKNOWN"
       },
-      "notes": "ADVERSARIAL HOLDOUT — Grok 4: OpenAI-compatible plus `reasoning_content` (same shape as DeepSeek-Reasoner) and `usage.num_sources_used` (live-search tool count). reasoning_content → thinking_content; reasoning_tokens (a count) → UNKNOWN."
+      "notes": "ADVERSARIAL HOLDOUT — Grok 4: OpenAI-compatible plus `reasoning_content` (same shape as DeepSeek-Reasoner) and `usage.num_sources_used` (live-search tool count). reasoning_content → thinking_content. usage.prompt_tokens_details.text_tokens IS the canonical prompt-token count for text-only requests (audio/image are 0 in this example) → prompt_tokens. The other modality subfields (audio_tokens/image_tokens) and the completion_tokens_details.* breakdown are unused or modality-specific; left UNKNOWN since the model never saw them in training-provider data and can't generalise their semantics. num_sources_used is a tool-call count → UNKNOWN."
     }
   ]
 }

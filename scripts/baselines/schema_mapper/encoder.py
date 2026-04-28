@@ -1,18 +1,23 @@
-"""MiniLM-L6 encoder for linearised FlatField strings.
+"""MiniLM-L12 encoder for linearised FlatField strings.
 
 Architecture:
-  microsoft/MiniLM-L6-H384-uncased (22M params, hidden=384)
-  → CLS pooling (DODUO recipe)
+  sentence-transformers/all-MiniLM-L12-v2 (33M params, hidden=384)
+  → mean pooling over attention-masked tokens
   → 384-dim field embedding
 
-Pretrained checkpoint chosen because:
-- 22M params, ~22 MB ONNX-int8 → fits 50 MB budget after CRF + tokenizer
-- QuaLA-MiniLM (Intel Labs 2022) measured 1.85-10ms ONNX-CPU at seq-len 128
-- Same family as our intent baseline-v2 → tooling reuse
+We deliberately do NOT use microsoft/MiniLM-L12-H384-uncased: that's the
+*base* model, only pretrained with masked LM. Its CLS-token pooling is
+essentially uniform (cosine sim ~0.99 across totally unrelated text)
+because CLS only learns useful sentence semantics during sentence-level
+fine-tuning. With our 336-sample gold-only training set the encoder
+can't be adapted in-place, so we need an encoder that already produces
+differentiated sentence vectors.
 
-The encoder is exposed for two consumers:
-- training (`model.py` → forward pass over a batch of FlatField strings)
-- export_onnx (`export_onnx.py` → graph export, then dynamic int8 quant)
+sentence-transformers/all-MiniLM-L12-v2 is the same architecture, same
+tokenizer (vocab 30522, identical special tokens), but fine-tuned on
+1B+ sentence pairs with contrastive learning + mean pooling. Drop-in
+compatible with the rest of the pipeline (tokenizer, hidden dim,
+ONNX export shape).
 
 Runtime gateway code uses the exported ONNX directly + a pure-numpy
 CRF Viterbi decode, NOT this PyTorch wrapper.
@@ -24,14 +29,14 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-DEFAULT_ENCODER_MODEL = "microsoft/MiniLM-L12-H384-uncased"
+DEFAULT_ENCODER_MODEL = "sentence-transformers/all-MiniLM-L12-v2"
 ENCODER_HIDDEN = 384
 MAX_SEQ_LEN = 128
 
 
 class FieldEncoder(nn.Module):
     """MiniLM wrapper that consumes already-tokenized batches and returns
-    CLS-pooled embeddings.
+    mean-pooled embeddings (attention-masked).
 
     Tokenization is kept outside the nn.Module so the CRF + classifier
     head can be exported jointly with the encoder via a single
@@ -43,13 +48,13 @@ class FieldEncoder(nn.Module):
         from transformers import AutoModel  # local import to keep CLI fast
 
         self.backbone = AutoModel.from_pretrained(pretrained_name)
-        # MiniLM-L12-H384-uncased — actual hidden dim from config
         self.hidden_dim = self.backbone.config.hidden_size
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         out = self.backbone(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-        # CLS pooling: first token's last_hidden_state
-        return out.last_hidden_state[:, 0, :]
+        token_emb = out.last_hidden_state
+        mask = attention_mask.unsqueeze(-1).float()
+        return (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
 
 
 def load_tokenizer(pretrained_name: str = DEFAULT_ENCODER_MODEL):

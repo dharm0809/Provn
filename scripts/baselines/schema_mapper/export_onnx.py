@@ -50,6 +50,11 @@ class ExportableHead(torch.nn.Module):
 
 
 def export_fp32(model: SchemaMapper, out_path: pathlib.Path, feature_dim: int) -> None:
+    # Static shapes only. Dynamic axes leak HF-attention shape ops that
+    # ORT's symbolic shape inference can't resolve ("unsupported broadcast
+    # between Min(512, batch) seq" / Concat axis-rank mismatches), which
+    # then trips quantize_dynamic. We always pad to MAX_SEQ_LEN and run
+    # batch=1 at inference, so dynamic axes buy nothing.
     wrapped = ExportableHead(model)
     wrapped.train(False)
     dummy_ids = torch.zeros(1, MAX_SEQ_LEN, dtype=torch.long)
@@ -62,12 +67,7 @@ def export_fp32(model: SchemaMapper, out_path: pathlib.Path, feature_dim: int) -
         str(out_path),
         input_names=["input_ids", "attention_mask", "features"],
         output_names=["logits"],
-        dynamic_axes={
-            "input_ids": {0: "batch", 1: "seq"},
-            "attention_mask": {0: "batch", 1: "seq"},
-            "features": {0: "batch"},
-            "logits": {0: "batch"},
-        },
+        dynamic_axes=None,
         opset_version=17,
     )
 
@@ -112,7 +112,7 @@ def main() -> None:
     ap.add_argument("--force", action="store_true",
                     help="Skip the INT8-vs-FP32 macro-F1 delta gate")
     ap.add_argument("--skip-int8", action="store_true",
-                    help="Skip INT8 quantization (some torch+onnxruntime combos hit a shape inference bug on dynamic-batch ops; FP32 alone is acceptable for v2.0 with INT8 deferred to a follow-up)")
+                    help="Skip INT8 quantization (escape hatch only; static-shape export normally lets quantize_dynamic succeed)")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -123,6 +123,19 @@ def main() -> None:
     model = SchemaMapper(feature_dim=feature_dim)
     model.load_state_dict(ckpt["model_state"])
     model.train(False)
+
+    # Bake temperature into the final classifier Linear so the exported
+    # ONNX produces calibrated probabilities directly. Argmax is unchanged
+    # because dividing weight + bias by T scales logits by 1/T uniformly.
+    temp_path = args.checkpoint.parent / "temperature.json"
+    if temp_path.exists():
+        T = float(json.loads(temp_path.read_text())["temperature"])
+        if T != 1.0:
+            final_linear = model.head[-1]  # last Linear in the head Sequential
+            with torch.no_grad():
+                final_linear.weight.data /= T
+                final_linear.bias.data /= T
+            print(f"[export] baked temperature T={T:.4f} into classifier head", file=sys.stderr)
 
     fp32_path = args.out / "schema_mapper_fp32.onnx"
     int8_path = args.out / "schema_mapper.onnx"

@@ -257,7 +257,7 @@ def stage1_finetune(
     lr_encoder: float = 2e-5,
     lr_head: float = 1e-3,
     lambda_crf: float = 0.3,
-    patience: int = 2,
+    patience: int = 8,
     checkpoint_path: pathlib.Path | None = None,
     feature_dim: int | None = None,
 ) -> list[dict]:
