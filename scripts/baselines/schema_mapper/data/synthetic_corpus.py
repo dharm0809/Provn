@@ -546,23 +546,51 @@ def generate_variants(
         for an in aug_names:
             fn = dict(_AUGS)[an]
             try:
-                if an == "key_naming" and rng.random() < 0.5 and rename_table:
+                if an == "key_naming" and rename_table and rng.random() < 0.6:
+                    # 60% of key_naming slots become teacher-vocab rename
+                    # attacks (richer than the 4 case styles). Keep 40%
+                    # going through the deterministic style cycle so the
+                    # encoder still learns case-invariance specifically.
                     v = aug_rename_attack(v, rename_table, rng)
                 else:
                     v = fn(v, rng)
             except Exception:
                 continue
+        # Compose an extra rename_attack with 12% probability — this is
+        # the "teacher synthesis lift" — makes any variant a bit more
+        # likely to use a non-canonical surface form for at least one key.
+        # Tuned to keep rename_attack frequency under the 40% quality gate.
+        if rename_table and rng.random() < 0.12:
+            try:
+                v = aug_rename_attack(v, rename_table, rng)
+            except Exception:
+                pass
         if _validate_variant(v):
             out.append(v)
     return out
 
 
-def _flatten_rename_table(holdouts: dict) -> dict[str, list[str]]:
-    """Flatten adversarial_holdouts.json:rename_attacks into one dict."""
+def _flatten_rename_table(holdouts: dict, teacher_vocab: dict | None = None) -> dict[str, list[str]]:
+    """Flatten adversarial_holdouts.json:rename_attacks AND the teacher
+    rename vocabulary into one dict {original_key: [alternate_surface_forms]}.
+
+    The teacher vocab is keyed by canonical label; we transpose to
+    original-key form by using each label's first surface form as the
+    canonical key and the rest as alternates. This lets the augmenter
+    see ANY of the surface forms in a seed and rename to ANY OTHER form
+    of the same canonical concept — a much richer renaming space than
+    snake/camel/kebab style cycles alone.
+    """
     table: dict[str, list[str]] = {}
     for entry in holdouts.get("rename_attacks", []):
         for k, alts in entry["renames"].items():
             table.setdefault(k, []).extend(alts)
+    if teacher_vocab:
+        for label, surface_forms in teacher_vocab.get("by_label", {}).items():
+            forms = list(set(surface_forms))
+            for src in forms:
+                # Pick anything but src as alternates
+                table.setdefault(src, []).extend(f for f in forms if f != src)
     return {k: list(set(v)) for k, v in table.items()}
 
 
@@ -570,6 +598,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--specs-dir", type=pathlib.Path, default=pathlib.Path(__file__).parent / "provider_specs")
     ap.add_argument("--holdouts", type=pathlib.Path, default=pathlib.Path(__file__).parent / "adversarial_holdouts.json")
+    ap.add_argument("--teacher-vocab", type=pathlib.Path, default=pathlib.Path(__file__).parent / "teacher_rename_vocab.json")
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path(__file__).parent.parent / "out" / "synthetic_corpus.jsonl")
     ap.add_argument("--n-per-spec", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260427)
@@ -579,7 +608,9 @@ def main() -> None:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     holdouts = json.loads(args.holdouts.read_text())
-    rename_table = _flatten_rename_table(holdouts)
+    teacher_vocab = json.loads(args.teacher_vocab.read_text()) if args.teacher_vocab.exists() else None
+    rename_table = _flatten_rename_table(holdouts, teacher_vocab)
+    print(f"[corpus] rename table: {len(rename_table)} keys, {sum(len(v) for v in rename_table.values())} alt surface forms", file=sys.stderr)
     holdout_specs = {entry["spec"] for entry in holdouts["unseen_providers"]}
 
     rng_master = random.Random(args.seed)
