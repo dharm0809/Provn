@@ -45,6 +45,7 @@ TILE_ORDER: tuple[str, ...] = (
     "readiness",
     "streaming",
     "intelligence_worker",
+    "schema_mapper",
 )
 
 
@@ -528,6 +529,74 @@ def build_streaming_tile(ctx: Any) -> dict:
     )
 
 
+def build_schema_mapper_tile(ctx: Any) -> dict:
+    """Schema-mapper drift + provenance summary.
+
+    Reports two things operators care about:
+      - drift: how many novel unmapped leaf paths the model has classified
+        since process start, broken down by total + currently-unique
+      - provenance: which model version + SHA-512 is in production right now
+
+    Status semantics:
+      green   no novel paths seen since restart (or no traffic yet)
+      amber   any novel paths — operators should review whether a provider
+              added a field shape we haven't trained against
+      unknown SchemaMapper isn't wired into ctx (e.g. transparent-proxy mode)
+    """
+    sm = getattr(ctx, "schema_mapper", None)
+    if sm is None:
+        return _disabled_tile("schema_mapper", reason="not configured")
+
+    stats: dict = {"seen_unique": 0, "novel_total": 0}
+    if hasattr(sm, "get_drift_stats"):
+        try:
+            stats = sm.get_drift_stats() or stats
+        except Exception:
+            pass
+
+    novel_total = int(stats.get("novel_total") or 0)
+    seen_unique = int(stats.get("seen_unique") or 0)
+
+    # Pull provenance from the most-recent assembled MappingReport defaults
+    # — we read it off the SchemaMapper instance so we don't have to wait
+    # for live traffic to surface it.
+    model_version = getattr(sm, "_model_version", None)
+    model_sha512 = getattr(sm, "_model_sha512", None)
+    sha_short = (model_sha512[:12] + "...") if model_sha512 else None
+
+    detail = {
+        "drift": {
+            "novel_total_since_restart": novel_total,
+            "seen_unique_paths": seen_unique,
+        },
+        "provenance": {
+            "model_version": model_version,
+            "model_sha512_prefix": sha_short,
+        },
+    }
+
+    if novel_total > 0:
+        status = "amber"
+        headline = f"{novel_total} novel field(s) since restart"
+    else:
+        status = "green"
+        headline = (
+            "no schema drift" if seen_unique > 0 else "no traffic yet"
+        )
+    subline = (
+        f"{seen_unique} unique paths tracked"
+        + (f" · {model_version}" if model_version else "")
+    )
+
+    return _tile(
+        "schema_mapper",
+        status=status,
+        headline=headline,
+        subline=subline,
+        detail=detail,
+    )
+
+
 def _read_intelligence_db_counters(db_path: str) -> tuple[int, Any]:
     """Synchronous SQLite read — runs in a worker thread so the event loop stays free."""
     import sqlite3
@@ -833,6 +902,7 @@ _SYNC_BUILDERS: dict[str, Any] = {
     "control_plane": build_control_plane_tile,
     "auth": build_auth_tile,
     "streaming": build_streaming_tile,
+    "schema_mapper": build_schema_mapper_tile,
 }
 
 _ASYNC_BUILDERS: dict[str, Any] = {
