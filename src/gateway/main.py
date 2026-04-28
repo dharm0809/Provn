@@ -43,6 +43,7 @@ from gateway.lineage.api import (
 )
 from gateway.lineage.cost import lineage_cost_summary
 from gateway.control.api import (
+    control_list_labels,
     control_list_attestations,
     control_upsert_attestation,
     control_delete_attestation,
@@ -2027,6 +2028,7 @@ def create_app() -> Starlette:
         Route("/v1/control/discover", control_discover_models, methods=["GET"]),
         Route("/v1/control/templates", control_list_templates, methods=["GET"]),
         Route("/v1/control/templates/{name}/apply", control_apply_template, methods=["POST"]),
+        Route("/v1/control/labels", control_list_labels, methods=["GET"]),
         Route("/v1/control/keys/assignments", control_list_key_policy_assignments, methods=["GET"]),
         Route("/v1/control/keys/{key_hash}/policies", control_get_key_policies, methods=["GET"]),
         Route("/v1/control/keys/{key_hash}/policies", control_set_key_policies, methods=["PUT"]),

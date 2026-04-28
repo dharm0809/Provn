@@ -1499,6 +1499,18 @@ async def _build_and_write_record(
             "response_id": _canonical.response_id,
             "model": _canonical.model,
             "mapping_confidence": round(_canonical.mapping.confidence, 3),
+            # Audit-grade provenance (gaps 2 + 3 + 4):
+            #   audit_state         → "verified" / "unverified" / "rejected"
+            #   model_version, model_sha512, label_schema_version
+            #     → reproducibility chain; auditor can re-run the same
+            #       model and verify the same labels years later
+            #   drift_signals       → novel unmapped paths flagged this call
+            "mapping_audit_state": _canonical.mapping.audit_state,
+            "mapping_audit_threshold": _canonical.mapping.audit_threshold,
+            "mapping_model_version": _canonical.mapping.model_version,
+            "mapping_model_sha512": _canonical.mapping.model_sha512,
+            "mapping_label_schema_version": _canonical.mapping.label_schema_version,
+            "mapping_drift_signals": _canonical.mapping.drift_signals,
         }
         if _canonical.usage:
             _can_dict["usage"] = {
@@ -2293,6 +2305,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 "schema_mapper_confidence": round(_canonical.mapping.confidence, 3),
                 "schema_mapper_mapped": len(_canonical.mapping.mapped_fields),
                 "schema_mapper_unmapped": len(_canonical.mapping.unmapped_fields),
+                "schema_mapper_audit_state": _canonical.mapping.audit_state,
+                "schema_mapper_model_version": _canonical.mapping.model_version,
+                "schema_mapper_model_sha512": _canonical.mapping.model_sha512,
+                "schema_mapper_label_schema_version": _canonical.mapping.label_schema_version,
+                "schema_mapper_drift_signals": _canonical.mapping.drift_signals,
             }
             if _canonical.overflow:
                 _mapping_meta["schema_mapper_overflow_keys"] = list(_canonical.overflow.keys())[:20]

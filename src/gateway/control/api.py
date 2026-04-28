@@ -113,6 +113,66 @@ def _refresh_budget_tracker() -> None:
     logger.info("Budget tracker refreshed: %d budgets", len(budgets))
 
 
+# ── Canonical-label catalog (read-only, stateless) ────────────
+
+
+async def control_list_labels(request: Request) -> JSONResponse:
+    """Returns the canonical-label binding catalog.
+
+    Read-only, stateless — does NOT require `control_store` to be wired.
+    The lineage UI calls this once at boot to build label tooltips +
+    compliance-framework filter chips. Output is the JSON-serialized
+    LABEL_BINDINGS table from `gateway.schema.canonical`.
+
+    Output shape:
+      {
+        "label_schema_version": "1.0.0",
+        "count": 23,
+        "labels": [
+          {
+            "canonical_label": "prompt_tokens",
+            "walacor_field_path": "executions.usage.prompt_tokens",
+            "json_type": "int",
+            "constraint": ">= 0",
+            "compliance_refs": ["eu-ai-act:53(1)(b)", "soc2:cc7.2"],
+            "description": "Token count of input to the LLM"
+          },
+          ...
+        ]
+      }
+    """
+    from gateway.schema.canonical import LABEL_BINDINGS, LABEL_SCHEMA_VERSION
+
+    payload = []
+    # Iterate in CANONICAL_LABELS order so consumers see a stable
+    # presentation regardless of dict-iteration order across Python
+    # versions; falls back to dict order if the import is unavailable.
+    try:
+        from gateway.schema.canonical import CANONICAL_LABELS
+        order = CANONICAL_LABELS
+    except ImportError:
+        order = list(LABEL_BINDINGS.keys())
+
+    for label in order:
+        binding = LABEL_BINDINGS.get(label)
+        if binding is None:
+            continue
+        payload.append({
+            "canonical_label": binding.canonical_label,
+            "walacor_field_path": binding.walacor_field_path,
+            "json_type": binding.json_type,
+            "constraint": binding.constraint,
+            "compliance_refs": list(binding.compliance_refs),
+            "description": binding.description,
+        })
+
+    return JSONResponse({
+        "label_schema_version": LABEL_SCHEMA_VERSION,
+        "count": len(payload),
+        "labels": payload,
+    })
+
+
 # ── Attestation endpoints ─────────────────────────────────────
 
 async def control_list_attestations(request: Request) -> JSONResponse:

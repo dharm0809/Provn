@@ -248,6 +248,17 @@ class Settings(BaseSettings):
     enforcement_mode: Literal["enforced", "audit_only"] = Field(default="enforced")
     skip_governance: bool = Field(default=False, description="If True, run as transparent proxy (Phase 1 only)")
 
+    # Schema-mapper audit (gap 2): mappings produced with confidence
+    # below this threshold are flagged audit_state="unverified" so
+    # downstream compliance views can filter them out, while remaining
+    # available for ops triage. Default 0.85 — mappings the ONNX model
+    # was 85%+ confident in count as verified canonical.
+    schema_mapper_audit_threshold: float = Field(
+        default=0.85,
+        ge=0.0, le=1.0,
+        description="Minimum mapping.confidence for audit_state='verified'",
+    )
+
     # Provider (for attestation cache key; default openai)
     gateway_provider: str = Field(default="openai", description="Provider name for attestation sync (openai, anthropic, etc.)")
 
