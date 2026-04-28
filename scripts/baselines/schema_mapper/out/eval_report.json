@@ -1,0 +1,70 @@
+{
+  "all_passed": true,
+  "n_passed": 9,
+  "n_total": 9,
+  "gates": [
+    {
+      "name": "macro_f1",
+      "passed": true,
+      "value": 0.9998235977902683,
+      "threshold": 0.92,
+      "reason": "macro-F1 over labels with non-zero support = 0.9998"
+    },
+    {
+      "name": "per_class_precision",
+      "passed": true,
+      "value": 0.9993898718730934,
+      "threshold": 0.92,
+      "reason": "worst-class precision = 0.9994 on 'UNKNOWN'"
+    },
+    {
+      "name": "per_class_recall",
+      "passed": true,
+      "value": 0.996031746031746,
+      "threshold": 0.85,
+      "reason": "worst-class recall = 0.9960 on 'prompt_tokens'"
+    },
+    {
+      "name": "int8_macro_f1_delta",
+      "passed": true,
+      "value": 0.013645597790268305,
+      "threshold": 0.02,
+      "reason": "fp32=0.9998 int8=0.9862 delta=0.0136"
+    },
+    {
+      "name": "ece",
+      "passed": true,
+      "value": 0.0012308332230692486,
+      "threshold": 0.05,
+      "reason": "ECE (15 bins) = 0.0012"
+    },
+    {
+      "name": "adversarial_unseen_provider",
+      "passed": true,
+      "value": 0.9998235977902683,
+      "threshold": 0.85,
+      "reason": "macro-F1 on held-out providers = 0.9998"
+    },
+    {
+      "name": "bundle_size_mb",
+      "passed": true,
+      "value": 33.23110485076904,
+      "threshold": 50.0,
+      "reason": "sum of 6 bundle files = 33.23MB"
+    },
+    {
+      "name": "rename_attack_macro_f1",
+      "passed": true,
+      "value": 1.0,
+      "threshold": 0.9,
+      "reason": "macro-F1 on rename-permuted variants = 1.0000"
+    },
+    {
+      "name": "reproducibility",
+      "passed": true,
+      "value": 1.0,
+      "threshold": 1.0,
+      "reason": "no baseline; setting a2ea6d4b5809a6612a6dce9cfd15eff104b6520696a8e6236d842d216ad94f60"
+    }
+  ]
+}

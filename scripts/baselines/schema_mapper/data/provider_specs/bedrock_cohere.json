@@ -1,0 +1,30 @@
+{
+  "provider": "bedrock",
+  "endpoint": "invoke(cohere.command-*)",
+  "doc_url": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-cohere-command.html",
+  "captured_at": "2026-04-27T17:42:00Z",
+  "captured_from": "Public AWS Bedrock Cohere Command invoke-model docs.",
+  "examples": [
+    {
+      "raw": {
+        "id": "0a1b2c3d-4e5f-6789-abcd-ef0123456789",
+        "generations": [
+          {
+            "id": "gen_AbCdEf",
+            "text": "<assistant_reply>",
+            "finish_reason": "COMPLETE"
+          }
+        ],
+        "prompt": "<echoed_prompt_placeholder>"
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "generations[0].id": "UNKNOWN",
+        "generations[0].text": "content",
+        "generations[0].finish_reason": "finish_reason",
+        "prompt": "UNKNOWN"
+      },
+      "notes": "Bedrock Cohere Command (legacy /generate-shape): top-level `id` is the response_id; per-generation `id` is the gen-id (UNKNOWN, same conservatism as Groq's x_groq.id). `prompt` is the echoed input prompt — NOT a content field of the assistant response (UNKNOWN). Cohere via Bedrock typically does NOT return token counts in the legacy /invoke shape."
+    }
+  ]
+}

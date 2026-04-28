@@ -1,0 +1,56 @@
+{
+  "provider": "openai",
+  "endpoint": "responses",
+  "doc_url": "https://platform.openai.com/docs/api-reference/responses/object",
+  "captured_at": "2026-04-27T17:36:00Z",
+  "captured_from": "Public OpenAI Responses API docs (/v1/responses) — distinct from chat.completions.",
+  "examples": [
+    {
+      "raw": {
+        "id": "resp_AbCdEfGhIjKl",
+        "object": "response",
+        "created_at": 1714234800,
+        "status": "completed",
+        "model": "gpt-4o-2024-08-06",
+        "output": [
+          {
+            "id": "msg_xyz",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {"type": "output_text", "text": "<assistant_reply>", "annotations": []}
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 14,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 8,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 22
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created_at": "response_timestamp",
+        "status": "UNKNOWN",
+        "model": "model",
+        "output[0].id": "UNKNOWN",
+        "output[0].type": "UNKNOWN",
+        "output[0].role": "UNKNOWN",
+        "output[0].status": "UNKNOWN",
+        "output[0].content[0].type": "UNKNOWN",
+        "output[0].content[0].text": "content",
+        "output[0].content[0].annotations": "UNKNOWN",
+        "usage.input_tokens": "prompt_tokens",
+        "usage.input_tokens_details.cached_tokens": "cached_tokens",
+        "usage.output_tokens": "completion_tokens",
+        "usage.output_tokens_details.reasoning_tokens": "UNKNOWN",
+        "usage.total_tokens": "total_tokens"
+      },
+      "notes": "OpenAI Responses API: completely different shape from chat.completions. Uses `output[]` (array of output items) instead of `choices[]`, `output[].id` is a per-message id (NOT response_id; the top-level `id` is response_id), `input_tokens`/`output_tokens` (NOT prompt_/completion_ — same canonical mapping as Anthropic). `status` (completed/in_progress/failed/incomplete) is closer to a finish_reason but is a response-state machine field, not a generation stop reason; UNKNOWN to keep the boundary clean. `annotations` is an empty list (no leaves emitted)."
+    }
+  ]
+}

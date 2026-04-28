@@ -1,0 +1,24 @@
+{
+  "provider": "bedrock",
+  "endpoint": "invoke(meta.llama-*)",
+  "doc_url": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-meta.html",
+  "captured_at": "2026-04-27T17:44:00Z",
+  "captured_from": "Public AWS Bedrock Meta Llama invoke-model docs.",
+  "examples": [
+    {
+      "raw": {
+        "generation": "<assistant_reply>",
+        "prompt_token_count": 14,
+        "generation_token_count": 7,
+        "stop_reason": "stop"
+      },
+      "expected_labels": {
+        "generation": "content",
+        "prompt_token_count": "prompt_tokens",
+        "generation_token_count": "completion_tokens",
+        "stop_reason": "finish_reason"
+      },
+      "notes": "Bedrock Meta Llama /invoke: minimal flat shape. `generation` (singular) is the assistant text → content. snake_case (Meta's own naming, not Bedrock-camelCase). No id, no model, no total_tokens in the response body."
+    }
+  ]
+}

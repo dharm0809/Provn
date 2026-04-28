@@ -348,3 +348,99 @@ FEATURE_DIM = len(extract_features(FlatField(
 def extract_batch(fields: list[FlatField]) -> list[list[float]]:
     """Extract feature vectors for a batch of fields."""
     return [extract_features(f) for f in fields]
+
+
+# ── v2 feature refinements (schema_mapper baseline-v2) ───────────────────────
+#
+# Three additional feature blocks added by the schema-mapper baseline-v2
+# build (Phase 3 Task 3.2, plan 2026-04-27-schema-mapper-baseline-v2.md).
+# Kept ADDITIVE (extract_features_v2 = extract_features + new blocks) so
+# the deployed legacy ONNX (200-dim input) keeps loading. Once the new
+# transformer ONNX ships, callers migrate to _v2 explicitly.
+#
+# New blocks:
+#  1. Parent-path token hash (16-dim) — full parent path tokens, not just
+#     immediate parent_key. Captures `usage.*` vs
+#     `choices[0].message.*` distinction.
+#  2. Sibling-cardinality bucket (4-dim) — discrete bucket
+#     [0, 1, 2-5, 6+] siblings. Complements the existing normalised count.
+#  3. Value-statistics for numeric (8-dim) — quantile thresholds
+#     (≥50/≥100/≥1000/≥10K), is-power-of-two, is-negative, is-zero,
+#     log-magnitude-normalised.
+
+_PARENT_PATH_HASH_DIMS_V2 = 16
+_VALUE_STATS_DIMS_V2 = 8
+_SIB_CARDINALITY_DIMS_V2 = 4
+
+
+def _is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _parent_path_tokens(field: FlatField) -> list[str]:
+    """All tokens in the field's parent path (everything but the leaf)."""
+    if "." not in field.path:
+        return []
+    parent_path = field.path.rsplit(".", 1)[0]
+    return _split_key_tokens(parent_path)
+
+
+def _sibling_cardinality_bucket(n: int) -> list[float]:
+    """[0, 1, 2-5, 6+] one-hot."""
+    out = [0.0] * 4
+    if n == 0:
+        out[0] = 1.0
+    elif n == 1:
+        out[1] = 1.0
+    elif n <= 5:
+        out[2] = 1.0
+    else:
+        out[3] = 1.0
+    return out
+
+
+def _value_stats_numeric(field: FlatField) -> list[float]:
+    """8-dim quantile + flags vector. Zeros if value is not numeric."""
+    out = [0.0] * 8
+    if field.value_type not in ("int", "float") or isinstance(field.value, bool):
+        return out
+    v = field.value if field.value is not None else 0
+    abs_v = abs(v)
+    out[0] = 1.0 if abs_v >= 50 else 0.0
+    out[1] = 1.0 if abs_v >= 100 else 0.0
+    out[2] = 1.0 if abs_v >= 1000 else 0.0
+    out[3] = 1.0 if abs_v >= 10000 else 0.0
+    out[4] = 1.0 if isinstance(v, int) and _is_power_of_two(int(v)) else 0.0
+    out[5] = 1.0 if v < 0 else 0.0
+    out[6] = 1.0 if v == 0 else 0.0
+    out[7] = math.log1p(abs_v) / 25.0  # normalised log-magnitude
+    return out
+
+
+def extract_features_v2(field: FlatField) -> list[float]:
+    """Extract the v2 feature vector — legacy block + 3 v2 blocks.
+
+    Use this for the new transformer model (schema-mapper baseline-v2).
+    Old ONNX callers should keep using extract_features() — input shape
+    is preserved.
+    """
+    base = extract_features(field)
+    base.extend(_hash_tokens(_parent_path_tokens(field), _PARENT_PATH_HASH_DIMS_V2))
+    base.extend(_sibling_cardinality_bucket(len(field.sibling_keys)))
+    base.extend(_value_stats_numeric(field))
+    return base
+
+
+FEATURE_DIM_V2 = len(extract_features_v2(FlatField(
+    path="test", key="test", value="test", value_type="string",
+    depth=0, parent_key="", sibling_keys=[], sibling_types=[], int_siblings=[],
+)))
+"""Dimensionality of the v2 feature vector. Computed once at import.
+
+Equal to FEATURE_DIM + _PARENT_PATH_HASH_DIMS_V2 + _SIB_CARDINALITY_DIMS_V2
+                    + _VALUE_STATS_DIMS_V2 = FEATURE_DIM + 28.
+Plan target: ≥ 228."""
+
+
+def extract_batch_v2(fields: list[FlatField]) -> list[list[float]]:
+    return [extract_features_v2(f) for f in fields]

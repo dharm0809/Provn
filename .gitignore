@@ -14,6 +14,10 @@ secrets/
 # Engineers install from git; these are operator-local artifacts only.
 backups/
 data/
+# Schema-mapper gold curation lives under scripts/baselines/schema_mapper/data/
+# and IS checked in (provider specs + adversarial holdouts are training contracts).
+!scripts/baselines/schema_mapper/data/
+!scripts/baselines/schema_mapper/data/**
 python_vs_hybrid_pipeline_speed.html
 
 # --- Python ---

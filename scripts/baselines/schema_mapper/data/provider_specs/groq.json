@@ -1,0 +1,57 @@
+{
+  "provider": "groq",
+  "endpoint": "chat.completions",
+  "doc_url": "https://console.groq.com/docs/api-reference#chat-create",
+  "captured_at": "2026-04-27T17:22:00Z",
+  "captured_from": "Public Groq API docs (OpenAI-compatible chat.completions with x_groq.usage timing extensions).",
+  "examples": [
+    {
+      "raw": {
+        "id": "chatcmpl-AbCdEfGhIjKl",
+        "object": "chat.completion",
+        "created": 1714233900,
+        "model": "llama-3.3-70b-versatile",
+        "system_fingerprint": "fp_groq_xyz",
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "<assistant_reply>"},
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "queue_time": 0.012,
+          "prompt_tokens": 14,
+          "prompt_time": 0.0034,
+          "completion_tokens": 8,
+          "completion_time": 0.041,
+          "total_tokens": 22,
+          "total_time": 0.0444
+        },
+        "x_groq": {"id": "req_AbCdEf"}
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].logprobs": "UNKNOWN",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.queue_time": "timing_value",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.prompt_time": "timing_value",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.completion_time": "timing_value",
+        "usage.total_tokens": "total_tokens",
+        "usage.total_time": "timing_value",
+        "x_groq.id": "UNKNOWN"
+      },
+      "notes": "Groq: OpenAI-compatible plus 4 timing_value fields under usage (queue/prompt/completion/total time, all seconds-as-float). The top-level `id` is the canonical response_id; `x_groq.id` is Groq-internal request metadata — labelled UNKNOWN to keep a single canonical response_id per response (same conservatism principle applied to Anthropic thinking-block `signature`)."
+    }
+  ]
+}

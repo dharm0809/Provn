@@ -1,0 +1,47 @@
+You are generating training data for a model that classifies fields in
+LLM provider JSON responses into a fixed canonical 20-label schema.
+
+Below is one example response from {provider}/{endpoint} and its
+labelling. Produce {n_variations} plausible variations that:
+
+- Use different naming conventions (camelCase, snake_case, kebab-case,
+  PascalCase) — applied consistently within each variation
+- Reorder dict keys (semantically equivalent under JSON)
+- Add 1-3 nuisance fields per variation with realistic-sounding but
+  irrelevant names (e.g. _internal_uuid, request_index, debug_info,
+  x-request-id, audit_trail_id, trace_id). These get the UNKNOWN label.
+- Vary value formats: regenerate IDs, change numeric magnitudes within
+  plausible ranges, vary string lengths
+- Cover edge cases when relevant: empty content, null finish_reason,
+  error states, multi-choice (n>1), partial streaming chunks
+
+For EACH variation, output a JSON object with EXACTLY these keys:
+  raw: the JSON dict
+  expected_labels: flat dict {{dotted_path: canonical_label}}
+
+Path syntax: dot-separated keys with bracket array indices.
+  - choices[0].message.content
+  - usage.prompt_tokens
+  - candidates[0].safetyRatings[1].category
+
+The 20 canonical labels (use ONLY these — refuse to invent new ones):
+
+{label_descriptions}
+
+CRITICAL RULES:
+- Maintain the SAME canonical labels for equivalent fields, just with
+  renamed keys. If `prompt_tokens` becomes `promptTokens`, the label
+  is still `prompt_tokens`.
+- Every leaf path in `raw` MUST appear as a key in `expected_labels`.
+- Empty arrays/dicts ARE leaves with their literal empty value.
+- Do NOT echo the path as the label — labels come from the canonical
+  set, not from the field name.
+
+Output format: a JSON array of {n_variations} objects, no surrounding
+prose. Each object MUST have exactly two keys (`raw`, `expected_labels`).
+
+Source example:
+  raw: {seed_raw_json}
+  expected_labels: {seed_labels_json}
+
+Begin.

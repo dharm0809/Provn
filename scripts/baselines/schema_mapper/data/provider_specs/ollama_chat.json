@@ -1,0 +1,104 @@
+{
+  "provider": "ollama",
+  "endpoint": "chat",
+  "doc_url": "https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion",
+  "captured_at": "2026-04-27T17:10:00Z",
+  "captured_from": "Public Ollama API docs (/api/chat) — synthetic anonymised examples mirroring documented shape; WAL sampling deferred (see Phase 2 checkpoint notes).",
+  "examples": [
+    {
+      "raw": {
+        "model": "llama3.1:8b",
+        "created_at": "2026-04-27T15:00:00.123456789Z",
+        "message": {
+          "role": "assistant",
+          "content": "<assistant_reply>"
+        },
+        "done_reason": "stop",
+        "done": true,
+        "total_duration": 1234567890,
+        "load_duration": 12345678,
+        "prompt_eval_count": 10,
+        "prompt_eval_duration": 234567890,
+        "eval_count": 5,
+        "eval_duration": 987654321
+      },
+      "expected_labels": {
+        "model": "model",
+        "created_at": "response_timestamp",
+        "message.role": "UNKNOWN",
+        "message.content": "content",
+        "done_reason": "finish_reason",
+        "done": "UNKNOWN",
+        "total_duration": "timing_value",
+        "load_duration": "timing_value",
+        "prompt_eval_count": "prompt_tokens",
+        "prompt_eval_duration": "timing_value",
+        "eval_count": "completion_tokens",
+        "eval_duration": "timing_value"
+      },
+      "notes": "Plain non-streaming Ollama /api/chat response. Ollama returns FOUR distinct timing_value fields (total/load/prompt_eval/eval durations, all nanoseconds). Ollama does NOT return cached_tokens or total_tokens; downstream code computes total. `done` boolean is a streaming-completion flag, not a finish reason — `done_reason` is the canonical finish_reason. `created_at` is wall-clock response time → response_timestamp (ISO-8601 string variant, distinct from timing_value durations)."
+    },
+    {
+      "raw": {
+        "model": "llama3.1:8b",
+        "created_at": "2026-04-27T15:00:00.111111111Z",
+        "message": {
+          "role": "assistant",
+          "content": "<delta>"
+        },
+        "done": false
+      },
+      "expected_labels": {
+        "model": "model",
+        "created_at": "response_timestamp",
+        "message.role": "UNKNOWN",
+        "message.content": "content",
+        "done": "UNKNOWN"
+      },
+      "notes": "Streaming chunk shape (intermediate, done=false). No usage / timing fields until the final chunk. message.content is the incremental token text — content."
+    },
+    {
+      "raw": {
+        "model": "qwen3:1.7b",
+        "created_at": "2026-04-27T15:00:01.000000000Z",
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "function": {
+                "name": "get_weather",
+                "arguments": {"location": "<placeholder>"}
+              }
+            }
+          ]
+        },
+        "done_reason": "stop",
+        "done": true,
+        "total_duration": 2345678901,
+        "load_duration": 23456789,
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 345678901,
+        "eval_count": 11,
+        "eval_duration": 1876543210
+      },
+      "expected_labels": {
+        "model": "model",
+        "created_at": "response_timestamp",
+        "message.role": "UNKNOWN",
+        "message.content": "content",
+        "message.tool_calls[0].function.name": "tool_call_name",
+        "message.tool_calls[0].function.arguments.location": "tool_call_arguments",
+        "done_reason": "finish_reason",
+        "done": "UNKNOWN",
+        "total_duration": "timing_value",
+        "load_duration": "timing_value",
+        "prompt_eval_count": "prompt_tokens",
+        "prompt_eval_duration": "timing_value",
+        "eval_count": "completion_tokens",
+        "eval_duration": "timing_value"
+      },
+      "notes": "Tool-calls response. Ollama tool_calls do NOT carry id or type — only function.name + function.arguments. `arguments` is a structured dict (not a JSON string like OpenAI). The flattener will descend into the dict; each leaf under `arguments.*` is labelled tool_call_arguments. This is a documented divergence from OpenAI — flag for the architect: do we want a single `tool_call_arguments` label on the parent or per-leaf? Current choice: per-leaf, since the encoder needs a label per FlatField."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "provider": "fireworks",
+  "endpoint": "chat.completions",
+  "doc_url": "https://docs.fireworks.ai/api-reference/post-chatcompletions",
+  "captured_at": "2026-04-27T17:26:00Z",
+  "captured_from": "Public Fireworks AI API docs (OpenAI-compatible chat.completions).",
+  "examples": [
+    {
+      "raw": {
+        "id": "f2a3b4c5d6e7f8a9",
+        "object": "chat.completion",
+        "created": 1714234100,
+        "model": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "<assistant_reply>"},
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 6, "total_tokens": 17}
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens"
+      },
+      "notes": "Fireworks AI: clean OpenAI-compatible chat.completions shape. Model identifiers are namespaced paths (accounts/<org>/models/<id>) — the whole path is the model id."
+    }
+  ]
+}

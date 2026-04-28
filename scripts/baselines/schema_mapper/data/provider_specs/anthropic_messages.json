@@ -1,0 +1,108 @@
+{
+  "provider": "anthropic",
+  "endpoint": "messages",
+  "doc_url": "https://docs.anthropic.com/en/api/messages",
+  "captured_at": "2026-04-27T17:05:00Z",
+  "captured_from": "Public Anthropic API docs (messages object) — synthetic anonymised examples mirroring documented shape; WAL sampling deferred (see Phase 2 checkpoint notes).",
+  "examples": [
+    {
+      "raw": {
+        "id": "msg_01AbCdEfGhIjKlMnOpQrSt",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-7",
+        "content": [
+          {
+            "type": "text",
+            "text": "<assistant_reply>"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 14,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 9
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "type": "UNKNOWN",
+        "role": "UNKNOWN",
+        "model": "model",
+        "content[0].type": "UNKNOWN",
+        "content[0].text": "content",
+        "stop_reason": "finish_reason",
+        "stop_sequence": "UNKNOWN",
+        "usage.input_tokens": "prompt_tokens",
+        "usage.cache_creation_input_tokens": "cache_creation_tokens",
+        "usage.cache_read_input_tokens": "cached_tokens",
+        "usage.output_tokens": "completion_tokens"
+      },
+      "notes": "Plain non-streaming Anthropic messages response. Anthropic uses input_tokens/output_tokens (not prompt_tokens/completion_tokens) — those map to our canonical prompt_tokens/completion_tokens. cache_read_input_tokens → cached_tokens (read-from-cache); cache_creation_input_tokens → cache_creation_tokens (write-to-cache). Anthropic does NOT return total_tokens; downstream code computes it. stop_sequence is the matched string when stop_reason='stop_sequence', not the reason itself — UNKNOWN."
+    },
+    {
+      "raw": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "<delta>"
+        }
+      },
+      "expected_labels": {
+        "type": "UNKNOWN",
+        "index": "UNKNOWN",
+        "delta.type": "UNKNOWN",
+        "delta.text": "content"
+      },
+      "notes": "Streaming chunk shape — `content_block_delta` event payload. The text-delta is incremental `content` tokens. message-level metadata (id/model/usage) arrives in separate `message_start` / `message_delta` / `message_stop` events; this fixture captures the most common per-token chunk."
+    },
+    {
+      "raw": {
+        "id": "msg_02ZyXwVuTsRqPoNmLkJiHg",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-7",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "<reasoning_trace>",
+            "signature": "<opaque_signature>"
+          },
+          {
+            "type": "text",
+            "text": "<final_answer>"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 38,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 64
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "type": "UNKNOWN",
+        "role": "UNKNOWN",
+        "model": "model",
+        "content[0].type": "UNKNOWN",
+        "content[0].thinking": "thinking_content",
+        "content[0].signature": "UNKNOWN",
+        "content[1].type": "UNKNOWN",
+        "content[1].text": "content",
+        "stop_reason": "finish_reason",
+        "stop_sequence": "UNKNOWN",
+        "usage.input_tokens": "prompt_tokens",
+        "usage.cache_creation_input_tokens": "cache_creation_tokens",
+        "usage.cache_read_input_tokens": "cached_tokens",
+        "usage.output_tokens": "completion_tokens"
+      },
+      "notes": "Extended-thinking response. content[0] is the thinking block (label=thinking_content); content[1] is the final assistant text (label=content). The CRF EXCLUSIVE_GROUPS['primary_content']=('content','thinking_content') prior allows BOTH to coexist across content[*] siblings even though they're from the same exclusive group — exclusion is per-sibling-slot, and these are at different array indices. `signature` is the per-thinking-block opaque token Anthropic uses for verification, not a model fingerprint — UNKNOWN."
+    }
+  ]
+}

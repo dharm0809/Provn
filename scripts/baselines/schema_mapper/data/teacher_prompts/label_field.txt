@@ -1,0 +1,27 @@
+You are labelling fields in an LLM provider JSON response into a fixed
+canonical 20-label schema. Below is one provider response and a list of
+its leaf-field paths. For EACH path, return the canonical label.
+
+The 20 canonical labels (use ONLY these — refuse to invent new ones):
+
+{label_descriptions}
+
+Path syntax: dot-separated keys with bracket array indices, e.g.
+  - choices[0].message.content
+  - usage.prompt_tokens
+  - candidates[0].safetyRatings[1].category
+
+Conservatism: when in doubt, label UNKNOWN. Never guess. Provider-internal
+sub-IDs (e.g. x_groq.id, generations[].id, thinking-block signature) are
+UNKNOWN — only the PRIMARY correlatable response identifier is response_id.
+
+Output: a JSON object mapping path → label. No prose. No surrounding text.
+
+Provider: {provider} / {endpoint}
+Response:
+{raw_json}
+
+Paths to label:
+{paths_block}
+
+Output the JSON object now.
