@@ -258,6 +258,8 @@ def stage1_finetune(
     lr_head: float = 1e-3,
     lambda_crf: float = 0.3,
     patience: int = 2,
+    checkpoint_path: pathlib.Path | None = None,
+    feature_dim: int | None = None,
 ) -> list[dict]:
     opt = AdamW(
         [
@@ -271,11 +273,14 @@ def stage1_finetune(
     log = []
     best_f1 = -1.0
     no_improve = 0
+    print(f"[stage 1] starting fine-tune: {epochs} epochs, {len(train_loader)} batches/epoch", file=sys.stderr)
     for epoch in range(epochs):
         model.train(True)
         ce_total = 0.0
         n = 0
-        for batch in train_loader:
+        for bi, batch in enumerate(train_loader):
+            if bi == 0:
+                print(f"[stage 1 epoch {epoch}] first batch loaded", file=sys.stderr)
             ids = batch["input_ids"].to(device)
             msk = batch["attention_mask"].to(device)
             feat = batch["features"].to(device)
@@ -294,6 +299,8 @@ def stage1_finetune(
             opt.step()
             ce_total += ce.item()
             n += 1
+            if bi > 0 and bi % 100 == 0:
+                print(f"[stage 1 epoch {epoch}] batch {bi}/{len(train_loader)} ce={ce.item():.4f}", file=sys.stderr)
         train_ce = ce_total / max(n, 1)
         model.train(False)
         val_macro_f1 = _evaluate_macro_f1(model, val_loader, device)
@@ -303,6 +310,16 @@ def stage1_finetune(
             best_f1 = val_macro_f1
             no_improve = 0
             log[-1]["best"] = True
+            # Persist immediately so a later-epoch crash can't destroy
+            # the best weights we've found so far.
+            if checkpoint_path is not None:
+                torch.save(
+                    {"model_state": model.state_dict(),
+                     "feature_dim": feature_dim, "best_val_macro_f1": best_f1,
+                     "epoch": epoch},
+                    checkpoint_path,
+                )
+                print(f"[stage 1 epoch {epoch}] saved best to {checkpoint_path.name}", file=sys.stderr)
         else:
             no_improve += 1
             if no_improve >= patience:
@@ -352,6 +369,8 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="mps", choices=["cpu", "mps", "cuda"])
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--max-train-samples", type=int, default=50_000,
+                    help="Cap on training-set size (after split); subsamples when corpus exceeds. Prevents OOM on a Mac with 16-32GB unified memory.")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -390,6 +409,14 @@ def main() -> None:
     n_val = max(1, len(train_samples) // 10)
     val_samples = train_samples[:n_val]
     train_samples = train_samples[n_val:]
+    # Subsample train if it exceeds the cap (default 50K). Keep val
+    # proportional but capped at 5K to keep eval fast.
+    if len(train_samples) > args.max_train_samples:
+        rng.shuffle(train_samples)
+        print(f"[split] subsampling train {len(train_samples)} -> {args.max_train_samples}", file=sys.stderr)
+        train_samples = train_samples[: args.max_train_samples]
+    if len(val_samples) > 5000:
+        val_samples = val_samples[:5000]
     print(f"[split] train={len(train_samples)} val={len(val_samples)} test={len(test_samples)}", file=sys.stderr)
     (args.out / "data_split.json").write_text(json.dumps({
         "n_train": len(train_samples), "n_val": len(val_samples), "n_test": len(test_samples),
@@ -399,15 +426,22 @@ def main() -> None:
     train_loader = DataLoader(FieldDataset(train_samples, tokenizer), batch_size=args.batch_size, shuffle=True, collate_fn=_collate_classify)
     val_loader = DataLoader(FieldDataset(val_samples, tokenizer), batch_size=args.batch_size, shuffle=False, collate_fn=_collate_classify)
 
-    stage1_log = stage1_finetune(model, train_loader, val_loader, device, epochs=args.epochs)
+    ckpt_path = args.out / "best.pt"
+    stage1_log = stage1_finetune(model, train_loader, val_loader, device,
+                                  epochs=args.epochs,
+                                  checkpoint_path=ckpt_path,
+                                  feature_dim=FEATURE_DIM_V2)
     elapsed = time.time() - t0
 
     log_path = args.out / "training_log.jsonl"
     with log_path.open("w") as f:
         for row in stage0_log + stage1_log:
             f.write(json.dumps(row) + "\n")
-    ckpt_path = args.out / "best.pt"
-    torch.save({"model_state": model.state_dict(), "feature_dim": FEATURE_DIM_V2}, ckpt_path)
+    # ckpt_path was already populated by per-epoch best-save; if none of
+    # the epochs produced a best (unlikely), save the current state as
+    # a fallback so callers always have something to load.
+    if not ckpt_path.exists():
+        torch.save({"model_state": model.state_dict(), "feature_dim": FEATURE_DIM_V2}, ckpt_path)
     (args.out / "compute_cost.json").write_text(json.dumps({"wall_clock_s": elapsed, "device": str(device)}, indent=2))
     print(f"[done] checkpoint at {ckpt_path}; elapsed {elapsed:.1f}s", file=sys.stderr)
 
