@@ -177,6 +177,16 @@ def _make_registry(tmp_path: Path, *, with_candidate: bool = True) -> ModelRegis
     return r
 
 
+def _passing_sanity(model_name, candidate_version, registry, runner):
+    """Sanity-stub that always passes — sidesteps the ONNX adapter so
+    these tests stay focused on the gate's promotion side effects.
+
+    The behavior of the real sanity gate is tested separately in
+    `tests/unit/intelligence/test_sanity_gate.py`.
+    """
+    return None, None
+
+
 @pytest.mark.anyio
 async def test_process_auto_promotes_when_gate_passes_and_model_allowlisted(tmp_path):
     reg = _make_registry(tmp_path)
@@ -187,6 +197,7 @@ async def test_process_auto_promotes_when_gate_passes_and_model_allowlisted(tmp_
         metrics=_metrics(),
         settings=settings, registry=reg, walacor_writer=writer,
         dataset_hash="d1", approver="auto",
+        sanity_check=_passing_sanity,
     )
 
     assert result.promoted is True
@@ -252,6 +263,7 @@ async def test_process_works_without_walacor_writer(tmp_path):
     result = await process_candidate(
         metrics=_metrics(),
         settings=settings, registry=reg, walacor_writer=None,
+        sanity_check=_passing_sanity,
     )
     assert result.promoted is True
     assert (tmp_path / "production" / "intent.onnx").exists()
@@ -269,6 +281,7 @@ async def test_process_falls_back_to_shadow_complete_on_promote_failure(tmp_path
     result = await process_candidate(
         metrics=_metrics(),
         settings=settings, registry=reg, walacor_writer=writer,
+        sanity_check=_passing_sanity,
     )
 
     assert result.promoted is False
@@ -285,6 +298,7 @@ async def test_process_carries_approver_into_promotion_event(tmp_path):
         metrics=_metrics(),
         settings=settings, registry=reg, walacor_writer=writer,
         approver="dr.stakeholder@walacor.com",
+        sanity_check=_passing_sanity,
     )
 
     assert result.promotion_event.payload["approver"] == "dr.stakeholder@walacor.com"

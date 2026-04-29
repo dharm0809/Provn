@@ -1,5 +1,7 @@
 # OpenWebUI Integration Implementation Plan
 
+> **Status:** Historical planning artifact. "Merkle-chain verified / Merkle-linked" copy in this file describes the pre-PR-#17 design; the shipped session chain is an ID-pointer chain (record_id + previous_record_id), backed by Walacor-issued `DH`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Make Walacor Gateway a drop-in governed backend for any OpenWebUI deployment — one env var change, zero disruption to the chat experience, full provable audit trail.

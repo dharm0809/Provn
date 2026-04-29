@@ -412,7 +412,7 @@ Key terms used throughout this document, in plain language.
 | **Token** | The unit AI providers use to measure and charge for usage. A typical sentence is roughly fifteen to twenty-five tokens. |
 | **Streaming** | When an AI model delivers its answer word by word as it is generated, rather than waiting for the full response. This is the typing effect familiar from consumer chat tools. |
 | **Cryptographic Fingerprint (Hash)** | A digital signature of data. Any change to the data, no matter how small, produces a completely different fingerprint, making tampering immediately detectable. |
-| **SHA3-512** | An international standard, approved by the US National Institute of Standards and Technology, for creating cryptographic fingerprints. |
+| **SHA3-512** | An international standard, approved by the US National Institute of Standards and Technology, for creating cryptographic fingerprints. The Walacor backend uses this when it issues the `DH` (data hash) on ingest. |
 | **Tamper-Evident** | Not the same as tamper-proof. It means that if someone does alter the data, the alteration becomes immediately visible and provable. |
 | **Single Sign-On (SSO)** | A login system that lets employees use one corporate identity to access many applications, the same way they log into Microsoft 365 or Google Workspace. |
 | **Session** | A single conversation, made up of one or more turns between a user and an AI model. |

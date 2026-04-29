@@ -1,5 +1,7 @@
 # Performance Optimization Implementation Plan
 
+> **Status:** Historical planning artifact. The Phase 13 SHA3 Merkle chain referenced inside was superseded by an ID-pointer chain backed by Walacor-issued `DH`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Optimize the pure Python gateway for 10-100 req/s on m6a.xlarge (4 vCPU, 16GB, CPU-only Ollama).

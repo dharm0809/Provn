@@ -248,6 +248,27 @@ def _inc_request(provider: str, model: str, outcome: str) -> None:
         logger.debug("Metric increment failed (requests_total)", exc_info=True)
 
 
+def _resolve_tenant(request: Request | None) -> str:
+    """Resolve the tenant_id used to scope per-request caches.
+
+    Prefers ``request.state.caller_identity.tenant_id`` (set by JWT or by
+    ``x-tenant-id`` headers); falls back to the gateway-level tenant from
+    settings, and finally to ``"default"`` so caches always have a non-empty
+    bucket key. Used by semantic_cache, attestation_cache, response analyzer
+    cache, and lineage analytics — anything keyed on the *caller's* tenant
+    rather than the gateway's billing tenant.
+    """
+    if request is not None:
+        ident = getattr(request.state, "caller_identity", None)
+        tid = getattr(ident, "tenant_id", None) if ident is not None else None
+        if tid:
+            return tid
+    try:
+        return get_settings().gateway_tenant_id or "default"
+    except Exception:
+        return "default"
+
+
 def _add_governance_headers(
     response, execution_id=None, attestation_id=None, chain_seq=None,
     policy_result=None, content_analysis=None, budget_remaining=None,
@@ -623,13 +644,15 @@ async def _store_execution(record, request: Request, ctx) -> None:
 
 # ── Post-stream background tasks ─────────────────────────────────────────────
 
-async def _eval_post_stream_policy(ctx, settings, model_response) -> tuple[int, str, list]:
+async def _eval_post_stream_policy(
+    ctx, settings, model_response, request: Request | None = None,
+) -> tuple[int, str, list]:
     """Run response policy after stream. Returns (version, result, decisions)."""
     if not (ctx.content_analyzers and ctx.policy_cache and settings.response_policy_enabled):
         return 0, "skipped", []
     _, version, result, decisions, _ = await evaluate_post_inference(
         ctx.policy_cache, model_response, ctx.content_analyzers,
-        tenant_id=settings.gateway_tenant_id or "",
+        tenant_id=_resolve_tenant(request),
     )
     if result == "blocked":
         result = "flagged_post_stream"
@@ -705,7 +728,7 @@ async def _after_stream_record(
             estimated=budget_estimated,
         )
 
-        rp_version, rp_result, rp_decisions = await _eval_post_stream_policy(ctx, settings, model_response)
+        rp_version, rp_result, rp_decisions = await _eval_post_stream_policy(ctx, settings, model_response, request)
 
         # Phase 14: capture passive tool interactions from streamed response.
         # IMPORTANT: capture BEFORE normalization (below) which may replace model_response
@@ -831,12 +854,20 @@ async def _attestation_check(
 ) -> tuple[str, dict, bool, str | None, Response | None]:
     """Step 1. Returns (attestation_id, context, would_block, reason, error_resp)."""
     att_id = _AUDIT_ONLY_ATTESTATION_ID
+    # Cache lookup uses the *caller's* tenant so a tenant-A attestation cannot
+    # be served for a tenant-B request. The control-store record (auto-attest
+    # write below) still uses ``settings.gateway_tenant_id`` since attestation
+    # ownership is gateway-scoped, not caller-scoped.
+    cache_tenant = _resolve_tenant(request)
     att_ctx: dict = {"model_id": call.model_id, "provider": adapter.get_provider_name(), "status": "active", "verification_level": "audit_only", "tenant_id": settings.gateway_tenant_id}
 
     async def try_refresh() -> bool:
         return await ctx.sync_client.sync_attestations(provider=adapter.get_provider_name()) if ctx.sync_client else False
 
-    attestation, err = await resolve_attestation(ctx.attestation_cache, adapter.get_provider_name(), call.model_id, try_refresh=try_refresh)
+    attestation, err = await resolve_attestation(
+        ctx.attestation_cache, adapter.get_provider_name(), call.model_id,
+        tenant_id=cache_tenant, try_refresh=try_refresh,
+    )
     if err is not None:
         # Auto-attest when no remote sync client is configured.
         # With embedded control plane: auto-attest only if the model was NEVER explicitly revoked.
@@ -866,7 +897,9 @@ async def _attestation_check(
                 status="active",
                 fetched_at=datetime.now(timezone.utc),
                 ttl_seconds=settings.attestation_cache_ttl,
-                tenant_id=settings.gateway_tenant_id,
+                # Cache key uses the caller's tenant so a tenant-A
+                # auto-attestation never satisfies a tenant-B lookup.
+                tenant_id=cache_tenant,
                 verification_level="self_attested",
             )
             ctx.attestation_cache.set(auto_att)
@@ -1337,7 +1370,7 @@ async def _run_response_policy(
 
     _, rp_version, rp_result, decisions, resp_err = await evaluate_post_inference(
         ctx.policy_cache, model_response, ctx.content_analyzers,
-        tenant_id=settings.gateway_tenant_id or "",
+        tenant_id=_resolve_tenant(request),
     )
     try:
         response_policy_total.labels(result=rp_result).inc()
@@ -2106,10 +2139,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # Cache hit returns the stored response immediately — no LLM call, no audit
     # record (correct: there was no actual inference, so nothing to audit).
     if ctx.semantic_cache is not None and not call.is_streaming and call.prompt_text:
+        _cache_tenant = _resolve_tenant(request)
         _cached = ctx.semantic_cache.get(
             call.model_id,
             call.prompt_text,
-            tenant_id=settings.gateway_tenant_id or "default",
+            tenant_id=_cache_tenant,
         )
         if _cached is not None:
             try:
@@ -2251,7 +2285,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         )
         (http_response, model_response, _used_fallback), _input_analysis = await asyncio.gather(
             _forward_with_resilience(adapter, call, request),
-            _run_input_analysis_async(call, ctx, tenant_id=settings.gateway_tenant_id or ""),
+            _run_input_analysis_async(call, ctx, tenant_id=_resolve_tenant(request)),
         )
         if _input_analysis:
             logger.debug(
@@ -2557,7 +2591,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 bytes(http_response.body),
                 status_code=http_response.status_code,
                 content_type=http_response.headers.get("content-type", "application/json"),
-                tenant_id=settings.gateway_tenant_id or "default",
+                tenant_id=_resolve_tenant(request),
             )
             logger.debug("Semantic cache STORE: model=%s size=%d", call.model_id, ctx.semantic_cache.size)
         except Exception:

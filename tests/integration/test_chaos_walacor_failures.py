@@ -74,7 +74,7 @@ class TestWALConcurrentWrites:
 
             async def write_one():
                 rec = _make_record()
-                wal.write_and_fsync(rec)
+                wal.write_durable(rec)
                 return rec["execution_id"]
 
             async def run():
@@ -98,7 +98,7 @@ class TestWALConcurrentWrites:
 
             n = 20
             for _ in range(n):
-                wal.write_and_fsync(_make_record())
+                wal.write_durable(_make_record())
 
             assert _count_wal_records(db_path) == n
             wal.close()
@@ -112,7 +112,7 @@ class TestWALDeliveryMarking:
 
             rec = _make_record()
             eid = rec["execution_id"]
-            wal.write_and_fsync(rec)
+            wal.write_durable(rec)
 
             undelivered = wal.get_undelivered(limit=10)
             assert any(r[0] == eid for r in undelivered)
@@ -138,7 +138,7 @@ class TestWALDeliveryMarking:
             for _ in range(5):
                 rec = _make_record()
                 ids.append(rec["execution_id"])
-                wal.write_and_fsync(rec)
+                wal.write_durable(rec)
 
             undelivered = wal.get_undelivered(limit=10)
             returned_ids = {r[0] for r in undelivered}
@@ -154,8 +154,8 @@ class TestWALDeliveryMarking:
 
             rec1 = _make_record()
             rec2 = _make_record()
-            wal.write_and_fsync(rec1)
-            wal.write_and_fsync(rec2)
+            wal.write_durable(rec1)
+            wal.write_durable(rec2)
 
             wal.mark_delivered(rec1["execution_id"])
 
@@ -175,7 +175,7 @@ class TestWALAppendOnly:
             wal = WALWriter(db_path)
 
             first = _make_record()
-            wal.write_and_fsync(first)
+            wal.write_durable(first)
 
             conn = sqlite3.connect(db_path)
             original_json = conn.execute(
@@ -186,7 +186,7 @@ class TestWALAppendOnly:
 
             # Write many more records
             for _ in range(10):
-                wal.write_and_fsync(_make_record())
+                wal.write_durable(_make_record())
 
             conn = sqlite3.connect(db_path)
             after_json = conn.execute(
@@ -206,7 +206,7 @@ class TestWALAppendOnly:
 
             rec = _make_record()
             eid = rec["execution_id"]
-            wal.write_and_fsync(rec)
+            wal.write_durable(rec)
 
             conn = sqlite3.connect(db_path)
             before = conn.execute(
@@ -241,7 +241,7 @@ class TestWALRecovery:
             for _ in range(20):
                 rec = _make_record()
                 written_ids.append(rec["execution_id"])
-                wal.write_and_fsync(rec)
+                wal.write_durable(rec)
             wal.close()
 
             # Reopen and verify
@@ -264,7 +264,7 @@ class TestWALRecovery:
             wal = WALWriter(db_path)
             recs = [_make_record() for _ in range(5)]
             for rec in recs:
-                wal.write_and_fsync(rec)
+                wal.write_durable(rec)
 
             delivered_id = recs[0]["execution_id"]
             wal.mark_delivered(delivered_id)

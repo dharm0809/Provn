@@ -1,5 +1,7 @@
 # Deep Analysis Implementation Plan — All 27 Recommendations
 
+> **Status:** Historical planning artifact. Several proposed features (hedged requests, Merkle tree checkpoints, transparency log publishing) were considered and ultimately not adopted; the SHA3 Merkle session-chain approach was replaced by an ID-pointer chain backed by Walacor-issued `DH`. See current docs (HOW-IT-WORKS.md, GATEWAY-REFERENCE.md) for the architecture as shipped.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Implement every actionable recommendation from Section 25 of GATEWAY-REFERENCE.md — 3 critical bug fixes, 10 new features, 7 novel ideas, 4 upgrades, 2 config changes, and 1 documentation addition.

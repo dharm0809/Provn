@@ -71,6 +71,12 @@ class EventType(str, Enum):
     # Phase 25 hardening — auto-rollback fires this when the
     # post-promotion validator restores an archived version.
     MODEL_ROLLED_BACK = "model_rolled_back"
+    # Sanity-gate block — emitted when a candidate clears the
+    # ShadowMetrics gate AND is on the auto-promote allowlist but
+    # fails the offline per-class accuracy floor (or its sanity
+    # adapter raised). The candidate stays in candidates/ for human
+    # review; production is untouched.
+    MODEL_PROMOTION_BLOCKED = "model_promotion_blocked"
 
 
 @dataclass
@@ -186,3 +192,39 @@ def build_model_rejected(
         "stage": stage,
     }
     return LifecycleEvent(event_type=EventType.MODEL_REJECTED, payload=payload)
+
+
+def build_promotion_blocked(
+    *,
+    model_name: str,
+    candidate_version: str,
+    failing_classes: list[str],
+    per_class_accuracy: dict[str, float] | None = None,
+    overall_accuracy: float | None = None,
+    total_examples: int | None = None,
+    error_count: int | None = None,
+    detail: str | None = None,
+) -> LifecycleEvent:
+    """Build a lifecycle event for a sanity-gate block.
+
+    `detail` carries a free-text reason when the block came from the
+    SanityRunner itself raising (rather than a labeled-fixture failure)
+    so the dashboard can render a friendlier message than the raw class
+    list.
+    """
+    payload: dict[str, Any] = {
+        "model_name": model_name,
+        "candidate_version": candidate_version,
+        "failing_classes": list(failing_classes),
+    }
+    if per_class_accuracy is not None:
+        payload["per_class_accuracy"] = dict(per_class_accuracy)
+    if overall_accuracy is not None:
+        payload["overall_accuracy"] = overall_accuracy
+    if total_examples is not None:
+        payload["total_examples"] = total_examples
+    if error_count is not None:
+        payload["error_count"] = error_count
+    if detail is not None:
+        payload["detail"] = detail
+    return LifecycleEvent(event_type=EventType.MODEL_PROMOTION_BLOCKED, payload=payload)

@@ -96,6 +96,7 @@ def validate_jwt(
     email_claim: str = "email",
     roles_claim: str = "roles",
     team_claim: str = "",
+    tenant_claim: str = "tenant_id",
 ) -> CallerIdentity | None:
     """Validate a JWT and extract caller identity from its claims.
 
@@ -209,10 +210,31 @@ def validate_jwt(
     if team == "":
         team = None
 
+    # Tenant: try the configured claim first, then standard fallbacks.
+    # ``None`` if no claim has a value — downstream falls back to
+    # ``settings.gateway_tenant_id`` rather than CallerIdentity inventing
+    # a synthetic tenant.
+    tenant_id: str | None = None
+    candidates = [tenant_claim] if tenant_claim else []
+    for fallback in ("tenant_id", "tenant", "org", "org_id"):
+        if fallback not in candidates:
+            candidates.append(fallback)
+    for claim_name in candidates:
+        if not claim_name:
+            continue
+        raw = claims.get(claim_name)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            tenant_id = value
+            break
+
     return CallerIdentity(
         user_id=user_id,
         email=email,
         roles=roles,
         team=team,
+        tenant_id=tenant_id,
         source="jwt",
     )

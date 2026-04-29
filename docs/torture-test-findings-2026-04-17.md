@@ -1,5 +1,7 @@
 # Torture-Test Error Log — Iteration Report
 
+> **Status note:** Historical findings. Observation #2 references "Merkle chain linkage" — that was the design at the time. The chain is now an ID-pointer chain (record_id + previous_record_id); the same concurrency contract still applies (sticky per-session writes), but the linkage is by ID, not by hash.
+
 **Test:** `tests/integration/test_gateway_torture.py::test_gateway_torture_all_invariants`
 **Date:** 2026-04-17
 **Final result:** ✅ 1 passed in 5.41s

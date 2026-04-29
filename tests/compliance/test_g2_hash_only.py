@@ -61,7 +61,7 @@ def test_g2_durability_wal_persists_across_restart():
             "timestamp": "2026-02-16T12:00:00Z",
         }
         w1 = WALWriter(db_path)
-        w1.write_and_fsync(record)
+        w1.write_durable(record)
         w1.close()
 
         w2 = WALWriter(db_path)
@@ -90,7 +90,7 @@ async def test_g2_idempotent_409_marks_delivered():
             "gateway_id": "gw-1",
             "timestamp": "2026-02-16T12:00:00Z",
         }
-        wal.write_and_fsync(record)
+        wal.write_durable(record)
         assert wal.pending_count() == 1
 
         mock_resp = AsyncMock()

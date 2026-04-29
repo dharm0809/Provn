@@ -469,7 +469,7 @@ flowchart TD
     BUILD_REC --> CHAIN[await _apply_session_chain\ncompute + attach seq/hash]
     CHAIN --> STORE{walacor_client?}
     STORE -- Yes --> WAL_WRITE[walacor_client\n.write_execution]
-    STORE -- No --> LOCAL_WRITE[wal_writer\n.write_and_fsync]
+    STORE -- No --> LOCAL_WRITE[wal_writer\n.write_durable]
     WAL_WRITE --> TOOL_EVENTS
     LOCAL_WRITE --> TOOL_EVENTS
 
@@ -596,7 +596,7 @@ flowchart TD
 
     STORE{walacor_client?}
     STORE -- Yes --> WALACOR_WRITE[await walacor_client\n.write_execution\nPOST /envelopes/submit\nJWT bearer auth]
-    STORE -- No --> WAL_WRITE[wal_writer\n.write_and_fsync\nSQLite WAL mode\nfsync per write]
+    STORE -- No --> WAL_WRITE[wal_writer\n.write_durable\nSQLite WAL mode\nsynchronous=NORMAL (durable)]
 
     WALACOR_WRITE --> SET_EXEC_ID[execution_id_var.set\nrequest.state.walacor_execution_id\nfor completeness middleware]
     WAL_WRITE --> SET_EXEC_ID

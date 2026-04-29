@@ -16,14 +16,17 @@ async def resolve_attestation(
     provider: str,
     model_id: str,
     *,
+    tenant_id: str = "",
     try_refresh: callable | None = None,
 ) -> tuple[CachedAttestation | None, JSONResponse | None]:
     """
-    Look up (provider, model_id) in attestation cache.
+    Look up (provider, model_id, tenant_id) in attestation cache.
     Returns (attestation, None) if allowed; (None, error_response) if blocked or fail-closed.
     try_refresh: optional async callable() -> bool to refresh cache; if returns False, fail-closed.
+    tenant_id: scope the cache lookup to the caller's tenant. Default "" matches the
+    untenanted bucket used when the caller has no resolved tenant_id.
     """
-    entry = attestation_cache.get(provider, model_id)
+    entry = attestation_cache.get(provider, model_id, tenant_id)
 
     if entry is None and try_refresh:
         ok = await try_refresh()
@@ -32,7 +35,7 @@ async def resolve_attestation(
                 {"error": "Attestation cache stale, control plane unreachable"},
                 status_code=503,
             )
-        entry = attestation_cache.get(provider, model_id)
+        entry = attestation_cache.get(provider, model_id, tenant_id)
 
     if entry is None:
         return None, JSONResponse(
@@ -53,7 +56,7 @@ async def resolve_attestation(
                 {"error": "Attestation cache stale, control plane unreachable"},
                 status_code=503,
             )
-        entry = attestation_cache.get(provider, model_id)
+        entry = attestation_cache.get(provider, model_id, tenant_id)
         if entry is None or entry.is_blocked:
             return None, JSONResponse(
                 {"error": "Model not attested or attestation revoked"},

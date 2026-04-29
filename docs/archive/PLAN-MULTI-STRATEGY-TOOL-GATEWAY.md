@@ -1,5 +1,7 @@
 # Multi-Strategy Tool-Aware Gateway — Implementation Plan
 
+> **Status:** Historical planning artifact. The session chain shipped as an ID-pointer chain (record_id + previous_record_id), not a SHA3 Merkle chain. Treat any Merkle-chain phrasing here as original intent.
+
 **Goal:** Capture the full model interaction — including tool calls, web searches, code execution, and MCP calls — in the audit trail, with zero client code changes beyond `base_url`.
 
 **Principle:** One gateway binary, two strategies selected by provider type. Cloud providers expose tool calls in their response payloads (parse them). Local/private models have no built-in tools (the gateway runs the tool loop itself).

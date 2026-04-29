@@ -41,8 +41,8 @@
 | Content Filtering | 60+ guardrails | 3 built-in + integrations | None | Category toggles | 6 cats + 4 levels | Unified API | Validators Hub | PII + Toxicity + Llama Guard |
 | Budget Management | Per team/user/app | Per key/user/team | None | None | None | None | None | Per tenant/user/period |
 | Policy Engine | Guardrail chains | Guardrail Garden | OPA integration | Toggles | IAM-enforced | API Gateway policy | Validator chains | Embedded rule engine |
-| Audit Trail | Logging | Logs (Enterprise) | API logs | 1M logs free | CloudWatch | Monitor + Purview | None | **SHA3-512 hash chain** |
-| **Cryptographic Integrity** | **No** | **No** | **No** | **No** | **No** | **No** | **No** | **Yes (Merkle chain)** |
+| Audit Trail | Logging | Logs (Enterprise) | API logs | 1M logs free | CloudWatch | Monitor + Purview | None | **ID-pointer chain + Walacor DH** |
+| **Cryptographic Integrity** | **No** | **No** | **No** | **No** | **No** | **No** | **No** | **Yes (Walacor backend DH)** |
 | **Model Attestation** | **No** | **No** | **No** | **No** | **No** | **No** | **No** | **Yes** |
 | Self-Hosted | OSS gateway | OSS proxy | Enterprise | No | No | Container | OSS | **Yes (single binary)** |
 | Pricing | Free-Enterprise | Free-$250/mo | $50K+/yr | Free-Enterprise | $0.15/1K units | Per-record | OSS + Pro | Self-hosted free |

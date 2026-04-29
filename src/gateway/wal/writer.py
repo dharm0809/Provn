@@ -178,7 +178,7 @@ class WALWriter:
     overhead (no asyncio.to_thread per write) and provides natural write
     batching.
 
-    Direct synchronous methods (write_and_fsync, write_attempt, write_tool_event,
+    Direct synchronous methods (write_durable, write_attempt, write_tool_event,
     get_undelivered, mark_delivered, …) still work through self._conn and are
     used by callers that run on the asyncio event-loop thread (delivery worker,
     startup self-test, health checks, batch writer).  Those callers all run on
@@ -198,7 +198,7 @@ class WALWriter:
         # Serialises every operation that touches self._conn.  Necessary
         # because self._conn is opened with check_same_thread=False and is
         # shared across threads — at minimum the BatchWriter
-        # (asyncio.to_thread → write_and_fsync) and the DeliveryWorker
+        # (asyncio.to_thread → write_durable) and the DeliveryWorker
         # (event-loop thread → get_undelivered/mark_delivered/…).  Without
         # this lock, the two callers can race on the same connection and
         # corrupt cursor state or mis-order writes.  The dedicated writer
@@ -333,7 +333,7 @@ class WALWriter:
         record_json = json.dumps(data)
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
-        # Match the sync write_and_fsync path: persist request_type so the
+        # Match the sync write_durable path: persist request_type so the
         # sessions-list query can filter without json_extract() per row.
         request_type = (
             data.get("request_type")
@@ -452,18 +452,20 @@ class WALWriter:
             _apply_schema(self._conn)
         return self._conn
 
-    def write_and_fsync(self, record: ExecutionRecord | dict[str, Any]) -> None:
-        """Append record to WAL — durable, NOT per-write fsync.
+    def write_durable(self, record: ExecutionRecord | dict[str, Any]) -> None:
+        """Append record to WAL with crash-safe durability (NOT per-write fsync).
 
-        Despite the name (kept for API stability), this method does NOT call
-        fsync per write.  Durability comes from SQLite WAL journal mode plus
-        ``PRAGMA synchronous=NORMAL``: crash-safe (atomic; never database
+        Durability comes from SQLite WAL journal mode plus
+        ``PRAGMA synchronous=NORMAL``: atomic and crash-safe (never database
         corruption) but the most recent in-flight transaction may be lost on
-        power failure.  The trade-off is intentional — under sustained load
-        a per-write fsync caps throughput at ~hundreds of writes/sec on
-        consumer SSDs.  Callers that need true fsync semantics should issue
-        ``PRAGMA synchronous=FULL`` explicitly or call ``conn.commit()``
-        followed by ``os.fsync()``.
+        power failure.  This is the deliberate trade-off — a per-write fsync
+        caps throughput at a few hundred writes/sec on consumer SSDs (5–15ms
+        per batch under sustained load), which our threat model does not
+        require.  See docs/ARCHITECTURE-DECISIONS.md (ADR-001).
+
+        If true fsync-per-write is required, set
+        ``WALACOR_WAL_FSYNC_FULL=true`` (TODO — not yet wired) to upgrade
+        the PRAGMA to ``synchronous=FULL``.
 
         Accepts ExecutionRecord or dict.
         """

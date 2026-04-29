@@ -3,7 +3,7 @@
 The gateway is designed to support ATO packages with test-based evidence for:
 
 - **G1 (Attestation gate):** Only attested, non-revoked models are forwarded; fail-closed when attestation cannot be verified.
-- **G2 (Cryptographic recording):** Every execution is recorded with SHA3-512 hashes; only hashes are sent to the control plane; WAL ensures no record loss across crashes.
+- **G2 (Cryptographic recording):** Every execution is dual-written to the local WAL and the Walacor backend, which issues a tamper-evident `DH` (data hash) on ingest; WAL ensures no record loss across crashes.
 - **G3 (Policy enforcement):** Pre-inference policy evaluation; blocked requests never reach the provider; policy version recorded; fail-closed when policy cache is stale.
 
 ## Running the compliance test suite

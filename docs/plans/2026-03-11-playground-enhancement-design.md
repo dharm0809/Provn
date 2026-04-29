@@ -30,7 +30,7 @@ The Playground is a governance-aware prompt testing tool embedded in the Lineage
 ### 3. Session & User Headers
 
 - Generate `sessionId` (UUID) on mount and on "Clear Conversation"
-- Send `X-Session-ID` on every request — all turns share one Merkle chain
+- Send `X-Session-ID` on every request — all turns share one ID-pointer chain (record_id + previous_record_id)
 - Reuse Control tab's `sessionStorage.cp_api_key` — send as `X-API-Key`
 - Add `X-User-Id` text field in Playground settings (default: `playground-user`)
 

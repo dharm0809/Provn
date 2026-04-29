@@ -108,9 +108,9 @@ Here's the actual flow. Nothing is skipped, nothing is optional.
                       ▼
           ┌─────────────────────────┐
      6.   │  CHAIN IT               │  Link this turn to the
-          │  Cryptographic hash     │  previous one. Tampering
-          │  (SHA3-512)             │  with any turn breaks
-          └────────────┬────────────┘  the entire chain.
+          │  ID-pointer chain       │  previous one. Tampering
+          │  + Walacor DH on ingest │  breaks the chain.
+          └────────────┬────────────┘
                       ▼
           ┌─────────────────────────┐
      7.   │  SAVE THE RECORD        │  Written to local store
@@ -143,12 +143,12 @@ We built the gateway around five properties that hold up under scrutiny.
 - Toxicity filter catches harmful language
 - Llama Guard covers 14 safety categories including violence, self-harm, and child safety
 
-**5. Tamper-Proof Conversation Chains** — Each turn in a conversation gets linked to the previous one with a SHA3-512 hash. Think of it like a blockchain for conversations. Edit one turn, and every turn after it becomes invalid. You can verify this from a browser — no need to trust the server.
+**5. Tamper-Evident Conversation Chains** — Each turn in a conversation is linked to the previous one through an ID pointer (`previous_record_id`), and the Walacor backend issues a tamper-evident `DH` (data hash) on ingest. Remove, insert, or reorder a turn and the linkage breaks at that point. Verification walks the chain server-side; the Walacor `DH` provides the independent cryptographic checkpoint.
 
 ```
- Turn 1 ──hash──> Turn 2 ──hash──> Turn 3 ──hash──> Turn 4
-   │                │                │                │
-   └── Change anything here, and everything after it breaks.
+ Turn 1 ──prev_id──> Turn 2 ──prev_id──> Turn 3 ──prev_id──> Turn 4
+   │                    │                    │                    │
+   └── Change anything here, and the linkage breaks at that point.
 ```
 
 ---
@@ -276,7 +276,7 @@ For compliance teams who need to map capabilities to frameworks:
 | **EU AI Act, Art. 9** | Risk management for high-risk AI | Content safety pipeline with three independent analyzers |
 | **EU AI Act, Art. 12** | Automatic logging / record-keeping | Every request produces an audit record — guaranteed completeness |
 | **EU AI Act, Art. 14** | Human oversight capability | Real-time dashboard plus control panel for policy management |
-| **EU AI Act, Art. 15** | Accuracy, robustness, cybersecurity | Session chains (SHA3-512), encrypted storage, auth enforcement |
+| **EU AI Act, Art. 15** | Accuracy, robustness, cybersecurity | Session chains (ID-pointer + Walacor DH), encrypted storage, auth enforcement |
 | **NIST AI RMF** | Govern, Map, Measure, Manage | Policy engine, model routing, safety analysis, budget enforcement |
 | **SOC 2** | Security, availability, integrity | Encrypted audit trail, fail-closed behavior, dual-write durability |
 
@@ -290,7 +290,7 @@ For compliance teams who need to map capabilities to frameworks:
 | **Safety checks** | PII detection, toxicity filtering, Llama Guard (14 categories) |
 | **Audit completeness** | 100% of requests — no exceptions |
 | **Streaming overhead** | Zero added latency |
-| **Hash algorithm** | SHA3-512 (NIST standard) |
+| **Hash algorithm** | SHA3-512 (NIST standard), issued by Walacor backend on ingest |
 | **Verification** | Client-side and server-side — zero trust in the server required |
 | **Deployment** | Docker, native, or Kubernetes |
 | **License** | Open-source core (Apache 2.0) |

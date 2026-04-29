@@ -337,7 +337,7 @@ X-Walacor-Budget-Remaining: 45000
 
 **Finding:** LiteLLM already does per-key spend tracking. This is expected table stakes, not a differentiator.
 
-**Still valuable** because Gateway's per-user budgets integrate with the Merkle-chained audit trail — you get not just "user X spent Y tokens" but a cryptographically verifiable record of every token spent.
+**Still valuable** because Gateway's per-user budgets integrate with the chain-linked audit trail — you get not just "user X spent Y tokens" but a cryptographically verifiable record of every token spent.
 
 **Verdict:** Keep, but move to Phase 2. Not the moat.
 
@@ -364,7 +364,7 @@ X-Walacor-Budget-Remaining: 45000
     "blocked_requests": 47,
     "chain_integrity": "all_valid"
   },
-  "merkle_root": "sha3-512-hash",
+  "walacor_dh": "<backend-issued data hash>",
   "records": [...]
 }
 ```
@@ -457,7 +457,7 @@ WALACOR_STREAMING_GOVERNANCE_MODE=pre_only
 
 | Feature | LiteLLM | Open WebUI Pipelines | AnythingLLM | **Walacor Gateway** |
 |---------|---------|---------------------|-------------|---------------------|
-| Merkle-chain audit trail | No | No | No | **Yes** |
+| ID-pointer audit chain backed by Walacor DH | No | No | No | **Yes** |
 | Model attestation (crypto) | No | No | No | **Yes** |
 | CEL policy engine | No | No | No | **Yes** |
 | Compliance export | No | No | No | **Yes (planned)** |
@@ -482,7 +482,7 @@ WALACOR_STREAMING_GOVERNANCE_MODE=pre_only
 
 > **Any chat UI gives your team an AI interface. Walacor Gateway makes it enterprise-ready.**
 >
-> - Every conversation is attested, audited, and Merkle-chain verified
+> - Every conversation is attested, audited, and chain-verified
 > - PII never leaks — detected and blocked before it reaches users
 > - Per-user token budgets prevent runaway costs
 > - Compliance exports for SOC2, HIPAA, and regulatory audits
@@ -716,7 +716,7 @@ LiteLLM is the most direct competitor to Walacor Gateway. Understanding the over
 - Admin dashboard UI
 
 ### What LiteLLM Does NOT Do
-- No Merkle-chain audit trail
+- No tamper-evident audit chain
 - No model attestation
 - No CEL policy engine
 - No compliance export

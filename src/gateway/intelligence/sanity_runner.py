@@ -48,30 +48,28 @@ class SanityResult:
 
 
 class SanityRunner:
-    # TODO(intelligence): wire into shadow_gate.process_candidate before
-    # next release — currently UNUSED in production. The runner is fully
-    # tested (tests/unit/test_sanity_runner.py) but no production caller
-    # invokes it before promotion.
+    # Wired into `shadow_gate.process_candidate` via
+    # `_run_sanity_check` + `sanity_adapters.build_infer_fn`. The gate
+    # runs the offline fixture BEFORE auto-promote, blocks on failure,
+    # and emits a `model_promotion_blocked` lifecycle event so the
+    # dashboard can render the per-class accuracy breakdown.
     #
-    # Wiring plan (~50 LOC across 2 files; deferred from this PR scope):
-    #   1. shadow_gate.process_candidate: after `gate.passed and should_auto`,
-    #      load the candidate ONNX session via `registry.candidate_path(...)`,
-    #      build a model-specific infer_fn (text-prompt for intent/safety,
-    #      feature-tensor for schema_mapper), call SanityRunner.run(...).
-    #      If `result.passed=False`, set `should_auto=False`, append the
-    #      failing classes to `gate.reasons`, and route through the
-    #      shadow_complete (manual-review) branch — DO NOT swallow.
-    #   2. Add a `model_promotion_blocked` lifecycle event so the
-    #      dashboard can render the sanity-block reason next to the
-    #      candidate.
+    # Adapter coverage as of wiring (`sanity_adapters.WIRED_MODELS`):
+    #   * intent          — fully wired (sklearn pipeline, prompt input).
+    #   * safety          — DEFERRED: trainer must export the TF-IDF +
+    #                       IDF + SVD side-cars next to the candidate
+    #                       ONNX before this adapter can mirror the
+    #                       production featurizer.
+    #   * schema_mapper   — DEFERRED: trainer must export the fitted
+    #                       DictVectorizer alongside the ONNX so the
+    #                       sanity adapter can reproduce the column
+    #                       ordering used at training time.
     #
-    # Tracked separately to keep the bug-fix PR small. Promotion is
-    # already gated by ShadowMetrics (accuracy delta + McNemar +
-    # disagreement + error rate) so the practical risk window is narrow:
-    # a candidate passing those gates but failing per-class accuracy on
-    # the labeled fixture set. Until wired, operators MUST not enable
-    # `auto_promote_models` in production without manually verifying the
-    # candidate against `<model>_sanity.json`.
+    # Unwired models log loudly and skip the sanity check rather than
+    # blocking forever; ShadowMetrics remains the sole arbiter for
+    # those candidates. Once the trainer side-cars land, swap
+    # `_NotWired` for the real adapter in `sanity_adapters._ADAPTERS`
+    # and remove the model from `WIRED_MODELS`'s complement.
     def __init__(self, fixtures_dir: Path | None = None) -> None:
         self._fixtures_dir = fixtures_dir or _DEFAULT_FIXTURES_DIR
 
