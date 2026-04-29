@@ -101,7 +101,7 @@ class TestRequestTypePersistedFromThreadPath:
             _wait_for_row(db_path, "exec-default")
 
             request_type, _ = _read_request_type(db_path, "exec-default")
-            # Sync write_and_fsync uses "user_message" as the fallback, the
+            # Sync write_durable uses "user_message" as the fallback, the
             # thread path must match.
             assert request_type == "user_message"
         finally:
@@ -136,7 +136,7 @@ class TestDeadLetterQueue:
         writer = WALWriter(db_path)
         try:
             # Seed one row using the synchronous path.
-            writer.write_and_fsync(_make_record("exec-dlq-1"))
+            writer.write_durable(_make_record("exec-dlq-1"))
             assert writer.pending_count() == 1
 
             writer.mark_dead_lettered("exec-dlq-1", reason="HTTP 422: bad payload")
@@ -191,7 +191,7 @@ class TestWriteLockSerialisation:
             writer.close()
 
     def test_concurrent_write_and_mark_delivered_does_not_corrupt(self, tmp_path):
-        """Spam write_and_fsync from one thread while mark_delivered runs
+        """Spam write_durable from one thread while mark_delivered runs
         on another — exercises the shared-conn lock path.
 
         Without the lock this can raise sqlite ProgrammingError or
@@ -203,12 +203,12 @@ class TestWriteLockSerialisation:
         errors: list[Exception] = []
 
         # Pre-seed a row so mark_delivered always has something to update.
-        writer.write_and_fsync(_make_record("seed"))
+        writer.write_durable(_make_record("seed"))
 
         def _writer_thread():
             try:
                 for i in range(200):
-                    writer.write_and_fsync(_make_record(f"exec-{i}"))
+                    writer.write_durable(_make_record(f"exec-{i}"))
             except Exception as e:  # pragma: no cover — surfaces only on bug
                 errors.append(e)
 

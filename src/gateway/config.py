@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     jwt_email_claim: str = Field(default="email", description="JWT claim for email")
     jwt_roles_claim: str = Field(default="roles", description="JWT claim for roles")
     jwt_team_claim: str = Field(default="", description="JWT claim for team (empty = disabled)")
+    jwt_tenant_claim: str = Field(
+        default="tenant_id",
+        description=(
+            "JWT claim that carries the caller's tenant. Common alternatives: "
+            "'tenant', 'org', 'org_id'. Used to scope per-request caches "
+            "(semantic cache, attestation cache, response analysis cache) "
+            "to the caller's tenant. Falls back through 'tenant_id', 'tenant', "
+            "'org', 'org_id' if the configured claim is missing."
+        ),
+    )
 
     # Optional identity
     gateway_id: str = Field(default_factory=lambda: f"gw-{uuid.uuid4().hex[:12]}", description="Unique gateway instance ID")

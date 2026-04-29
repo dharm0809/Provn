@@ -95,7 +95,7 @@ When all three credentials are set, records go to Walacor backend AND local WAL 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WALACOR_SESSION_CHAIN_ENABLED` | true | Enable Merkle chain for session records (G5) |
+| `WALACOR_SESSION_CHAIN_ENABLED` | true | Enable ID-pointer chain (record_id + previous_record_id) for session records (G5) |
 | `WALACOR_SESSION_CHAIN_MAX_SESSIONS` | 10000 | Max concurrent sessions tracked |
 | `WALACOR_SESSION_CHAIN_TTL` | 3600 | Session state TTL seconds |
 

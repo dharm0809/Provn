@@ -22,7 +22,7 @@ An ASGI audit/governance proxy for LLM providers. Single port (8000), multi-prov
 | httpx | Async HTTP client (HTTP/2) | `httpx[http2]>=0.28` |
 | Pydantic Settings | Configuration management | `pydantic-settings>=2.0` |
 | Prometheus Client | Metrics export | `prometheus-client>=0.20` |
-| walacor-core | Policy engine, SHA3-512 hashing, sync models | `walacor-core` |
+| walacor-core | Policy engine, sync models | `walacor-core` |
 | Tenacity | Retry logic | `tenacity>=9.0` |
 | PyBreaker | Circuit breaker pattern | `pybreaker>=1.2` |
 
@@ -49,7 +49,7 @@ An ASGI audit/governance proxy for LLM providers. Single port (8000), multi-prov
 | OpenAI Chat Completions API | Request/response format, provider compatibility |
 | Anthropic Messages API | Anthropic adapter |
 | Server-Sent Events (SSE) | Streaming responses |
-| SHA3-512 | Session chain hashing, tool I/O hashing |
+| SHA3-512 | Used by Walacor backend to issue `DH` (data hash) on ingest |
 | JWT (RFC 7519) | SSO authentication (HS256/RS256/ES256) |
 | JWKS (RFC 7517) | Public key discovery for RS256/ES256 |
 | MCP (Model Context Protocol) | External tool integration |
@@ -82,7 +82,7 @@ Client Request
     │                          httpx async HTTP/2 call
     ▼
 [5] Tool Loop (if active) ─── Execute tools → Content analysis on output
-    │                          → SHA3-512 hashing → Record tool events
+    │                          → Record tool events (Walacor hashes on ingest)
     ▼
 [6] Post-Inference Policy ─── Content analysis (PII, toxicity, Llama Guard)
     │                          → Response policy evaluation
@@ -179,19 +179,22 @@ ToolInteraction: tool_name, input_hash, output_hash, input_data, sources, error,
 **Budget periods:** `daily`, `monthly`
 **Alert thresholds:** configurable (default 70%, 90%, 100%)
 
-### 5.4 Session Chain (Merkle Chain)
+### 5.4 Session Chain (ID-pointer chain)
 
 | Component | File | Purpose |
 |---|---|---|
-| `SessionChainTracker` | `pipeline/session_chain.py` | In-memory Merkle chain per session |
+| `SessionChainTracker` | `pipeline/session_chain.py` | In-memory ID-pointer chain per session |
 | `RedisSessionChainTracker` | same | Redis-backed (HASH per session) |
 | `make_session_chain_tracker()` | same | Factory function |
 
-**Chain formula:**
+**Chain construction:**
 ```
-record_hash = SHA3-512(execution_id + policy_version + policy_result + previous_record_hash + sequence_number + timestamp)
+record_id is a UUIDv7 (time-ordered) assigned by the gateway
+previous_record_id = the prior turn's record_id (null for the genesis record)
 ```
-**Chain verification:** Server-side recomputation via `/v1/lineage/verify/{session_id}`, client-side via js-sha3 CDN.
+The Walacor backend issues a tamper-evident `DH` (data hash) on ingest as the cryptographic checkpoint.
+
+**Chain verification:** Server-side via `/v1/lineage/verify/{session_id}` walks the `previous_record_id` linkage and reports any breaks.
 
 ### 5.5 Rate Limiting
 
@@ -249,7 +252,7 @@ async def analyze(text: str) -> ContentAnalysisResult | None
 - `wal_records` — execution records (execution_id PK, record_json, created_at, delivered, delivered_at)
 - `gateway_attempts` — completeness invariant (request_id PK, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user)
 
-**Methods:** `write_and_fsync()`, `write_attempt()`, `write_tool_event()`, `get_undelivered()`, `mark_delivered()`, `pending_count()`, `oldest_pending_seconds()`, `disk_usage_bytes()`, `purge_delivered()`, `purge_attempts()`, `close()`
+**Methods:** `write_durable()`, `write_attempt()`, `write_tool_event()`, `get_undelivered()`, `mark_delivered()`, `pending_count()`, `oldest_pending_seconds()`, `disk_usage_bytes()`, `purge_delivered()`, `purge_attempts()`, `close()`
 
 ### 6.3 Walacor Cloud Client
 
@@ -350,7 +353,7 @@ _TOOL_UNSUPPORTED_PHRASES: list[str]  # 7 error patterns (Ollama, OpenAI, Anthro
 Each tool execution produces a record with:
 - `event_id`, `execution_id`, `session_id`, `tenant_id`, `gateway_id`
 - `tool_name`, `tool_type`, `tool_source`
-- `input_data`, `input_hash` (SHA3-512), `output_data`, `output_hash` (SHA3-512)
+- `input_data`, `output_data` (Walacor backend computes SHA3-512 on ingest and returns the `DH`)
 - `duration_ms`, `iteration`, `is_error`
 - `content_analysis` (PII/toxicity/Llama Guard results on tool output)
 - `metadata_json`, `sources` (for web search)
@@ -475,7 +478,7 @@ Each tool execution produces a record with:
 | `GET /v1/lineage/metrics` | Time-bucketed request/allow/block counts |
 | `GET /v1/lineage/token-latency` | Time-bucketed token usage + latency aggregation |
 | `GET /v1/lineage/trace/{id}` | Execution waterfall trace |
-| `GET /v1/lineage/verify/{id}` | Chain verification proof (recompute SHA3-512) |
+| `GET /v1/lineage/verify/{id}` | Chain verification proof (walks `previous_record_id` linkage) |
 
 ### 11.2 Frontend (SPA)
 
@@ -680,8 +683,8 @@ Every LLM request produces an execution record with these fields:
 | `cache_creation_tokens` | int | Anthropic cache creation |
 | `retry_of` | string | Execution ID of retried request |
 | `variant_id` | string | A/B test variant |
-| `record_hash` | SHA3-512 | Session chain hash (WAL only) |
-| `previous_record_hash` | SHA3-512 | Previous chain hash (WAL only) |
+| `record_id` | UUIDv7 | Time-ordered record identifier |
+| `previous_record_id` | UUIDv7 | Prior turn's `record_id`; null for genesis |
 | `sequence_number` | int | Chain sequence (WAL only) |
 | `response_policy_result` | string | Post-inference policy result (WAL only) |
 | `analyzer_decisions_json` | JSON | Content analysis decisions (WAL only) |
@@ -890,9 +893,9 @@ src/gateway/
 ├── pipeline/
 │   ├── context.py                     # PipelineContext singleton
 │   ├── orchestrator.py               # 8-step request pipeline (1674 lines)
-│   ├── hasher.py                      # build_execution_record(), SHA3-512
+│   ├── hasher.py                      # build_execution_record()
 │   ├── forwarder.py                   # HTTP forwarding with SSE tee
-│   ├── session_chain.py              # Merkle chain tracker (in-memory/Redis)
+│   ├── session_chain.py              # ID-pointer chain tracker (in-memory/Redis)
 │   ├── budget_tracker.py             # Token budget (in-memory/Redis)
 │   ├── rate_limiter.py               # Sliding window rate limiter
 │   ├── model_resolver.py             # Adapter selection logic
@@ -1007,7 +1010,7 @@ src/gateway/
 | **LiteLLM** | Python | ~3.25ms | ~200 RPS stable | docs.litellm.ai/benchmarks |
 | **Walacor Gateway** | Python | ~3-5ms est. | ~500-1000 est. | (needs benchmarking) |
 
-**Verdict: Stay with Python.** Provider latency (100ms–10,000ms) dwarfs proxy overhead (3–5ms). A 5ms overhead on a 2,000ms Claude call is 0.25%. The governance logic (policy eval, SHA3-512, content analysis, session chains, WAL writes) is where our value lives — rewriting to Rust gains <1% end-to-end improvement for months of work.
+**Verdict: Stay with Python.** Provider latency (100ms–10,000ms) dwarfs proxy overhead (3–5ms). A 5ms overhead on a 2,000ms Claude call is 0.25%. The governance logic (policy eval, content analysis, session chains, WAL writes) is where our value lives — rewriting to Rust gains <1% end-to-end improvement for months of work.
 
 **When to reconsider:** If we need >1,000 RPS sustained on a single instance, or if proxying ultra-fast local models (<50ms TTFT). At that point, the LiteLLM path (Rust sidecar via PyO3 for hot paths) is pragmatic.
 
@@ -1017,7 +1020,7 @@ src/gateway/
 |---|---|---|---|
 | Convert `BaseHTTPMiddleware` to pure ASGI middleware | ~40% middleware overhead reduction | Low | LiteLLM blog: "Your Middleware Could Be a Bottleneck" |
 | Try **Granian** as ASGI server (Rust HTTP parser) | 2–3x lower tail latency vs Uvicorn | Low (drop-in) | github.com/emmett-framework/granian |
-| Ensure SHA3-512 and SQLite writes use `asyncio.to_thread()` | Prevents event loop blocking | Low | Python docs |
+| Ensure SQLite writes use `asyncio.to_thread()` | Prevents event loop blocking | Low | Python docs |
 | Tune httpx connection pool (keepalive 30s, see §25.5) | Eliminates unnecessary TLS handshakes | Low | httpx docs |
 
 **Future (12–18 months):** Python 3.14 free-threaded mode (no GIL) shows 2–3x multi-threaded speedup in benchmarks. The ecosystem (uvloop, Starlette, httpx) is not ready yet. Monitor and adopt when stable.
@@ -1032,47 +1035,26 @@ src/gateway/
 
 ### 25.2 Cryptography & Hashing
 
-**Current:** SHA3-512 for session chain hashing + tool I/O hashing. Linear Merkle chain per session.
+**Current:** ID-pointer chain (`record_id` UUIDv7 + `previous_record_id`) per session. The Walacor backend issues a tamper-evident `DH` (data hash, SHA3-512) on ingest as the cryptographic checkpoint — the gateway does not compute its own chain hash.
 
-#### 25.2.1 SHA3-512 vs Alternatives
+#### 25.2.1 Why the Walacor backend hashes, not the gateway
 
-| Algorithm | Throughput (single core) | HW Acceleration | FIPS Approved | Post-Quantum Security |
-|-----------|------------------------|-----------------|---------------|----------------------|
-| SHA-256 | ~2–3 GB/s (SHA-NI) | Yes (Intel/ARM) | Yes | 128-bit preimage |
-| SHA3-512 | ~0.18–0.4 GB/s (software) | **None** | Yes | **256-bit preimage** |
-| BLAKE3 | ~3–8 GB/s (SIMD) | Via AVX2/512 | **No** | 128-bit preimage |
+Centralising the hash computation in the Walacor backend keeps the cryptographic trust anchor independent of the gateway process. The gateway sends the full record (prompt, response, metadata, tool I/O); Walacor computes the `DH` and returns it. Tampering with a record on the gateway side has no effect on the Walacor-issued `DH`, which is the value an auditor will verify against.
 
-**Verdict: Keep SHA3-512.** At <1,000 req/s hashing ~500 bytes per record, even the "slow" SHA3-512 takes **<3 microseconds per hash**. The performance difference is invisible. SHA3-512 gives us FIPS 202 compliance (enterprise/gov requirement), strongest post-quantum margin (256-bit vs 128-bit), and structural independence from SHA-2 (different Keccak sponge construction). BLAKE3 lacks FIPS approval — a dealbreaker for regulated customers.
+#### 25.2.2 Signing for Non-Repudiation
 
-#### 25.2.2 Merkle Chain vs Merkle Tree
+| | Ed25519 Sign | Ed25519 Verify |
+|---|---|---|
+| Throughput | ~14,000 ops/s | ~6,000 ops/s |
+| Latency | ~70μs | ~170μs |
+| Output size | 64 bytes | — |
+| Proves | Integrity + **Provenance** | — |
 
-| Operation | Linear Chain (current) | Merkle Tree (CT-style) |
-|-----------|----------------------|----------------------|
-| Append | O(1) | O(log n) |
-| Verify single record | **O(n) — replay chain** | **O(log n) — inclusion proof** |
-| Prove record exists | O(n) | O(log n) |
-| Storage overhead | 1 hash/record | ~2n hashes |
+**What signing adds:** The chain pointers and Walacor `DH` prove a record was not modified. Ed25519 signatures prove **which gateway created the record**. This matters for multi-gateway deployments, third-party audits, and legal disputes. The gateway signs the canonical ID string (`record_id` + `session_id` + `timestamp`) so verifiers can reconstruct the signed payload from the WAL.
 
-**Verdict: Keep linear chain, plan Merkle tree upgrade.** Sessions are short (10–100 records), so O(n) verification = 10–100 hash ops = microseconds. The linear chain is simpler and auditable. But when we need third-party batch audit or sessions grow to 1000+ records, **overlay a Merkle tree on top** (like Amazon QLDB does). Periodically compute a Merkle root over N chain entries as a "checkpoint." Chain = sequential ordering, tree = efficient membership proofs. They're complementary.
+#### 25.2.3 Post-Quantum JWT Risk
 
-**Reference:** Crosby & Wallach, "Efficient Data Structures for Tamper-Evident Logging" (USENIX Security 2009) — a 3KB proof for 80M events vs 800MB for chain replay.
-
-#### 25.2.3 Signing for Non-Repudiation (novel — not yet implemented)
-
-| | SHA3-512 Hash | Ed25519 Sign | Ed25519 Verify |
-|---|---|---|---|
-| Throughput | ~400 MB/s | ~14,000 ops/s | ~6,000 ops/s |
-| Latency | ~1μs | ~70μs | ~170μs |
-| Output size | 64 bytes | 64 bytes | — |
-| Proves | Integrity | Integrity + **Provenance** | — |
-
-**What signing adds:** Hash chains prove no record was modified. Signatures prove **who created the record**. This matters for multi-gateway deployments, third-party audits, and legal disputes.
-
-**Recommendation:** Add **optional** Ed25519 signing as a future phase. Sign `record_hash` (not the full record). Store the gateway's public key in the lineage DB. Cost: ~70μs per record. The `record_hash` from `compute_record_hash()` is the ideal signing input.
-
-#### 25.2.4 Post-Quantum JWT Risk
-
-SHA3-512 is quantum-safe for hashing. But **JWT signing algorithms (ECDSA/RSA) are quantum-broken by Shor's algorithm**. The real post-quantum vulnerability is in the auth path. When NIST's ML-DSA (FIPS 204) and SLH-DSA (FIPS 205) JWT implementations mature, we'll need to migrate. Our `jwt_algorithms` config already supports algorithm switching — this is crypto-agility done right.
+SHA3-512 (used by Walacor on ingest) is quantum-safe for hashing. But **JWT signing algorithms (ECDSA/RSA) are quantum-broken by Shor's algorithm**. The real post-quantum vulnerability is in the auth path. When NIST's ML-DSA (FIPS 204) and SLH-DSA (FIPS 205) JWT implementations mature, we'll need to migrate. Our `jwt_algorithms` config already supports algorithm switching — this is crypto-agility done right.
 
 ---
 
@@ -1120,7 +1102,7 @@ SHA3-512 is quantum-safe for hashing. But **JWT signing algorithms (ECDSA/RSA) a
 
 #### 25.3.5 Watermarking — Not Applicable
 
-The gateway cannot inject SynthID-style watermarks (requires model logit access). Detection without knowing the scheme is impractical. Our SHA3-512 chain + execution records provide better provenance than watermarking for a proxy use case.
+The gateway cannot inject SynthID-style watermarks (requires model logit access). Detection without knowing the scheme is impractical. The ID-pointer chain plus the Walacor-issued `DH` and execution records provide better provenance than watermarking for a proxy use case.
 
 #### 25.3.6 Audit Log Privacy (novel)
 
@@ -1142,9 +1124,9 @@ The gateway cannot inject SynthID-style watermarks (requires model logit access)
 
 #### 25.4.2 WALBackend Blocks the Event Loop
 
-**`wal_backend.py`** calls sync SQLite methods inside `async def` — `write_and_fsync()` performs INSERT + commit + checkpoint, all blocking the asyncio event loop.
+**`wal_backend.py`** calls sync SQLite methods inside `async def` — `write_durable()` performs INSERT + commit + checkpoint, all blocking the asyncio event loop.
 
-**Fix:** Wrap in `asyncio.to_thread(self._writer.write_and_fsync, record)`. Prevents blocking.
+**Fix:** Wrap in `asyncio.to_thread(self._writer.write_durable, record)`. Prevents blocking.
 
 #### 25.4.3 StorageRouter Writes Sequentially
 
@@ -1221,18 +1203,7 @@ Add `PRAGMA mmap_size = 268435456` (256MB) to `LineageReader` for faster dashboa
 
 Reference: Resilience4j sliding-window model (resilience4j.readme.io)
 
-#### 25.5.3 Hedged Requests (novel — not yet implemented)
-
-**From Google's "The Tail at Scale" (Dean & Barroso, 2013):** In BigTable benchmarks, hedging after a 10ms delay reduced **P99.9 from 1,800ms to 74ms** while adding only **2% more requests**.
-
-**For LLM gateways:** Send a parallel request to Provider B when Provider A hasn't responded within its P95 latency. Cancel Provider A when Provider B starts streaming. User pays for both, but gets dramatically better tail latency.
-
-**Important constraints:**
-- Opt-in only (`X-Walacor-Hedge: true` header or per-model-group config)
-- Cross-provider only (same-provider hedging doesn't help — latency is in inference, not network)
-- Track P95 dynamically via EWMA; hedge when `elapsed > p95 * 1.5`
-
-#### 25.5.4 Adaptive Concurrency Limiting (novel — Netflix Gradient2)
+#### 25.5.3 Adaptive Concurrency Limiting (novel — Netflix Gradient2)
 
 **Current:** No concurrency limiting — gateway accepts unlimited concurrent requests.
 
@@ -1319,17 +1290,11 @@ Similarly for content blocks: include category (e.g., "S4: child safety") and co
 
 **For the gateway:** During model discovery (`control/discovery.py`), verify sigstore signatures on model artifacts before granting `active` attestation. Strongest available model provenance mechanism today.
 
-#### 25.6.5 Transparency Log Publishing
-
-**Google Trillian:** Production Merkle tree log infrastructure. Certificate Transparency uses it for billions of certificates.
-
-**For the gateway:** Periodically publish signed chain heads (session Merkle roots) to a Trillian-compatible transparency log. This provides **third-party verifiability** without changing the existing chain. A background task posts the latest `record_hash` per session to an external endpoint every N seconds.
-
-#### 25.6.6 ISO 42001 Compliance Matrix
+#### 25.6.5 ISO 42001 Compliance Matrix
 
 **ISO/IEC 42001:2023** (AI Management System): 38 controls covering governance, risk, lifecycle, third-party oversight. The gateway already covers audit/traceability. Add a compliance mapping document (like the existing `EU-AI-ACT-COMPLIANCE.md`) for ISO 42001 and NIST AI 600-1 (Generative AI Profile).
 
-#### 25.6.7 Zero-Knowledge Proofs of Policy Compliance (frontier research)
+#### 25.6.6 Zero-Knowledge Proofs of Policy Compliance (frontier research)
 
 **ZKMLOps** (arXiv:2510.26576, 2025) and **ZK Audit for Internet of Agents** (arXiv:2512.14737, 2025 — pairs zk-SNARKs with MCP!) show this is becoming practical.
 
@@ -1386,7 +1351,7 @@ Similarly for content blocks: include category (e.g., "S4: child safety") and co
 
 #### 25.7.5 Continuous Profiling (optional)
 
-**Grafana Pyroscope** with Python SDK (wraps py-spy): 1–2% CPU overhead, always-on 100Hz sampling. Valuable for identifying whether SHA3-512, JSON parsing, or content analysis dominates under load. Add as optional `[profiling]` dependency.
+**Grafana Pyroscope** with Python SDK (wraps py-spy): 1–2% CPU overhead, always-on 100Hz sampling. Valuable for identifying whether JSON parsing or content analysis dominates under load. Add as optional `[profiling]` dependency.
 
 ---
 
@@ -1413,19 +1378,16 @@ All recommendations ranked by impact-to-effort ratio:
 | **15** | Governance | OPA/Rego policy engine option | Medium | Medium — enterprise expressiveness | NEW |
 | **16** | Observability | In-flight requests gauge + event loop lag | Low | Medium — key operational signals | NEW |
 | **17** | Storage | Group commit via asyncio.Queue | Medium (~50 lines) | Medium — 10–100x burst throughput | NOVEL |
-| **18** | Resilience | Hedged requests (opt-in, cross-provider) | Medium (100 lines) | Medium — dramatic P99 improvement | NOVEL |
-| **19** | Content | OpenGuardrails/BingoGuard analyzer plugin | Medium | Medium — better accuracy, multilingual | NEW |
-| **20** | Crypto | Periodic Merkle tree checkpoints | Medium | Medium — O(log n) audit proofs | NOVEL |
-| **21** | Governance | Transparency log publishing (Trillian) | Medium | Medium — third-party verifiability | NOVEL |
-| **22** | Governance | OpenSSF Model Signing verification | Medium | Medium — supply chain security | NEW |
-| **23** | Crypto | Optional Ed25519 record signing | Medium | Medium — non-repudiation | NOVEL |
-| **24** | Content | Optional Presidio NER PII detector | Medium | Low — augments regex for names | NEW |
-| **25** | Runtime | Benchmark with Granian ASGI server | Low | Low–Medium — better tail latency | TEST |
-| **26** | Governance | ISO 42001 + NIST 600-1 compliance matrix | Low | Low–Medium — certification readiness | DOC |
-| **27** | Governance | ZK proofs of policy compliance | High | High (long-term) — privacy-preserving | FRONTIER |
-| **28** | Crypto | Keep SHA3-512 (no change needed) | None | N/A — already optimal | ✅ VALIDATED |
-| **29** | Runtime | Keep Python (no language switch) | None | N/A — provider latency dominates | ✅ VALIDATED |
-| **30** | Runtime | Keep httpx with HTTP/2 | None | N/A — multiplexing > raw speed | ✅ VALIDATED |
+| **18** | Content | OpenGuardrails/BingoGuard analyzer plugin | Medium | Medium — better accuracy, multilingual | NEW |
+| **19** | Governance | OpenSSF Model Signing verification | Medium | Medium — supply chain security | NEW |
+| **20** | Crypto | Optional Ed25519 record signing | Medium | Medium — non-repudiation | NOVEL |
+| **21** | Content | Optional Presidio NER PII detector | Medium | Low — augments regex for names | NEW |
+| **22** | Runtime | Benchmark with Granian ASGI server | Low | Low–Medium — better tail latency | TEST |
+| **23** | Governance | ISO 42001 + NIST 600-1 compliance matrix | Low | Low–Medium — certification readiness | DOC |
+| **24** | Governance | ZK proofs of policy compliance | High | High (long-term) — privacy-preserving | FRONTIER |
+| **25** | Crypto | Keep ID-pointer chain + Walacor DH (no change needed) | None | N/A — already optimal | ✅ VALIDATED |
+| **26** | Runtime | Keep Python (no language switch) | None | N/A — provider latency dominates | ✅ VALIDATED |
+| **27** | Runtime | Keep httpx with HTTP/2 | None | N/A — multiplexing > raw speed | ✅ VALIDATED |
 
 **Legend:** BUG FIX = existing issue to fix. NEW = feature to add. NOVEL = approach nobody has implemented in LLM gateways. UPGRADE = improve existing component. CONFIG = configuration change. FRONTIER = research-stage, long-term. ✅ VALIDATED = current approach is confirmed best.
 
@@ -1435,8 +1397,6 @@ All recommendations ranked by impact-to-effort ratio:
 
 | Paper/System | Year | Key Finding | Relevance |
 |---|---|---|---|
-| Crosby & Wallach, "Tamper-Evident Logging" | USENIX 2009 | Merkle trees give O(log n) proofs vs O(n) chain replay | Session chain upgrade path |
-| Dean & Barroso, "The Tail at Scale" | Google 2013 | Hedged requests reduce P99.9 by 24x with 2% overhead | Hedged cross-provider requests |
 | Netflix, "Performance Under Load" | 2018 | Gradient2 adaptive concurrency: 3x throughput improvement | Adaptive concurrency limiting |
 | AuditableLLM | MDPI 2025 | Hash-chain audit + ZK comparison; validates our approach | Confirms gateway architecture |
 | Fontys "Institutional AI Sovereignty" | arXiv 2025 | 300-user gateway pilot validates proxy governance at scale | Validates our architecture |
@@ -1452,11 +1412,11 @@ All recommendations ranked by impact-to-effort ratio:
 
 Several design decisions are **confirmed best-in-class** by the research:
 
-1. **SHA3-512 for hashing** — FIPS compliant, post-quantum strong, performance irrelevant at our scale
+1. **Walacor backend `DH` for hashing** — FIPS-compliant SHA3-512 issued by the backend on ingest; the gateway sends full records and lets the backend compute the canonical hash
 2. **Python + Starlette + uvloop** — provider latency dwarfs proxy overhead; governance logic is where value lives
 3. **httpx with HTTP/2** — multiplexing trumps raw client speed for a multi-provider proxy
 4. **SQLite WAL mode** — right choice for embedded audit log (SQL queries for lineage, zero-config, single-file)
-5. **Linear Merkle chain** — correct primitive for short sessions; tree upgrade is additive, not replacement
+5. **ID-pointer session chain (UUIDv7)** — tamper-evident linkage with O(n) verification on short sessions; Walacor's `DH` provides the independent cryptographic checkpoint
 6. **Completeness invariant** — every request gets an attempt record; academic literature validates this pattern
 7. **Fail-open content analysis** — Llama Guard PASS on timeout matches industry practice (false positives worse than false negatives for availability)
 8. **Dual-write to WAL + cloud** — the outbox pattern is the gold standard for reliable async delivery

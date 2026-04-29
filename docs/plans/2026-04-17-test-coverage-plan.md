@@ -1,7 +1,7 @@
 # Test Coverage Plan — Walacor Gateway
 
 **Created:** 2026-04-17
-**Status:** In progress. Phase A next.
+**Status:** In progress. Phase A next. Note: B1's "Merkle chain always valid" property and any hedging-related cases are historical — the chain is now an ID-pointer chain and hedged requests were never shipped.
 **Context:** After the torture test surfaced 5 real bugs (orchestrator `body_dict`, intelligence worker prompt templates, `upsert_attestation` idempotency, missing session-chain serialization, dotenv test leakage — all fixed), we need to expand coverage from the narrow "base torture test" to the full feature surface.
 
 > **⚠️ SWITCH TO OPUS 4.7 BEFORE PHASE F.** Composition / kitchen-sink tests may expose subtle interaction bugs that benefit from deeper reasoning. Phases A–D are Sonnet-appropriate.

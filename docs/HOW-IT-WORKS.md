@@ -99,8 +99,9 @@ Step 7: Post-Inference Content Analysis (G4)
   │
 Step 8: Audit Record + Session Chain (G5)
   │  Build execution record with all metadata
-  │  Compute SHA3-512 chain hash (Merkle chain)
+  │  Append ID-pointer link (record_id + previous_record_id)
   │  Dual-write to Walacor backend + local WAL
+  │  (Walacor returns the tamper-evident DH on ingest)
   │
   ▼
 Response returned to app
@@ -181,8 +182,8 @@ Step D: Gateway scans tool output for safety
         - Catches indirect prompt injection (malicious content in search results)
         - If unsafe: replaces output with "[blocked by content policy]"
 
-Step E: Gateway hashes and records the tool event
-        - SHA3-512 hash of tool input and output
+Step E: Gateway records the tool event
+        - Sends full input_data and output_data; Walacor's backend hashes on ingest
         - Records sources (URLs), duration, content analysis verdicts
         - Written as a first-class audit event (ETId 9000003)
 
@@ -323,28 +324,26 @@ Every LLM interaction produces an execution record:
   "user": "dharmpratap",
   "team": "engineering",
   "sequence_number": 5,
-  "previous_record_hash": "a3f8c2d1...",
-  "record_hash": "7b1d4e9f..."
+  "record_id": "0190a3f8-c2d1-7b1d-4e9f-...",
+  "previous_record_id": "0190a3f8-baad-7c91-2ee0-..."
 }
 ```
 
-### Session chain (Merkle chain)
+### Session chain (ID-pointer chain)
 
-Each record links to the previous one via SHA3-512:
-
-```
-record_hash = SHA3-512(
-    execution_id | policy_version | policy_result |
-    previous_record_hash | sequence_number | timestamp
-)
-```
-
-If anyone tampers with a record, all subsequent hashes break — the chain is verifiable end-to-end.
+Each record links to the previous one through its `previous_record_id`:
 
 ```
-Turn 1 → record_hash_1
-Turn 2 → SHA3-512(turn_2_fields + record_hash_1) → record_hash_2
-Turn 3 → SHA3-512(turn_3_fields + record_hash_2) → record_hash_3
+record_id is a UUIDv7 (time-ordered) assigned by the gateway
+previous_record_id = the prior turn's record_id
+```
+
+If anyone removes, inserts, or reorders a record, the `previous_record_id` linkage breaks at that point — chain verification walks the pointers and reports the gap. Walacor's backend issues the tamper-evident `DH` on ingest; that value is the cryptographic checkpoint, not a hash the gateway computes.
+
+```
+Turn 1 → record_id_1, previous_record_id = null
+Turn 2 → record_id_2, previous_record_id = record_id_1
+Turn 3 → record_id_3, previous_record_id = record_id_2
 ```
 
 ### Dual-write storage
@@ -394,7 +393,7 @@ A full web dashboard at `/lineage/` for real-time visibility into all AI activit
 | **Sessions** | All sessions with model, status, chain status |
 | **Timeline** | Execution timeline within a session, chain links, tool badges |
 | **Execution Detail** | Full prompt, response, thinking content, tool events, hashes |
-| **Chain Verification** | Client-side SHA3-512 recomputation (no server trust needed) |
+| **Chain Verification** | Walks the `previous_record_id` linkage and reports any breaks |
 | **Control** | Manage models, policies, budgets (requires API key) |
 | **Attempts** | Completeness invariant — every request tracked |
 | **Playground** | Interactive prompt testing with governance readout, compare mode for side-by-side model testing |
@@ -435,7 +434,7 @@ src/gateway/
 │   ├── context.py               # Shared pipeline state
 │   ├── forwarder.py             # HTTP forward + SSE streaming
 │   ├── hasher.py                # Build execution records
-│   ├── session_chain.py         # SHA3-512 Merkle chain
+│   ├── session_chain.py         # ID-pointer chain (record_id + previous_record_id)
 │   └── budget_tracker.py        # Token budgets (in-memory / Redis)
 ├── content/                     # Content safety analyzers
 │   ├── pii_detector.py          # PII detection (regex)
@@ -463,7 +462,7 @@ src/gateway/
 | **EU AI Act Art. 12** — Record-keeping | Every interaction recorded with full prompt, response, model, user, timestamp |
 | **EU AI Act Art. 14** — Human oversight | Lineage dashboard, content analysis, chain verification |
 | **NIST AI RMF** — Govern | Policy rules, model attestation, token budgets, role-based access |
-| **SOC 2** — Processing Integrity | SHA3-512 Merkle chain — tamper-evident, independently verifiable |
+| **SOC 2** — Processing Integrity | ID-pointer chain backed by Walacor-issued DH — tamper-evident, independently verifiable |
 | **SOC 2** — Confidentiality | PII detection, API key/credential scanning |
 
 Detailed mapping: `docs/EU-AI-ACT-COMPLIANCE.md`

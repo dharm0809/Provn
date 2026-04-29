@@ -18,7 +18,7 @@ def anyio_backend():
 def _make_mock_writer():
     writer = MagicMock()
     writer.write_batch = MagicMock()
-    writer.write_and_fsync = MagicMock()
+    writer.write_durable = MagicMock()
     return writer
 
 
@@ -85,7 +85,7 @@ async def test_fallback_on_batch_error():
         await asyncio.sleep(0.2)
     finally:
         await bw.stop()
-    writer.write_and_fsync.assert_called()
+    writer.write_durable.assert_called()
 
 
 def test_write_batch_method():

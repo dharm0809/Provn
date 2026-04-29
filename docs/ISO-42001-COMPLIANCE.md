@@ -2,7 +2,7 @@
 
 This document maps Walacor Gateway capabilities to the ISO/IEC 42001:2023 Artificial Intelligence Management System (AIMS) standard and the NIST AI 600-1 (Artificial Intelligence Risk Management Framework: Generative AI Profile). It is intended for compliance officers, auditors, and organizations seeking ISO 42001 certification or NIST AI RMF alignment for their AI deployments.
 
-Walacor Gateway is an ASGI audit and governance proxy that sits between callers and LLM providers. It provides cryptographic record-keeping, content analysis, policy enforcement, budget controls, Ed25519 record signing, Merkle tree audit proofs, and real-time observability without requiring changes to the upstream model or the downstream application.
+Walacor Gateway is an ASGI audit and governance proxy that sits between callers and LLM providers. It provides cryptographic record-keeping (Walacor backend `DH` checkpoints), content analysis, policy enforcement, budget controls, Ed25519 record signing, and real-time observability without requiring changes to the upstream model or the downstream application.
 
 ---
 
@@ -59,7 +59,7 @@ ISO 42001 defines controls across Annex A (normative) and Annex B (guidance). Th
 | Control | Description | Gateway Feature | Evidence Location | Status |
 |---------|-------------|-----------------|-------------------|--------|
 | A.7.1 | Data quality | PII detection (built-in + Presidio NER) identifies personal data in prompts and responses. Toxicity classifier filters harmful content. Content analysis runs on tool outputs for indirect prompt injection detection. | `src/gateway/content/pii.py`, `src/gateway/content/presidio_pii.py`, `src/gateway/content/toxicity.py` | Met |
-| A.7.2 | Data provenance | SHA3-512 session chains provide tamper-evident record sequences. Merkle tree checkpoints create periodic cryptographic snapshots with O(log n) inclusion proofs. Ed25519 digital signatures provide non-repudiation. Tool input/output hashes computed at gateway level. | `src/gateway/pipeline/session_chain.py`, `src/gateway/crypto/merkle_tree.py`, `src/gateway/crypto/signing.py` | Met |
+| A.7.2 | Data provenance | ID-pointer session chains (`record_id` + `previous_record_id`, UUIDv7) provide tamper-evident record sequences. Walacor's backend issues a `DH` (data hash) on ingest as the cryptographic checkpoint. Ed25519 digital signatures provide non-repudiation. Tool input/output sent in full and hashed by Walacor on ingest. | `src/gateway/pipeline/session_chain.py`, `src/gateway/walacor/`, `src/gateway/crypto/signing.py` | Met |
 | A.7.3 | Data preparation | Request classification (task field, user-agent detection, prompt regex) categorizes requests before processing. Thinking token strip separates reasoning from final output. Provider-specific adapters normalize heterogeneous request/response formats. | `src/gateway/adaptive/request_classifier.py`, `src/gateway/adapters/thinking.py` | Met |
 | A.7.4 | Data labeling | Content analysis verdicts (PASS/WARN/BLOCK) with category labels and confidence scores attached to every execution record. PII entity types (SSN, credit card, AWS key, email, phone) are explicitly labeled. Llama Guard categories (S1-S14) provide safety classification labels. | Execution record `content_analysis` field | Met |
 
@@ -86,7 +86,7 @@ ISO 42001 defines controls across Annex A (normative) and Annex B (guidance). Th
 | Control | Description | Gateway Feature | Evidence Location | Status |
 |---------|-------------|-----------------|-------------------|--------|
 | A.10.1 | AI supply chain management | Provider adapters abstract upstream LLM providers (OpenAI, Anthropic, HuggingFace, Ollama). Model routing table maps patterns to specific providers/URLs. Provider health probes validate connectivity at startup. Resource monitor tracks provider error rates with automatic cooldown. | `src/gateway/adapters/`, `src/gateway/adaptive/resource_monitor.py` | Met |
-| A.10.2 | Third-party AI components | Model capability registry discovers and caches per-model capabilities (tool support). Transparency log publishes signed Merkle roots to external append-only endpoint for third-party verifiability. MCP client integration for external tool providers. | `src/gateway/crypto/transparency.py`, `src/gateway/mcp/` | Met |
+| A.10.2 | Third-party AI components | Model capability registry discovers and caches per-model capabilities (tool support). MCP client integration for external tool providers. Walacor backend ingests every record and issues an independent `DH` checkpoint, providing third-party verifiability without a separate transparency log. | `src/gateway/walacor/`, `src/gateway/mcp/` | Met |
 | A.10.3 | Customer obligations | Token budget enforcement per tenant. Policy rules support tenant-scoped conditions. Caller identity attribution to individual users. Cost reporting by user and model. | `src/gateway/pipeline/budget_tracker.py`, `GET /v1/lineage/cost` | Met |
 
 ---
@@ -100,11 +100,11 @@ NIST AI 600-1 extends the AI RMF with 12 risk categories specific to generative 
 | Risk ID | Risk Category | Gateway Mitigation | Evidence Location | Status |
 |---------|---------------|-------------------|-------------------|--------|
 | GAI-1 | CBRN Information | Llama Guard 3 classifier covers S10 (weapons/drugs/regulated substances) with WARN verdict. Policy rules can escalate WARN to BLOCK. Content analysis runs on both prompts and responses. | `src/gateway/content/llama_guard.py` (S10 category) | Met |
-| GAI-2 | Confabulation | Execution records store full prompt and response text for human review. Tool-augmented responses include source URLs with SHA3-512 hashes for provenance verification. Session chains enable temporal sequence analysis. | `src/gateway/crypto/hasher.py`, tool event `sources` field | Partial |
+| GAI-2 | Confabulation | Execution records store full prompt and response text for human review. Tool-augmented responses include source URLs with Walacor-issued `DH` for provenance verification. Session chains enable temporal sequence analysis. | `src/gateway/pipeline/hasher.py`, tool event `sources` field | Partial |
 | GAI-3 | Data Privacy | Three-tier PII detection: built-in regex (SSN, credit card, AWS key, API key), optional Presidio NER (person, email, phone, location), and streaming PII analysis every 500 chars. High-risk PII (credit card, SSN) → BLOCK; low-risk (email, phone) → WARN. | `src/gateway/content/pii.py`, `src/gateway/content/presidio_pii.py`, `src/gateway/content/stream_safety.py` | Met |
 | GAI-4 | Environmental Impact | Token usage tracking per request (prompt + completion tokens). Cost attribution aggregates by model and user. Budget limits constrain total consumption per period. Per-model latency histograms identify inefficient models. | `GET /v1/lineage/cost`, `src/gateway/metrics/prometheus.py` (forward_duration_by_model) | Partial |
 | GAI-5 | Human-AI Configuration | Caller identity resolution (headers + JWT) attributes every request to a specific user. Enforcement mode toggle (enforced/audit_only) enables human-in-the-loop workflows. Control plane allows real-time model and policy adjustments. | `src/gateway/auth/identity.py`, `src/gateway/control/api.py` | Met |
-| GAI-6 | Information Integrity | SHA3-512 session chains provide tamper-evident record sequences. Merkle tree checkpoints with O(log n) inclusion proofs. Ed25519 record signing for non-repudiation. Transparency log publishing for third-party verifiability. Completeness invariant ensures no records are silently dropped. | `src/gateway/pipeline/session_chain.py`, `src/gateway/crypto/merkle_tree.py`, `src/gateway/crypto/signing.py`, `src/gateway/crypto/transparency.py` | Met |
+| GAI-6 | Information Integrity | ID-pointer session chains (`record_id` + `previous_record_id`) provide tamper-evident record sequences. Walacor's backend issues a `DH` (data hash) on ingest as the independent cryptographic checkpoint. Ed25519 record signing for non-repudiation. Completeness invariant ensures no records are silently dropped. | `src/gateway/pipeline/session_chain.py`, `src/gateway/walacor/`, `src/gateway/crypto/signing.py` | Met |
 | GAI-7 | Information Security | API key and JWT authentication. Provider API keys stored in environment variables, never in code. Redis URL passwords redacted in logs. Control plane API requires authentication. WAL database uses SQLite WAL mode with `synchronous=NORMAL`. Lineage reader opens database in read-only mode (`?mode=ro`). | `src/gateway/auth/`, `src/gateway/main.py` (api_key_middleware) | Met |
 | GAI-8 | Intellectual Property | Execution records store full prompt and response text for IP audit. Tool input/output hashes provide integrity verification. Session-level aggregation enables per-use analysis. Lineage dashboard provides searchable history. | `GET /v1/lineage/sessions`, `GET /v1/lineage/executions/{id}` | Partial |
 | GAI-9 | Obscene/Degrading Content | Llama Guard 3 covers S1 (violent crimes), S2 (non-violent crimes), S3 (sex-related crimes), S5 (defamation), S7 (privacy), S11 (sexual content). Toxicity classifier with configurable deny-list terms. S4 (child safety) mapped to BLOCK; others to WARN. Content policies allow per-category BLOCK/WARN/PASS configuration. | `src/gateway/content/llama_guard.py`, `src/gateway/content/toxicity.py`, content_policies table | Met |
@@ -120,7 +120,7 @@ NIST AI 600-1 extends the AI RMF with 12 risk categories specific to generative 
 
 The gateway fully satisfies 34 of 38 ISO 42001 controls and 8 of 12 NIST AI 600-1 risk categories through:
 
-- **Cryptographic audit trail**: SHA3-512 session chains, Merkle tree checkpoints, Ed25519 signing, transparency log publishing
+- **Cryptographic audit trail**: ID-pointer session chains (UUIDv7), Walacor backend-issued `DH` checkpoints, Ed25519 record signing
 - **Multi-tier content analysis**: Built-in PII + toxicity, Presidio NER, Llama Guard 3 (14 categories), streaming analysis
 - **Policy enforcement**: Pre/post-inference policies, attestation lifecycle, budget limits, enforcement mode toggle
 - **Identity and access**: API key + JWT/SSO authentication, caller identity attribution, role-based policy conditions
@@ -167,8 +167,6 @@ The following ISO 42001 controls relate to organizational management processes r
 |---------------|--------------------------|---------|
 | GAI-3 Data Privacy | `WALACOR_PRESIDIO_PII_ENABLED=true` | NER-based PII detection for higher accuracy |
 | GAI-6 Information Integrity | `WALACOR_RECORD_SIGNING_ENABLED=true` | Ed25519 non-repudiation |
-| GAI-6 Information Integrity | `WALACOR_MERKLE_CHECKPOINT_ENABLED=true` | Periodic Merkle tree audit proofs |
-| GAI-6 Information Integrity | `WALACOR_TRANSPARENCY_LOG_ENABLED=true` | Third-party verifiable audit trail |
 | GAI-9 Content Safety | `WALACOR_LLAMA_GUARD_ENABLED=true` | 14-category safety classification |
 | GAI-12 Content Safety | `WALACOR_TOXICITY_DETECTION_ENABLED=true` | Configurable deny-list enforcement |
 

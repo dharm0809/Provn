@@ -1,6 +1,6 @@
 """Behavioral tests: write paths must never issue wal_checkpoint.
 
-The fix moved PRAGMA wal_checkpoint(TRUNCATE) out of write_and_fsync /
+The fix moved PRAGMA wal_checkpoint(TRUNCATE) out of write_durable /
 write_tool_event into purge_delivered (batch cleanup only).  These tests
 verify that invariant by intercepting conn.execute() calls.
 """
@@ -81,17 +81,17 @@ def wal_with_tracker(tmp_path):
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_write_and_fsync_no_checkpoint(wal_with_tracker):
-    """write_and_fsync must never issue PRAGMA wal_checkpoint."""
+def test_write_durable_no_checkpoint(wal_with_tracker):
+    """write_durable must never issue PRAGMA wal_checkpoint."""
     writer, tracker = wal_with_tracker
     tracker.statements.clear()
 
     for i in range(10):
-        writer.write_and_fsync(_make_execution_record(f"exec-{i}"))
+        writer.write_durable(_make_execution_record(f"exec-{i}"))
 
     checkpoint_calls = [s for s in tracker.statements if "wal_checkpoint" in s.lower()]
     assert checkpoint_calls == [], (
-        f"write_and_fsync issued checkpoint pragma: {checkpoint_calls}"
+        f"write_durable issued checkpoint pragma: {checkpoint_calls}"
     )
 
 
@@ -114,7 +114,7 @@ def test_purge_delivered_does_checkpoint(wal_with_tracker):
     writer, tracker = wal_with_tracker
 
     # Insert a record, mark it delivered, then purge with max_age_hours=0.
-    writer.write_and_fsync(_make_execution_record("purge-me"))
+    writer.write_durable(_make_execution_record("purge-me"))
     writer.mark_delivered("purge-me")
 
     tracker.statements.clear()

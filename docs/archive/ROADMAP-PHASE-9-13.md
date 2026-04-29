@@ -1,6 +1,6 @@
 # Walacor AI Security Gateway — Phase 9–13 Implementation Plan
 
-**Status:** Implementation Ready
+**Status:** Historical artifact. Phase 13 was implemented as an **ID-pointer chain** (record_id + previous_record_id), not a SHA3-512 Merkle chain — the Walacor backend issues the tamper-evident `DH` on ingest. Treat the Merkle-chain language in this file as the original design intent; the shipped architecture supersedes it.
 **Version:** 2.0 | February 17, 2026
 **Classification:** Company Confidential
 **Builds On:** implementation.md (Phases 1–8, Core Guarantees G1–G3)

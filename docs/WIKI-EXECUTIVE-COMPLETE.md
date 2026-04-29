@@ -120,7 +120,7 @@ Incoming request
   ├── 5.  G3 Pre-inference policy              Evaluate the active policy; run shadow candidates alongside
   ├── 6.  Prompt-side safety                   Injection/jailbreak scan; OCR and analyze any attached images
   ├── 7.  Backpressure and budget              Is there room to record this? Does this tenant have budget?
-  ├── 8.  Forward to a healthy endpoint        With retry, fallback, hedge, and circuit-breaker logic
+  ├── 8.  Forward to a healthy endpoint        With retry, fallback, and circuit-breaker logic
   ├── 9.  Stream safety                        Scan streaming tokens for PII and harmful content in real time
   ├── 10. Tool loop (if the model calls tools) Execute, analyze, and continue until a final answer
   ├── 11. G4 Separate and inspect              Split reasoning from the final answer; run full content analyzers
@@ -688,25 +688,6 @@ This is implemented as a small set of classification rules over status code and 
 
 Transient failures retry up to a configured limit with exponential backoff and jitter. Retries are recorded in the audit record so that a single logical request is reconstructable even when it touched multiple endpoints.
 
-### Hedged requests
-
-For the rare case where tail latency dominates the user experience, the gateway can issue a hedged secondary request after a configurable delay. The secondary starts only if the primary has not responded within the delay window. The first response to arrive wins; the loser is cancelled.
-
-```
-    time →
-
-    Primary:   ────────────────────────✗ (slow)
-                                         ↑
-                                         |
-    Hedge    :         ──────────✓       | cancelled
-                                  |
-                                  └──── wins
-
-    If primary responds within the hedge delay, secondary never starts.
-```
-
-**Why hedging?** For providers with variable tail latency, the slowest few percent of requests dominate user experience. A hedged request shifts the failure mode from "slow" to "redundant" — an acceptable trade for workloads where responsiveness matters more than marginal cost. Hedging is opt-in per model group and is not on by default; the decision to accept duplicate inference calls should be explicit.
-
 ### Concurrency limits
 
 Per-endpoint concurrency limits prevent a single endpoint from being saturated under load. When the limit is reached, new requests wait briefly for a slot or are routed to another endpoint in the group.
@@ -1120,7 +1101,7 @@ It helps to be clear about what we deliberately chose not to build.
                                       ▼
                 ┌─────────────────────────────────────────┐
                 │     ROUTING    LOAD BALANCE             │
-                │     FALLBACK   HEDGE   BREAKER   RETRY  │
+                │     FALLBACK   BREAKER   RETRY          │
                 └─────────────────────┬───────────────────┘
                                       ▼
                 ┌─────────────────────────────────────────┐

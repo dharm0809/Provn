@@ -256,8 +256,13 @@ async def process_plugin_event(event: dict) -> dict:
 
     if ctx.attestation_cache:
         try:
+            # Plugin events have no Request — fall back to the gateway-level
+            # tenant. This matches the behaviour before per-caller tenant
+            # plumbing was introduced (plugin events reach this path only
+            # via `_apply_governance` after the proxy already ran).
             attestation, err = await resolve_attestation(
                 ctx.attestation_cache, provider, model_id,
+                tenant_id=settings.gateway_tenant_id or "",
             )
             if err is not None:
                 # Try auto-attestation (no sync client for plugin events)

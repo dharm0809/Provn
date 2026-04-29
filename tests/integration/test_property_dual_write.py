@@ -68,14 +68,14 @@ def drain_wal(wal: WALWriter) -> None:
 # ---------------------------------------------------------------------------
 
 def test_every_write_execution_lands_in_wal_records():
-    """write_and_fsync N records → N rows in wal_records."""
+    """write_durable N records → N rows in wal_records."""
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.db")
         wal = WALWriter(db_path)
         try:
             n = 10
             for _ in range(n):
-                wal.write_and_fsync(make_record())
+                wal.write_durable(make_record())
             conn = sqlite3.connect(db_path)
             rows = conn.execute("SELECT COUNT(*) FROM wal_records WHERE event_type='execution'").fetchone()[0]
             conn.close()
@@ -119,8 +119,8 @@ def test_same_execution_id_twice_upsert():
             r1 = make_record(execution_id=eid, model_id="model-v1")
             r2 = make_record(execution_id=eid, model_id="model-v2")
 
-            wal.write_and_fsync(r1)
-            wal.write_and_fsync(r2)  # should upsert, not error
+            wal.write_durable(r1)
+            wal.write_durable(r2)  # should upsert, not error
 
             conn = sqlite3.connect(db_path)
             count = conn.execute(
@@ -147,7 +147,7 @@ def test_record_content_preserved():
             sid = str(uuid.uuid4())
             record = make_record(execution_id=eid, session_id=sid, model_id="llama3:8b")
 
-            wal.write_and_fsync(record)
+            wal.write_durable(record)
 
             conn = sqlite3.connect(db_path)
             row = conn.execute(
@@ -280,7 +280,7 @@ def test_hypothesis_write_all_land(records):
             for eid, sid, model_id in records:
                 eid_str = str(eid)
                 r = make_record(execution_id=eid_str, session_id=str(sid), model_id=model_id)
-                wal.write_and_fsync(r)
+                wal.write_durable(r)
                 written_ids.append(eid_str)
 
             conn = sqlite3.connect(db_path)

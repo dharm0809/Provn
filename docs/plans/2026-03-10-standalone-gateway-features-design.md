@@ -1,7 +1,7 @@
 # Standalone Gateway Features — Design Document
 
 **Date**: 2026-03-10
-**Status**: Approved
+**Status**: Historical. Approved at the time. The "SHA3-512 Merkle chains" referenced as part of Phases 1–22 shipped as an ID-pointer chain backed by Walacor-issued `DH`.
 **Scope**: Phases 23–29 — 13 features across 7 phases to make Walacor Gateway a complete standalone product
 
 ---

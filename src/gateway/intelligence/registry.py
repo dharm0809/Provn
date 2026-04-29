@@ -130,6 +130,20 @@ class ModelRegistry:
         _validate_model_name(model)
         return self.base / "production" / f"{model}.onnx"
 
+    def candidate_path(self, model: str, version: str) -> Path:
+        """Return the canonical candidate filesystem path for `model`-`version`.
+
+        Used by the sanity gate (Phase 25 Task 25 wiring) to load a
+        candidate ONNX session before promotion. Validates the model
+        name; the version string is only used as a filename component
+        and is bounded by the candidate filename regex at parse time
+        (`_CAND_RE`), so a malformed version string here would surface
+        as a missing-file error at the call site rather than a path
+        traversal.
+        """
+        _validate_model_name(model)
+        return self.base / "candidates" / f"{model}-{version}.onnx"
+
     def list_production_models(self) -> list[str]:
         prod = self.base / "production"
         if not prod.is_dir():

@@ -614,7 +614,7 @@ async def test_s6_wal_write_read_thinking_content():
         assert record["model_hash"] == "sha256:test-digest-abc123"
 
         # Write
-        wal.write_and_fsync(record)
+        wal.write_durable(record)
         pending = wal.pending_count()
         assert pending == 1, f"Expected 1 pending record, got {pending}"
 

@@ -49,7 +49,7 @@ def test_get_execution_trace_real_implementation(tmp_path):
         "timestamp": "2026-03-10T12:00:00Z",
         "timings": {"attestation_ms": 1.0, "forward_ms": 100.0, "total_ms": 110.0},
     }
-    writer.write_and_fsync(record)
+    writer.write_durable(record)
 
     reader = LineageReader(db_path)
     result = reader.get_execution_trace("trace-test-1")

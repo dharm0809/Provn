@@ -98,7 +98,7 @@ Incoming request
   ├── 6.     Token budget — does this tenant have budget remaining?
   ├── 7.     Forward to LLM provider
   ├── 8. G4  Post-inference content gate — does the response pass the analyzers?
-  ├── 9. G5  Append to session Merkle chain
+  ├── 9. G5  Append to session ID-pointer chain (record_id + previous_record_id)
   └── 10. G2 Write ExecutionRecord to Walacor or WAL
 ```
 
@@ -168,13 +168,15 @@ Custom analyzers can be added by implementing a single interface without touchin
 
 ### G5 — Session Chain Integrity
 
-Every conversation turn with a `session_id` is cryptographically linked to the previous turn. The chain construction:
+Every conversation turn with a `session_id` is linked to the previous turn through an ID-pointer chain. The chain construction:
 
-- First turn: `sequence_number = 0`, `previous_record_hash = "000...000"` (genesis)
-- Every subsequent turn: `previous_record_hash` = the prior turn's `record_hash`
+- Each turn is assigned a `record_id` (UUIDv7, time-ordered)
+- First turn: `sequence_number = 0`, `previous_record_id = null` (genesis)
+- Every subsequent turn: `previous_record_id` = the prior turn's `record_id`
 - Sequence numbers are committed only after a successful audit write — a failed write leaves no mark in the chain
+- Walacor's backend issues the tamper-evident `DH` (data hash) on ingest; the gateway does not compute its own hash chain
 
-We think of this as the answer to the question: "Can you prove no one edited this conversation?" The answer is yes — any modification, deletion, or reordering of turns is detectable by anyone who can verify SHA3-512 hashes, without accessing the decrypted content.
+We think of this as the answer to the question: "Can you prove no one edited this conversation?" The answer is yes — any modification, deletion, or reordering of turns breaks the `previous_record_id` linkage and is detectable by anyone who walks the chain, and Walacor's backend-issued `DH` provides the cryptographic checkpoint.
 
 ---
 

@@ -140,6 +140,7 @@ def _try_jwt_auth(request: Request, settings) -> bool:
             email_claim=settings.jwt_email_claim,
             roles_claim=settings.jwt_roles_claim,
             team_claim=settings.jwt_team_claim,
+            tenant_claim=getattr(settings, "jwt_tenant_claim", "tenant_id"),
         )
         if identity is not None:
             request.state.caller_identity = identity
@@ -451,7 +452,7 @@ async def _self_test() -> None:
             "gateway_id": settings.gateway_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        ctx.wal_writer.write_and_fsync(record)
+        ctx.wal_writer.write_durable(record)
         ctx.wal_writer.mark_delivered(record["execution_id"])
 
     logger.info("Startup self-test passed")

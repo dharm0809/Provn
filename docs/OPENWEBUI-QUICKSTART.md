@@ -1,6 +1,6 @@
 # OpenWebUI + Walacor Gateway — 2-Minute Quickstart
 
-> **What you get:** Every conversation in your existing OpenWebUI is now part of a provable, immutable audit trail — Merkle-chain verified, PII-detected, policy-governed. Your users see zero difference.
+> **What you get:** Every conversation in your existing OpenWebUI is now part of a provable, immutable audit trail — chain-verified, PII-detected, policy-governed. Your users see zero difference.
 
 ---
 
@@ -63,7 +63,7 @@ For every message sent through OpenWebUI, Gateway:
 1. **Attests the model** — cryptographic proof of which model handled the request
 2. **Evaluates policy** — configurable rules (block PII, restrict models, enforce budgets)
 3. **Detects PII** — credit cards, SSNs, API keys blocked before reaching the model
-4. **Chains the session** — every turn in a conversation is Merkle-linked; tamper-evident
+4. **Chains the session** — every turn in a conversation is linked through `previous_record_id`; tamper-evident
 5. **Records the audit trail** — immutable SQLite WAL, exportable for compliance
 
 ---

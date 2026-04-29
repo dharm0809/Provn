@@ -121,7 +121,7 @@ class BatchWriter:
             # Fallback: write individually
             for record in batch:
                 try:
-                    await asyncio.to_thread(self._writer.write_and_fsync, record)
+                    await asyncio.to_thread(self._writer.write_durable, record)
                 except Exception:
                     logger.error(
                         "BatchWriter individual fallback failed for %s",

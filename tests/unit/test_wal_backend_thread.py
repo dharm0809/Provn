@@ -83,13 +83,13 @@ class TestSyncMethodsNotCalledDirectly:
     """Verify that legacy sync writer methods are NOT called directly from WALBackend."""
 
     @pytest.mark.anyio
-    async def test_write_and_fsync_not_called_directly(self, backend, mock_writer):
+    async def test_write_durable_not_called_directly(self, backend, mock_writer):
         record = {"execution_id": "exec-direct"}
-        mock_writer.write_and_fsync = MagicMock()
+        mock_writer.write_durable = MagicMock()
         await backend.write_execution(record)
 
         # The legacy sync method should NOT have been called directly
-        mock_writer.write_and_fsync.assert_not_called()
+        mock_writer.write_durable.assert_not_called()
 
     @pytest.mark.anyio
     async def test_write_attempt_sync_not_called_directly(self, backend, mock_writer):
