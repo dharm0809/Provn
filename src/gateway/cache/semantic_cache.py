@@ -30,12 +30,23 @@ class SemanticCache:
         self._max_entries = max_entries
         self._ttl = ttl
 
-    def _key(self, model: str, prompt: str) -> str:
-        return hashlib.sha256(f"{model}:{prompt}".encode()).hexdigest()
+    def _key(self, model: str, prompt: str, tenant_id: str = "default") -> str:
+        return hashlib.sha256(f"{tenant_id}:{model}:{prompt}".encode()).hexdigest()
 
-    def get(self, model: str, prompt: str) -> CacheEntry | None:
+    @staticmethod
+    def _resolve_tenant(tenant_id: str | None) -> str:
+        """Coerce a missing tenant to the default bucket; warn so leaks are observable."""
+        if not tenant_id:
+            logger.warning(
+                "SemanticCache called without tenant_id — falling back to 'default'. "
+                "This is a cross-tenant data-leak risk; pass tenant_id explicitly."
+            )
+            return "default"
+        return tenant_id
+
+    def get(self, model: str, prompt: str, tenant_id: str | None = None) -> CacheEntry | None:
         """Return cached entry or None if missing/expired."""
-        key = self._key(model, prompt)
+        key = self._key(model, prompt, self._resolve_tenant(tenant_id))
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -52,13 +63,14 @@ class SemanticCache:
         response_body: bytes,
         status_code: int = 200,
         content_type: str = "application/json",
+        tenant_id: str | None = None,
     ) -> None:
         """Store a response in the cache."""
         if len(self._cache) >= self._max_entries:
             # Evict the oldest entry (min created_at)
             oldest = min(self._cache, key=lambda k: self._cache[k].created_at)
             del self._cache[oldest]
-        key = self._key(model, prompt)
+        key = self._key(model, prompt, self._resolve_tenant(tenant_id))
         self._cache[key] = CacheEntry(
             response_body=response_body,
             status_code=status_code,
@@ -66,9 +78,9 @@ class SemanticCache:
             created_at=time.monotonic(),
         )
 
-    def invalidate(self, model: str, prompt: str) -> bool:
+    def invalidate(self, model: str, prompt: str, tenant_id: str | None = None) -> bool:
         """Remove a specific entry. Returns True if it existed."""
-        key = self._key(model, prompt)
+        key = self._key(model, prompt, self._resolve_tenant(tenant_id))
         return self._cache.pop(key, None) is not None
 
     def clear(self) -> None:

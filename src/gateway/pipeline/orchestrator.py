@@ -182,15 +182,31 @@ async def _forward_with_resilience(adapter, call, request):
         fb = select_fallback(error_class, call.model_id, lb)
         if fb is not None:
             logger.info("Falling back to %s after %s error", fb.url, error_class)
-            # For now, retry with same adapter (future: route to fallback URL)
-            try:
-                resp, mr = await forward(adapter, call, request)
-                return resp, mr, True
-            except Exception:
-                logger.warning(
-                    "Fallback retry failed for model=%s after %s error",
-                    call.model_id, error_class, exc_info=True,
+            # Re-point the adapter at the fallback URL for this retry only,
+            # then restore. All concrete adapters store base_url as `_base_url`
+            # (private attr). If that contract is broken (rare custom adapter),
+            # refuse to silently retry against the original endpoint — that's
+            # the bug we're fixing here.
+            _orig_base_url = getattr(adapter, "_base_url", None)
+            if _orig_base_url is None:
+                logger.error(
+                    "Fallback aborted for model=%s: adapter %s has no _base_url attr; "
+                    "cannot route to fallback %s without monkey-patching. Returning original error.",
+                    call.model_id, type(adapter).__name__, fb.url,
                 )
+            else:
+                try:
+                    adapter._base_url = fb.url.rstrip("/")
+                    try:
+                        resp, mr = await forward(adapter, call, request)
+                        return resp, mr, True
+                    finally:
+                        adapter._base_url = _orig_base_url
+                except Exception:
+                    logger.warning(
+                        "Fallback retry failed for model=%s after %s error (target=%s)",
+                        call.model_id, error_class, fb.url, exc_info=True,
+                    )
         # Return error response
         return JSONResponse(
             {"error": {"message": f"Provider error: {e.body}", "type": "server_error"}},
@@ -612,7 +628,8 @@ async def _eval_post_stream_policy(ctx, settings, model_response) -> tuple[int, 
     if not (ctx.content_analyzers and ctx.policy_cache and settings.response_policy_enabled):
         return 0, "skipped", []
     _, version, result, decisions, _ = await evaluate_post_inference(
-        ctx.policy_cache, model_response, ctx.content_analyzers
+        ctx.policy_cache, model_response, ctx.content_analyzers,
+        tenant_id=settings.gateway_tenant_id or "",
     )
     if result == "blocked":
         result = "flagged_post_stream"
@@ -667,18 +684,20 @@ async def _after_stream_record(
                         settings.gateway_tenant_id, model_hash,
                     )
 
-        # Use unified SchemaIntelligence for streaming response normalization
+        # Use unified SchemaIntelligence for streaming response normalization.
+        # The standalone normalizer must ONLY run when SI is unavailable — not
+        # whenever the SI block doesn't raise (which would double-normalize).
+        _si = getattr(ctx, "schema_intelligence", None)
         try:
-            _si = getattr(ctx, "schema_intelligence", None)
             if _si:
                 model_response, _norm_report = _si.process_response(model_response, adapter.get_provider_name())
                 if _norm_report.changes:
                     logger.debug("Stream normalization: %s", "; ".join(_norm_report.changes))
+            else:
+                from gateway.pipeline.normalizer import normalize_model_response
+                model_response = normalize_model_response(model_response, adapter.get_provider_name())
         except Exception as _norm_err:
             logger.error("Stream normalization failed (non-fatal): %s", _norm_err)
-        else:
-            from gateway.pipeline.normalizer import normalize_model_response
-            model_response = normalize_model_response(model_response, adapter.get_provider_name())
 
         await _record_token_usage(
             model_response, settings.gateway_tenant_id,
@@ -1278,7 +1297,7 @@ async def _maybe_fetch_ollama_hash(
 
 # ── Input content analysis (B.7: parallel mode) ───────────────────────────────
 
-async def _run_input_analysis_async(call: ModelCall, ctx) -> list[dict]:
+async def _run_input_analysis_async(call: ModelCall, ctx, tenant_id: str = "") -> list[dict]:
     """Run content analyzers on the prompt text (input side).
 
     Used in parallel-analysis mode (B.7): this coroutine is gathered alongside
@@ -1295,7 +1314,7 @@ async def _run_input_analysis_async(call: ModelCall, ctx) -> list[dict]:
         return []
     try:
         from gateway.pipeline.response_evaluator import analyze_text
-        return await analyze_text(call.prompt_text, ctx.content_analyzers)
+        return await analyze_text(call.prompt_text, ctx.content_analyzers, tenant_id=tenant_id)
     except Exception:
         logger.warning("Input content analysis failed (fail-open)", exc_info=True)
         return []
@@ -1317,7 +1336,8 @@ async def _run_response_policy(
         return rp_version, rp_result, decisions, whb, reason, None
 
     _, rp_version, rp_result, decisions, resp_err = await evaluate_post_inference(
-        ctx.policy_cache, model_response, ctx.content_analyzers
+        ctx.policy_cache, model_response, ctx.content_analyzers,
+        tenant_id=settings.gateway_tenant_id or "",
     )
     try:
         response_policy_total.labels(result=rp_result).inc()
@@ -1898,7 +1918,12 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                             "blocked_image_pii",
                             reason="OCR PII detected in attached image(s); see file_metadata for details",
                         )
-                        _inc_request(provider, model, "blocked")
+                        # provider/model are not yet bound at this point
+                        # (those locals are assigned after this block). Derive
+                        # them locally so we don't trip a NameError on block.
+                        _ocr_provider = adapter.get_provider_name()
+                        _ocr_model = call.model_id or "unknown"
+                        _inc_request(_ocr_provider, _ocr_model, "blocked")
                         return _block_resp
                 except Exception:
                     logger.debug("Image OCR analysis failed (non-blocking)", exc_info=True)
@@ -1951,103 +1976,110 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # Single decision point: extract prompt, classify intent, and enrich
     # metadata. Replaces scattered IntentClassifier + audit_classifier
     # + _concat_messages with one coherent system.
+    #
+    # SKIP-GOVERNANCE INVARIANT: SchemaIntelligence is governance-only.
+    # In transparent-proxy mode the gateway must not classify, enrich, or
+    # rewrite the prompt — it just forwards bytes. Gating here also avoids
+    # paying the ONNX inference latency on every passthrough request.
     _body_meta = (body_dict if isinstance(body_dict, dict) else {}).get("metadata")
+    _user_question = ""
 
     ctx = get_pipeline_context()
-    from gateway.classifier.unified import SchemaIntelligence, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG, NORMAL
-    _si = getattr(ctx, "schema_intelligence", None)
-    if _si is None:
-        _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
-                        and settings.mcp_servers_json)
-        # Task 12: when the registry is wired, the ONNX session is loaded on
-        # first `classify_intent` call from `production/intent.onnx`. Without
-        # a registry, fall back to the packaged model path (pre-Phase-25
-        # behavior).
-        _onnx_path = (
-            None
-            if ctx.model_registry is not None
-            else str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+    if not ctx.skip_governance:
+        from gateway.classifier.unified import SchemaIntelligence, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG, NORMAL
+        _si = getattr(ctx, "schema_intelligence", None)
+        if _si is None:
+            _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
+                            and settings.mcp_servers_json)
+            # Task 12: when the registry is wired, the ONNX session is loaded on
+            # first `classify_intent` call from `production/intent.onnx`. Without
+            # a registry, fall back to the packaged model path (pre-Phase-25
+            # behavior).
+            _onnx_path = (
+                None
+                if ctx.model_registry is not None
+                else str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+            )
+            _si = SchemaIntelligence(
+                onnx_model_path=_onnx_path,
+                has_mcp_tools=_has_mcp,
+                verdict_buffer=ctx.verdict_buffer,
+                registry=ctx.model_registry,
+                model_name="intent" if ctx.model_registry is not None else None,
+                # Task 22: shadow runner is wired when the intelligence layer
+                # and a model registry are both active. Nothing else needs
+                # to be true — the runner itself no-ops when no active
+                # candidate is registered.
+                shadow_runner=ctx.shadow_runner,
+                intelligence_db=ctx.intelligence_db,
+            )
+            ctx.schema_intelligence = _si
+
+        # Build metadata context for intent classification
+        _intent_metadata = {**call.metadata}
+        if isinstance(_body_meta, dict):
+            _intent_metadata["_body_metadata"] = _body_meta
+
+        # Extract messages from request body for prompt extraction
+        _body = body_dict if isinstance(body_dict, dict) else {}
+        _messages = _body.get("messages", [])
+
+        # process_request() does prompt extraction + intent classification in one pass
+        # Wrapped in try/except — SI failure must NEVER block the request pipeline.
+        # Offloaded to a worker thread because Tier-2 ONNX classification calls
+        # into blocking onnxruntime.InferenceSession.run; running it inline
+        # would hold the event loop for up to onnx_inference_timeout_ms.
+        _si_enrichment: dict[str, Any] = {}
+        try:
+            _si_enrichment = await asyncio.to_thread(
+                _si.process_request,
+                _messages,
+                _intent_metadata,
+                call.model_id or "",
+            )
+        except Exception as _si_err:
+            logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
+
+        # Override prompt_text with the extracted user question (THE KEY FIX)
+        # _concat_messages in adapters joins ALL messages — we replace that
+        # with just the actual question the user asked.
+        _user_question = _si_enrichment.get("user_question", "")
+        if _user_question:
+            call = dataclasses.replace(call, prompt_text=_user_question)
+
+        # Update walacor_audit with better prompt extraction data
+        _existing_audit = extra.get("walacor_audit", {})
+        _existing_audit["user_question"] = _si_enrichment.get("user_question", _existing_audit.get("user_question", ""))
+        _existing_audit["conversation_context"] = _si_enrichment.get("conversation_context", "")
+        _existing_audit["conversation_turns"] = _si_enrichment.get("conversation_turns", 0)
+        _existing_audit["question_fingerprint"] = _si_enrichment.get("question_fingerprint", "")
+        _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "fallback")
+        _existing_audit["has_rag_context"] = _si_enrichment.get("has_rag_context", _existing_audit.get("has_rag_context", False))
+        _existing_audit["has_files"] = _si_enrichment.get("has_files", _existing_audit.get("has_files", False))
+        extra["walacor_audit"] = _existing_audit
+
+        # Merge intent + routing into call metadata
+        _meta_updates: dict[str, Any] = {
+            k: v for k, v in _si_enrichment.items()
+            if k.startswith("_") or k in ("chat_id", "message_id")
+        }
+        if isinstance(_body_meta, dict):
+            if _body_meta.get("chat_id"):
+                _meta_updates["chat_id"] = _body_meta["chat_id"]
+            if _body_meta.get("message_id"):
+                _meta_updates["message_id"] = _body_meta["message_id"]
+
+        call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
+
+        logger.info(
+            "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s prompt=%d chars",
+            _si_enrichment.get("_intent", "unknown"),
+            _si_enrichment.get("_intent_confidence", 0.0),
+            _si_enrichment.get("_intent_tier", ""),
+            _si_enrichment.get("_intent_reason", ""),
+            call.model_id,
+            len(_user_question),
         )
-        _si = SchemaIntelligence(
-            onnx_model_path=_onnx_path,
-            has_mcp_tools=_has_mcp,
-            verdict_buffer=ctx.verdict_buffer,
-            registry=ctx.model_registry,
-            model_name="intent" if ctx.model_registry is not None else None,
-            # Task 22: shadow runner is wired when the intelligence layer
-            # and a model registry are both active. Nothing else needs
-            # to be true — the runner itself no-ops when no active
-            # candidate is registered.
-            shadow_runner=ctx.shadow_runner,
-            intelligence_db=ctx.intelligence_db,
-        )
-        ctx.schema_intelligence = _si
-
-    # Build metadata context for intent classification
-    _intent_metadata = {**call.metadata}
-    if isinstance(_body_meta, dict):
-        _intent_metadata["_body_metadata"] = _body_meta
-
-    # Extract messages from request body for prompt extraction
-    _body = body_dict if isinstance(body_dict, dict) else {}
-    _messages = _body.get("messages", [])
-
-    # process_request() does prompt extraction + intent classification in one pass
-    # Wrapped in try/except — SI failure must NEVER block the request pipeline.
-    # Offloaded to a worker thread because Tier-2 ONNX classification calls
-    # into blocking onnxruntime.InferenceSession.run; running it inline
-    # would hold the event loop for up to onnx_inference_timeout_ms.
-    _si_enrichment: dict[str, Any] = {}
-    try:
-        _si_enrichment = await asyncio.to_thread(
-            _si.process_request,
-            _messages,
-            _intent_metadata,
-            call.model_id or "",
-        )
-    except Exception as _si_err:
-        logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
-
-    # Override prompt_text with the extracted user question (THE KEY FIX)
-    # _concat_messages in adapters joins ALL messages — we replace that
-    # with just the actual question the user asked.
-    _user_question = _si_enrichment.get("user_question", "")
-    if _user_question:
-        call = dataclasses.replace(call, prompt_text=_user_question)
-
-    # Update walacor_audit with better prompt extraction data
-    _existing_audit = extra.get("walacor_audit", {})
-    _existing_audit["user_question"] = _si_enrichment.get("user_question", _existing_audit.get("user_question", ""))
-    _existing_audit["conversation_context"] = _si_enrichment.get("conversation_context", "")
-    _existing_audit["conversation_turns"] = _si_enrichment.get("conversation_turns", 0)
-    _existing_audit["question_fingerprint"] = _si_enrichment.get("question_fingerprint", "")
-    _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "fallback")
-    _existing_audit["has_rag_context"] = _si_enrichment.get("has_rag_context", _existing_audit.get("has_rag_context", False))
-    _existing_audit["has_files"] = _si_enrichment.get("has_files", _existing_audit.get("has_files", False))
-    extra["walacor_audit"] = _existing_audit
-
-    # Merge intent + routing into call metadata
-    _meta_updates: dict[str, Any] = {
-        k: v for k, v in _si_enrichment.items()
-        if k.startswith("_") or k in ("chat_id", "message_id")
-    }
-    if isinstance(_body_meta, dict):
-        if _body_meta.get("chat_id"):
-            _meta_updates["chat_id"] = _body_meta["chat_id"]
-        if _body_meta.get("message_id"):
-            _meta_updates["message_id"] = _body_meta["message_id"]
-
-    call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
-
-    logger.info(
-        "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s prompt=%d chars",
-        _si_enrichment.get("_intent", "unknown"),
-        _si_enrichment.get("_intent_confidence", 0.0),
-        _si_enrichment.get("_intent_tier", ""),
-        _si_enrichment.get("_intent_reason", ""),
-        call.model_id,
-        len(_user_question),
-    )
     provider = adapter.get_provider_name()
     model = call.model_id or "unknown"
     provider_var.set(provider)
@@ -2074,7 +2106,11 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     # Cache hit returns the stored response immediately — no LLM call, no audit
     # record (correct: there was no actual inference, so nothing to audit).
     if ctx.semantic_cache is not None and not call.is_streaming and call.prompt_text:
-        _cached = ctx.semantic_cache.get(call.model_id, call.prompt_text)
+        _cached = ctx.semantic_cache.get(
+            call.model_id,
+            call.prompt_text,
+            tenant_id=settings.gateway_tenant_id or "default",
+        )
         if _cached is not None:
             try:
                 cache_hits.labels(model=call.model_id or "unknown").inc()
@@ -2215,7 +2251,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         )
         (http_response, model_response, _used_fallback), _input_analysis = await asyncio.gather(
             _forward_with_resilience(adapter, call, request),
-            _run_input_analysis_async(call, ctx),
+            _run_input_analysis_async(call, ctx, tenant_id=settings.gateway_tenant_id or ""),
         )
         if _input_analysis:
             logger.debug(
@@ -2398,18 +2434,55 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     call, model_response = tool_result.call, tool_result.model_response
 
     # If the tool executor streamed the final answer, return it directly
-    # (with after-stream background task for audit record writing).
+    # (with after-stream audit-write hooked into the stream's finally).
     if tool_result.streaming_response is not None and tool_result.stream_buffer is not None:
         buf = tool_result.stream_buffer
         _prebuilt = tool_result.model_response if tool_result.synthetic_stream else None
-        task = BackgroundTask(
-            _after_stream_record, buf, call, adapter,
-            pre.att_id, pre.pv, pre.pr,
-            {**pre.audit_metadata, **build_tool_audit_metadata(tool_result.interactions, pre.tool_strategy, tool_result.iterations)},
-            pre.budget_estimated, t0, None, request,
-            prebuilt_model_response=_prebuilt,
-        )
-        tool_result.streaming_response.background = task
+
+        # CLAUDE.md invariant: the audit-write task MUST run from inside the
+        # generator's `finally` so it fires even when the stream is interrupted
+        # (mirrors the pattern in pipeline/forwarder.py:519-536). Setting
+        # `StreamingResponse.background` is the wrong path: Starlette only
+        # invokes `.background` after a clean iteration end. Wrap the stream's
+        # body_iterator so the BG task runs in finally regardless of how
+        # iteration terminates.
+        _audit_metadata = {
+            **pre.audit_metadata,
+            **build_tool_audit_metadata(
+                tool_result.interactions, pre.tool_strategy, tool_result.iterations,
+            ),
+        }
+        _orig_iterator = tool_result.streaming_response.body_iterator
+        _audit_call, _audit_adapter = call, adapter
+        _audit_att, _audit_pv, _audit_pr = pre.att_id, pre.pv, pre.pr
+        _audit_budget = pre.budget_estimated
+
+        async def _audit_after_stream() -> None:
+            try:
+                await _after_stream_record(
+                    buf, _audit_call, _audit_adapter,
+                    _audit_att, _audit_pv, _audit_pr,
+                    _audit_metadata,
+                    _audit_budget, t0, None, request,
+                    prebuilt_model_response=_prebuilt,
+                )
+            except Exception:
+                logger.error(
+                    "Tool-stream after-stream audit failed for provider=%s model=%s",
+                    provider, model, exc_info=True,
+                )
+
+        async def _wrapped_iterator():
+            try:
+                async for chunk in _orig_iterator:
+                    yield chunk
+            finally:
+                await _audit_after_stream()
+
+        tool_result.streaming_response.body_iterator = _wrapped_iterator()
+        # Defensive: clear any background hook so Starlette can't double-fire
+        # the audit task. The wrapper's finally is now the single source.
+        tool_result.streaming_response.background = None
         if _concurrency_acquired and _concurrency_limiter is not None:
             _concurrency_limiter.release(time.perf_counter() - t0)
         pipeline_duration.labels(step="total").observe(time.perf_counter() - t0)
@@ -2484,6 +2557,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 bytes(http_response.body),
                 status_code=http_response.status_code,
                 content_type=http_response.headers.get("content-type", "application/json"),
+                tenant_id=settings.gateway_tenant_id or "default",
             )
             logger.debug("Semantic cache STORE: model=%s size=%d", call.model_id, ctx.semantic_cache.size)
         except Exception:

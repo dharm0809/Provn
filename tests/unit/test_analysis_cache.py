@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock
 from gateway.content.base import Verdict
 from gateway.pipeline.response_evaluator import analyze_text, _analysis_cache
 
-anyio_backend = ["asyncio"]
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 @pytest.fixture(autouse=True)

@@ -14,6 +14,53 @@ from gateway.auth.identity import CallerIdentity
 
 logger = logging.getLogger(__name__)
 
+
+class JWTConfigurationError(RuntimeError):
+    """Raised at startup when JWT auth is enforced but iss/aud are missing.
+
+    A JWT validator that doesn't pin issuer + audience accepts any signed
+    token from any tenant of the same IDP — that's a token-confusion bug,
+    not a development convenience. Fail-fast at startup so prod never silently
+    boots into the unsafe configuration.
+    """
+
+
+def assert_jwt_runtime_config(settings) -> None:
+    """Validate JWT configuration at startup. Raises JWTConfigurationError on misconfig.
+
+    Enforced when the gateway requires JWTs to authenticate (auth_mode in
+    {"jwt", "both"}). In api_key-only mode the JWT validator is never
+    consulted, so iss/aud being unset is harmless.
+
+    Required when JWT is enforced:
+      - jwt_secret OR jwt_jwks_url (without one, no token can be verified)
+      - jwt_issuer set (otherwise any IDP-signed token is accepted)
+      - jwt_audience set (otherwise tokens minted for any audience are accepted)
+    """
+    mode = (getattr(settings, "auth_mode", "api_key") or "api_key").strip().lower()
+    if mode not in ("jwt", "both"):
+        return  # JWT not enforced; the validator is purely opt-in.
+
+    secret = (getattr(settings, "jwt_secret", "") or "").strip()
+    jwks_url = (getattr(settings, "jwt_jwks_url", "") or "").strip()
+    issuer = (getattr(settings, "jwt_issuer", "") or "").strip()
+    audience = (getattr(settings, "jwt_audience", "") or "").strip()
+
+    problems: list[str] = []
+    if not (secret or jwks_url):
+        problems.append("WALACOR_JWT_SECRET or WALACOR_JWT_JWKS_URL must be set")
+    if not issuer:
+        problems.append("WALACOR_JWT_ISSUER must be set (otherwise any signed token is accepted)")
+    if not audience:
+        problems.append(
+            "WALACOR_JWT_AUDIENCE must be set (otherwise tokens minted for any audience are accepted)"
+        )
+    if problems:
+        raise JWTConfigurationError(
+            "JWT authentication is enforced (auth_mode=%s) but is misconfigured: %s"
+            % (mode, "; ".join(problems))
+        )
+
 # Module-level JWKS client cache: {jwks_url: (PyJWKClient, fetch_timestamp)}
 _jwks_cache: dict[str, tuple[Any, float]] = {}
 _JWKS_CACHE_TTL = 300  # 5 minutes (shorter for faster key rotation response)
@@ -105,9 +152,15 @@ def validate_jwt(
             return None
 
         if not issuer:
-            logger.debug("JWT auth: no issuer configured — iss claim not validated")
+            logger.warning(
+                "JWT auth: no issuer configured — iss claim NOT validated. "
+                "Set WALACOR_JWT_ISSUER in production; any signed token from this IDP will be accepted."
+            )
         if not audience:
-            logger.debug("JWT auth: no audience configured — aud claim not validated")
+            logger.warning(
+                "JWT auth: no audience configured — aud claim NOT validated. "
+                "Set WALACOR_JWT_AUDIENCE in production; tokens minted for any audience will be accepted."
+            )
 
         # Build decode options
         decode_kwargs: dict[str, Any] = {

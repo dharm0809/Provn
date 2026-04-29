@@ -271,46 +271,116 @@ def test_disabled_middleware_passes_all():
     assert resp.status_code == 200
 
 
-def test_scope_key_user_header():
-    """User scope reads X-User-Id header."""
-    limiter = _make_bare_limiter(scope="user")
+def _fake_request(
+    *,
+    caller_identity=None,
+    headers: dict | None = None,
+    client_host: str = "10.0.0.1",
+    path: str = "/v1/chat/completions",
+):
+    """Build a stand-in for starlette.Request that exposes state, headers, client."""
+
+    class _State:
+        pass
+
+    state = _State()
+    if caller_identity is not None:
+        state.caller_identity = caller_identity
 
     class _FakeRequest:
-        headers = {"x-user-id": "alice"}
-        url = type("U", (), {"path": "/v1/chat/completions"})()
+        pass
 
-    assert limiter._get_scope_key(_FakeRequest()) == "alice"  # type: ignore[arg-type]
+    req = _FakeRequest()
+    req.state = state  # type: ignore[attr-defined]
+    req.headers = headers or {}  # type: ignore[attr-defined]
+    req.client = type("C", (), {"host": client_host})()  # type: ignore[attr-defined]
+    req.url = type("U", (), {"path": path})()  # type: ignore[attr-defined]
+    return req
 
 
-def test_scope_key_user_fallback_anonymous():
-    """User scope falls back to 'anonymous' when header is absent."""
+def _identity(user_id: str = "alice", team: str | None = None):
+    from gateway.auth.identity import CallerIdentity
+    return CallerIdentity(user_id=user_id, email="", roles=[], team=team, source="jwt")
+
+
+def test_scope_key_user_uses_authenticated_identity():
+    """User scope must read from request.state.caller_identity (NOT X-User-Id header)."""
     limiter = _make_bare_limiter(scope="user")
-
-    class _FakeRequest:
-        headers: dict = {}
-        url = type("U", (), {"path": "/v1/chat/completions"})()
-
-    assert limiter._get_scope_key(_FakeRequest()) == "anonymous"  # type: ignore[arg-type]
+    req = _fake_request(caller_identity=_identity("alice"))
+    assert limiter._get_scope_key(req) == "user:alice"
 
 
-def test_scope_key_tenant():
+def test_scope_key_user_no_auth_falls_back_to_ip():
+    """When no caller_identity is set, fall back to per-IP bucket."""
+    limiter = _make_bare_limiter(scope="user")
+    req = _fake_request(caller_identity=None, client_host="203.0.113.4")
+    assert limiter._get_scope_key(req) == "ip:203.0.113.4"
+
+
+def test_scope_key_user_header_does_not_spoof_authenticated_identity():
+    """SECURITY: a request that authenticated as 'alice' cannot escape via X-User-Id."""
+    limiter = _make_bare_limiter(scope="user", max_tokens=100)
+
+    # Alice authenticates and burns her bucket.
+    alice_req = _fake_request(
+        caller_identity=_identity("alice"),
+        headers={"x-user-id": "alice"},  # would-be input header
+    )
+    alice_key = limiter._get_scope_key(alice_req)
+    limiter.record_tokens(alice_key, 200)
+    allowed_alice, _ = limiter.check_limit(alice_key)
+    assert allowed_alice is False
+
+    # Now Alice retries while LYING in X-User-Id (claiming to be Bob). Her
+    # authenticated identity is still Alice — the limiter must NOT route her
+    # to bob's bucket and must keep blocking her.
+    spoof_req = _fake_request(
+        caller_identity=_identity("alice"),
+        headers={"x-user-id": "bob"},
+    )
+    spoof_key = limiter._get_scope_key(spoof_req)
+    assert spoof_key == alice_key  # spoof header ignored
+    allowed_spoof, _ = limiter.check_limit(spoof_key)
+    assert allowed_spoof is False  # still over Alice's bucket
+
+
+def test_scope_key_user_header_alone_cannot_create_bucket():
+    """SECURITY: an unauthenticated request cannot manufacture a 'user:bob' bucket via header."""
+    limiter = _make_bare_limiter(scope="user")
+    req = _fake_request(
+        caller_identity=None,
+        headers={"x-user-id": "bob"},
+        client_host="198.51.100.7",
+    )
+    key = limiter._get_scope_key(req)
+    # No identity → IP fallback, NEVER "user:bob" from a header alone.
+    assert key.startswith("ip:")
+    assert "bob" not in key
+
+
+def test_scope_key_tenant_uses_authenticated_team():
+    """Tenant scope reads team from caller_identity, not X-Team-Id header."""
     limiter = _make_bare_limiter(scope="tenant")
+    req = _fake_request(
+        caller_identity=_identity("alice", team="acme"),
+        headers={"x-team-id": "spoofed"},
+    )
+    assert limiter._get_scope_key(req) == "team:acme"
 
-    class _FakeRequest:
-        headers = {"x-team-id": "acme"}
-        url = type("U", (), {"path": "/v1/chat/completions"})()
 
-    assert limiter._get_scope_key(_FakeRequest()) == "acme"  # type: ignore[arg-type]
+def test_scope_key_tenant_no_auth_falls_back_to_ip():
+    limiter = _make_bare_limiter(scope="tenant")
+    req = _fake_request(caller_identity=None, client_host="10.0.0.5")
+    assert limiter._get_scope_key(req) == "ip:10.0.0.5"
 
 
 def test_scope_key_global_always_same():
     limiter = _make_bare_limiter(scope="global")
-
-    class _FakeRequest:
-        headers = {"x-user-id": "alice"}
-        url = type("U", (), {"path": "/v1/chat/completions"})()
-
-    assert limiter._get_scope_key(_FakeRequest()) == "global"  # type: ignore[arg-type]
+    req = _fake_request(
+        caller_identity=_identity("alice"),
+        headers={"x-user-id": "alice"},
+    )
+    assert limiter._get_scope_key(req) == "global"
 
 
 def test_scope_key_api_key_hashed():

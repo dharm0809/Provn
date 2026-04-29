@@ -181,40 +181,6 @@ def verify_record_signature(record: dict) -> str:
     return "valid" if ok else "invalid"
 
 
-def sign_hash(record_hash: str) -> str | None:
-    """Sign a record hash with Ed25519. Returns base64-encoded signature or None.
-
-    Deprecated: use sign_canonical instead. Kept for one release cycle.
-    """
-    if _signing_key is None:
-        return None
-    logger.debug("sign_hash is deprecated; migrate callers to sign_canonical")
-    try:
-        signature = _signing_key.sign(record_hash.encode("utf-8"))
-        return base64.b64encode(signature).decode("ascii")
-    except Exception as e:
-        logger.warning("Record signing failed (fail-open): %s", e)
-        return None
-
-
-def verify_signature(record_hash: str, signature_b64: str) -> bool:
-    """Verify an Ed25519 signature against a record hash.
-
-    Deprecated: use verify_canonical instead. Kept for one release cycle.
-    """
-    if _verify_key is None:
-        return False
-    logger.debug("verify_signature is deprecated; migrate callers to verify_canonical")
-    try:
-        sig_bytes = base64.b64decode(signature_b64)
-        _verify_key.verify(sig_bytes, record_hash.encode("utf-8"))
-        return True
-    except ImportError:
-        return False
-    except Exception:
-        return False
-
-
 def get_public_key_pem() -> str | None:
     """Return the public key in PEM format for verification distribution."""
     if _verify_key is None:

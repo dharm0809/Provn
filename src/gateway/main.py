@@ -165,8 +165,32 @@ def _cross_validate_identity(request: Request, settings) -> None:
 
 
 async def body_size_middleware(request: Request, call_next):
-    """Reject requests whose Content-Length exceeds max_request_body_mb (H5)."""
+    """Reject oversized or unsizable request bodies before any auth check.
+
+    Two checks:
+    1. Reject ``Transfer-Encoding: chunked`` — without Content-Length the
+       size cap below can't enforce ``max_request_body_mb``. Unless
+       explicitly allowed via ``WALACOR_REJECT_CHUNKED_TRANSFER=false``,
+       respond with 411 Length Required.
+    2. Reject when the declared Content-Length exceeds ``max_request_body_mb``.
+    """
     settings = get_settings()
+
+    if getattr(settings, "reject_chunked_transfer", True):
+        te = (request.headers.get("transfer-encoding") or "").lower()
+        if "chunked" in te:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Transfer-Encoding: chunked is not accepted because the request "
+                        "body size cannot be enforced. Send Content-Length instead, or set "
+                        "WALACOR_REJECT_CHUNKED_TRANSFER=false to allow."
+                    )
+                },
+                status_code=411,
+                headers={"Connection": "close"},
+            )
+
     if settings.max_request_body_mb > 0:
         cl = request.headers.get("content-length")
         max_bytes = int(settings.max_request_body_mb * 1024 * 1024)
@@ -194,22 +218,31 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
     _always_open = ("/", "/health", "/metrics", "/v1/models")
     # /lineage/ serves the static dashboard — must load so users can reach the AuthGate.
     # /v1/lineage/* and /v1/compliance expose JSON data; gated when lineage_auth_required=True.
-    # /v1/openwebui/* and /api/* are the OpenWebUI plugin + native Ollama proxy routes.
+    # /v1/openwebui/* and /api/* are the OpenWebUI plugin + native Ollama proxy routes;
+    # gated when WALACOR_PLUGIN_AUTH_REQUIRED=true (default false for backward compat).
     _static_ui = _is_lineage_dashboard_path(request.url.path)
     _plugin_paths = ("/v1/openwebui/", "/api/")
     _lineage_data_paths = ("/v1/lineage/", "/v1/compliance")
-    _lineage_data_open = not get_settings().lineage_auth_required
+    _settings_for_paths = get_settings()
+    _lineage_data_open = not _settings_for_paths.lineage_auth_required
+    _plugin_paths_open = not getattr(_settings_for_paths, "plugin_auth_required", False)
     if (
         request.url.path in _always_open
         or _static_ui
-        or request.url.path.startswith(_plugin_paths)
+        or (_plugin_paths_open and request.url.path.startswith(_plugin_paths))
         or (_lineage_data_open and request.url.path.startswith(_lineage_data_paths))
     ):
         return await call_next(request)
 
-    # Pre-auth per-IP rate limiting (before any auth check)
+    # Pre-auth per-IP rate limiting (before any auth check).
+    # Honours X-Forwarded-For ONLY when request.client.host is a configured
+    # trusted proxy — otherwise an attacker could rotate the header and bypass
+    # the limit. See gateway.middleware.ip_rate_limiter.resolve_client_ip.
     if request.url.path.startswith("/v1/"):
-        client_ip = request.client.host if request.client else "unknown"
+        direct_peer = request.client.host if request.client else "unknown"
+        client_ip = _ip_limiter.resolve_ip(
+            direct_peer, request.headers.get("x-forwarded-for")
+        )
         if not _ip_limiter.check(client_ip):
             return JSONResponse(
                 {"error": "Rate limit exceeded"},
@@ -1402,36 +1435,25 @@ async def _event_loop_lag_monitor():
         event_loop_lag_seconds.set(max(0.0, lag))
 
 
-async def _merkle_checkpoint_loop(ctx, interval: int) -> None:
-    """Periodically build Merkle tree checkpoint from recent session chain hashes."""
-    from gateway.crypto.merkle_tree import build_merkle_tree
-
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            if ctx.wal_writer is None:
-                continue
-            # Read recent record hashes from WAL
-            conn = ctx.wal_writer._ensure_conn()
-            cur = conn.execute(
-                "SELECT json_extract(record_json, '$.record_hash') FROM wal_records "
-                "WHERE json_extract(record_json, '$.record_hash') IS NOT NULL "
-                "ORDER BY created_at DESC LIMIT 1000"
-            )
-            hashes = [row[0] for row in cur.fetchall() if row[0]]
-            if not hashes:
-                continue
-            root, levels = build_merkle_tree(hashes)
-            logger.info("Merkle checkpoint: root=%s leaves=%d levels=%d", root[:16], len(hashes), len(levels))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.error("Merkle checkpoint failed", exc_info=True)
-
-
 async def on_startup() -> None:
     settings = get_settings()
     ctx = get_pipeline_context()
+
+    # Fail-fast on misconfigured JWT enforcement BEFORE we touch any
+    # external service. Tokens with no iss/aud pinning would otherwise let
+    # any IDP-signed JWT in. (See bug #13.)
+    from gateway.auth.jwt_auth import assert_jwt_runtime_config
+    assert_jwt_runtime_config(settings)
+
+    # Plugin-path auth warning. Default is unauthenticated for backward
+    # compatibility with existing OpenWebUI deployments — surface a loud
+    # warning so operators know they need to either restrict access at the
+    # network layer or set WALACOR_PLUGIN_AUTH_REQUIRED=true. (See bug #12.)
+    if not getattr(settings, "plugin_auth_required", False):
+        logger.warning(
+            "WALACOR_PLUGIN_AUTH_REQUIRED=False — /v1/openwebui/* and /api/* are unauthenticated; "
+            "restrict to loopback or set the flag in production."
+        )
 
     try:
         # Ed25519 record signing — auto-provisions a key on first run and
@@ -1528,6 +1550,18 @@ async def on_startup() -> None:
         _init_budget_tracker(settings, ctx)
         _init_session_chain(settings, ctx)
         _ip_limiter._rpm = settings.ip_rate_limit_rpm
+        # Reconfigure trusted_proxies from settings so X-Forwarded-For is honoured
+        # only when the direct peer is in the trusted list.
+        from gateway.middleware.ip_rate_limiter import _parse_trusted_proxies
+        _ip_limiter._trusted_proxies = _parse_trusted_proxies(
+            getattr(settings, "ip_rate_limit_trusted_proxies", "") or ""
+        )
+        if not _ip_limiter._trusted_proxies:
+            logger.warning(
+                "WALACOR_IP_RATE_LIMIT_TRUSTED_PROXIES is empty — IP rate limiter uses request.client.host directly. "
+                "If the gateway sits behind a reverse proxy, all requests will share one bucket; "
+                "set this flag to the proxy CIDR to honour X-Forwarded-For."
+            )
         if settings.rate_limit_enabled:
             _init_rate_limiter(settings, ctx)
         else:
@@ -1649,11 +1683,6 @@ async def on_startup() -> None:
             # Local sync loop keeps policy_cache.fetched_at fresh (fixes fail_closed)
             from gateway.control.loader import _run_local_sync_loop
             ctx.local_sync_task = asyncio.create_task(_run_local_sync_loop(settings, ctx))
-        # Phase 24: Merkle tree checkpoint background task
-        if settings.merkle_checkpoint_enabled:
-            ctx.merkle_checkpoint_task = asyncio.create_task(
-                _merkle_checkpoint_loop(ctx, settings.merkle_checkpoint_interval_seconds)
-            )
         # Event loop lag monitor (RED metrics)
         ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
         # Multimodal audit: attachment notification cache
@@ -1877,23 +1906,25 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"alert_bus_task: {e}")
 
-    if ctx.merkle_checkpoint_task and not ctx.merkle_checkpoint_task.done():
-        ctx.merkle_checkpoint_task.cancel()
-        try:
-            await ctx.merkle_checkpoint_task
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            errors.append(f"merkle_checkpoint_task: {e}")
-
-    # Intelligence flush worker — stop() flips the running flag,
-    # await drains any in-flight tick. Short timeout so shutdown never hangs
-    # on a stuck SQLite write.
+    # Intelligence flush worker — stop_and_drain() cancels the in-flight
+    # sleep and writes whatever remains in the buffer to SQLite before we
+    # cancel the run task. Without this drain, up to batch_size verdicts
+    # sit in memory between the last tick and shutdown and are lost.
+    # Short timeout so shutdown never hangs on a stuck SQLite write.
     if ctx.intelligence_flush_worker:
         try:
-            ctx.intelligence_flush_worker.stop()
+            await asyncio.wait_for(
+                ctx.intelligence_flush_worker.stop_and_drain(),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            errors.append("intelligence_flush_worker.stop_and_drain: timeout")
+            try:
+                ctx.intelligence_flush_worker.stop()
+            except Exception as e:
+                errors.append(f"intelligence_flush_worker.stop: {e}")
         except Exception as e:
-            errors.append(f"intelligence_flush_worker.stop: {e}")
+            errors.append(f"intelligence_flush_worker.stop_and_drain: {e}")
     if ctx.intelligence_flush_task and not ctx.intelligence_flush_task.done():
         try:
             await asyncio.wait_for(ctx.intelligence_flush_task, timeout=2.0)
@@ -2093,10 +2124,14 @@ def create_app() -> Starlette:
     app.add_middleware(BaseHTTPMiddleware, dispatch=cors_middleware)
     # Security headers (XSS, clickjack, MIME-sniff) on every response; CSP on /lineage/ only.
     app.add_middleware(BaseHTTPMiddleware, dispatch=security_headers_middleware)
-    # Body size limit runs outside auth so oversized requests are rejected early (H5).
-    app.add_middleware(BaseHTTPMiddleware, dispatch=body_size_middleware)
     # api_key runs inside completeness so denied_auth attempts are always recorded.
+    # Registered BEFORE body_size_middleware so that body_size sits OUTSIDE auth
+    # (last-registered = outermost = first to run) — oversized payloads + chunked
+    # uploads are rejected before any auth/completeness work is done.
     app.add_middleware(BaseHTTPMiddleware, dispatch=api_key_middleware)
+    # Body size + Transfer-Encoding gate sits outside auth so attackers can't
+    # tie up resources by streaming a huge body just to be rejected at auth.
+    app.add_middleware(BaseHTTPMiddleware, dispatch=body_size_middleware)
     # Token rate limiter runs inside api_key (auth already checked) but outside
     # completeness so 429 responses are recorded as attempts.
     settings = get_settings()

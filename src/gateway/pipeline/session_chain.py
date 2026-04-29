@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+# Vestigial sentinel from the legacy SHA3 chain. The active chain is the
+# ID-pointer chain (record_id + previous_record_id); this constant is kept
+# only because the `previous_record_hash` field is still wired through
+# downstream readers (walacor client, classifier schema, lineage normalizer)
+# during the transition. Do NOT reintroduce Merkle / SHA3-chain semantics.
 _GENESIS_HASH = "0" * 128
 # Exported alias used by Redis tracker
 GENESIS_HASH = _GENESIS_HASH
@@ -20,8 +25,8 @@ GENESIS_HASH = _GENESIS_HASH
 class ChainValues:
     """Values returned by next_chain_values for the next record in a session."""
     sequence_number: int
-    previous_record_hash: str       # legacy SHA3 chain — kept during transition
-    previous_record_id: str | None  # new ID-pointer chain
+    previous_record_hash: str       # vestigial — see _GENESIS_HASH note above
+    previous_record_id: str | None  # canonical ID-pointer chain link
 
 
 @dataclass
@@ -46,12 +51,12 @@ class SessionChainTracker:
         self._sessions: OrderedDict[str, SessionState] = OrderedDict()
         self._lock = asyncio.Lock()
         # Per-session locks ensure that a full (next_chain_values →
-        # compute hash → write → update) transaction runs atomically
-        # per session. Without this, two concurrent requests for the
-        # same session can both read the same `last_record_hash` (since
-        # the first one hasn't called `update()` yet), producing two
-        # records whose `previous_record_hash` points at the same prior
-        # id — breaking ID-pointer chain linkage.
+        # write → update) transaction runs atomically per session.
+        # Without this, two concurrent requests for the same session
+        # can both read the same `last_record_id` (since the first one
+        # hasn't called `update()` yet), producing two records whose
+        # `previous_record_id` points at the same prior id — breaking
+        # ID-pointer chain linkage.
         #
         # The in-process lock is ONLY correct when the gateway runs on
         # a single worker. Multi-replica deployments must configure

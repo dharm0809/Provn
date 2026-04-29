@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from gateway.content.base import ContentAnalyzer, Decision, Verdict
+
+logger = logging.getLogger(__name__)
 
 # Patterns ordered by specificity. Each entry: (name, compiled_regex)
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -39,6 +42,14 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 # in educational/technical LLM responses (e.g. "Google's IP is 142.250.184.14").
 _BLOCK_PII_TYPES = {"credit_card", "ssn", "aws_access_key", "api_key"}
 
+# Floor: control-plane configuration is allowed to ADD categories to the block
+# set or move WARN-tier items up to BLOCK, but it is NOT allowed to demote any
+# of these four below BLOCK.  These represent credentials and identity docs
+# whose leak is always a security incident regardless of tenant policy; if an
+# admin tries to relax them via control-plane content_policies, configure()
+# logs a WARNING and silently re-adds them.
+_BLOCK_FLOOR: frozenset[str] = frozenset({"credit_card", "ssn", "aws_access_key", "api_key"})
+
 
 class PIIDetector(ContentAnalyzer):
     """
@@ -62,12 +73,32 @@ class PIIDetector(ContentAnalyzer):
         self._pass_types: set[str] = set()
 
     def configure(self, policies: list[dict]) -> None:
-        """Reconfigure block/warn/pass sets from control plane content policies."""
+        """Reconfigure block/warn/pass sets from control plane content policies.
+
+        Enforces ``_BLOCK_FLOOR``: credit_card / ssn / aws_access_key / api_key
+        always BLOCK regardless of admin configuration.  If a policy demotes
+        them to WARN/PASS we log a WARNING and silently restore them to BLOCK.
+        """
         if not policies:
             return
-        self._block_types = {p["category"] for p in policies if p.get("action") == "block"}
-        self._warn_types = {p["category"] for p in policies if p.get("action") == "warn"}
-        self._pass_types = {p["category"] for p in policies if p.get("action") == "pass"}
+        block = {p["category"] for p in policies if p.get("action") == "block"}
+        warn = {p["category"] for p in policies if p.get("action") == "warn"}
+        skip = {p["category"] for p in policies if p.get("action") == "pass"}
+
+        demoted = (warn | skip) & _BLOCK_FLOOR
+        if demoted:
+            logger.warning(
+                "PIIDetector: control-plane policy attempted to demote floor types %s "
+                "below BLOCK; restoring to BLOCK (floor is non-negotiable for credentials/identity).",
+                sorted(demoted),
+            )
+            warn -= _BLOCK_FLOOR
+            skip -= _BLOCK_FLOOR
+        block |= _BLOCK_FLOOR
+
+        self._block_types = block
+        self._warn_types = warn
+        self._pass_types = skip
 
     @property
     def timeout_ms(self) -> int:

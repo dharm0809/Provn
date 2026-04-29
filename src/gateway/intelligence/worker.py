@@ -21,7 +21,7 @@ import hashlib
 import json
 import logging
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gemma3:1b"  # Smallest/fastest model for background tasks
 MAX_QUEUE_SIZE = 500
 CACHE_MAX_SIZE = 1000
+DEFAULT_DISTILLATION_BUFFER_MAX = 10_000  # Bounded distillation buffer; overridden by WALACOR_DISTILLATION_BUFFER_MAX
 NUM_PREDICT_CLASSIFY = 30
 NUM_PREDICT_TOPICS = 50
 NUM_PREDICT_COMPLIANCE = 50
@@ -155,6 +156,7 @@ class IntelligenceWorker:
         ollama_url: str = "http://localhost:11434",
         model: str = DEFAULT_MODEL,
         enabled: bool = True,
+        distillation_buffer_max: int = DEFAULT_DISTILLATION_BUFFER_MAX,
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._model = model
@@ -165,8 +167,15 @@ class IntelligenceWorker:
         self._processed = 0
         self._errors = 0
         self._results_callback: Any = None  # Set by pipeline to write back to WAL
-        # Distillation buffer: (prompt, label, confidence) for ONNX retraining
-        self._distillation_buffer: list[dict] = []
+        # Distillation buffer: (prompt, label, confidence) for ONNX retraining.
+        # Bounded deque — oldest samples evicted when capacity reached.
+        # Distillation cares about current traffic patterns, so dropping the
+        # oldest samples is the correct eviction policy. Without the bound
+        # this list grew without limit and was a slow memory leak under
+        # sustained load.
+        self._distillation_buffer: deque[dict] = deque(
+            maxlen=max(1, int(distillation_buffer_max))
+        )
         self._last_error: tuple[float, str] | None = None
 
     def _record_error(self, detail: str) -> None:

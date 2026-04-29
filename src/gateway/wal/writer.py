@@ -86,6 +86,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         # query (_SESSIONS_AGG_SUBQUERY in lineage/reader.py) stops calling
         # json_extract() 6x per row on a large record_json blob.
         ("wal_records", "request_type", "TEXT"),
+        # Dead-letter queue marker. NULL = normal record (may still be
+        # pending or delivered).  'dead_letter' = control plane returned a
+        # 4xx — record is intentionally NOT retried.  delivered=1 is also
+        # set on these rows so get_undelivered() skips them.
+        ("wal_records", "delivery_status", "TEXT"),
     ]
     for table, col, col_type in _add_columns:
         try:
@@ -190,6 +195,16 @@ class WALWriter:
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._conn: sqlite3.Connection | None = None
+        # Serialises every operation that touches self._conn.  Necessary
+        # because self._conn is opened with check_same_thread=False and is
+        # shared across threads — at minimum the BatchWriter
+        # (asyncio.to_thread → write_and_fsync) and the DeliveryWorker
+        # (event-loop thread → get_undelivered/mark_delivered/…).  Without
+        # this lock, the two callers can race on the same connection and
+        # corrupt cursor state or mis-order writes.  The dedicated writer
+        # thread uses a SEPARATE connection (self._thread_conn) so it does
+        # not contend on this lock.
+        self._write_lock = threading.Lock()
 
         # Dedicated writer thread state
         self._queue: queue.Queue[tuple[Any, tuple] | None] = queue.Queue()
@@ -318,21 +333,29 @@ class WALWriter:
         record_json = json.dumps(data)
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
+        # Match the sync write_and_fsync path: persist request_type so the
+        # sessions-list query can filter without json_extract() per row.
+        request_type = (
+            data.get("request_type")
+            or (data.get("metadata") or {}).get("request_type")
+            or "user_message"
+        )
         conn.execute(
             """INSERT OR REPLACE INTO wal_records
                (execution_id, record_json, created_at, delivered,
                 event_type, session_id, timestamp, model_id, provider, user,
                 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                sequence_number, policy_result)
+                sequence_number, policy_result, request_type)
                VALUES (?, ?, ?, 0,
                        'execution', ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?)""",
             (execution_id, record_json, now,
              data.get("session_id"), data.get("timestamp") or now,
              data.get("model_id"), data.get("provider"), data.get("user"),
              data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
              data.get("total_tokens") or 0, data.get("latency_ms"),
-             data.get("sequence_number"), data.get("policy_result")),
+             data.get("sequence_number"), data.get("policy_result"),
+             request_type),
         )
         logger.debug("WAL (thread) write execution_id=%s", execution_id)
 
@@ -430,7 +453,20 @@ class WALWriter:
         return self._conn
 
     def write_and_fsync(self, record: ExecutionRecord | dict[str, Any]) -> None:
-        """Append record to WAL. Blocks until fsync (synchronous=FULL). Accepts ExecutionRecord or dict."""
+        """Append record to WAL — durable, NOT per-write fsync.
+
+        Despite the name (kept for API stability), this method does NOT call
+        fsync per write.  Durability comes from SQLite WAL journal mode plus
+        ``PRAGMA synchronous=NORMAL``: crash-safe (atomic; never database
+        corruption) but the most recent in-flight transaction may be lost on
+        power failure.  The trade-off is intentional — under sustained load
+        a per-write fsync caps throughput at ~hundreds of writes/sec on
+        consumer SSDs.  Callers that need true fsync semantics should issue
+        ``PRAGMA synchronous=FULL`` explicitly or call ``conn.commit()``
+        followed by ``os.fsync()``.
+
+        Accepts ExecutionRecord or dict.
+        """
         conn = self._ensure_conn()
         if isinstance(record, dict):
             data = record
@@ -440,24 +476,25 @@ class WALWriter:
         now = datetime.now(timezone.utc).isoformat()
         execution_id = data["execution_id"] if isinstance(record, dict) else record.execution_id
         request_type = (data.get("metadata") or {}).get("request_type") or "user_message"
-        conn.execute(
-            """INSERT OR REPLACE INTO wal_records
-               (execution_id, record_json, created_at, delivered,
-                event_type, session_id, timestamp, model_id, provider, user,
-                prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                sequence_number, policy_result, request_type)
-               VALUES (?, ?, ?, 0,
-                       'execution', ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?)""",
-            (execution_id, record_json, now,
-             data.get("session_id"), data.get("timestamp") or now,
-             data.get("model_id"), data.get("provider"), data.get("user"),
-             data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
-             data.get("total_tokens") or 0, data.get("latency_ms"),
-             data.get("sequence_number"), data.get("policy_result"),
-             request_type),
-        )
-        conn.commit()
+        with self._write_lock:
+            conn.execute(
+                """INSERT OR REPLACE INTO wal_records
+                   (execution_id, record_json, created_at, delivered,
+                    event_type, session_id, timestamp, model_id, provider, user,
+                    prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                    sequence_number, policy_result, request_type)
+                   VALUES (?, ?, ?, 0,
+                           'execution', ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?)""",
+                (execution_id, record_json, now,
+                 data.get("session_id"), data.get("timestamp") or now,
+                 data.get("model_id"), data.get("provider"), data.get("user"),
+                 data.get("prompt_tokens") or 0, data.get("completion_tokens") or 0,
+                 data.get("total_tokens") or 0, data.get("latency_ms"),
+                 data.get("sequence_number"), data.get("policy_result"),
+                 request_type),
+            )
+            conn.commit()
         logger.debug("WAL write execution_id=%s", execution_id)
 
     def write_batch(self, records: list[dict[str, Any]]) -> None:
@@ -491,17 +528,18 @@ class WALWriter:
                 data.get("tool_type"),
                 req_type,
             ))
-        conn.executemany(
-            """INSERT OR REPLACE INTO wal_records
-               (execution_id, record_json, created_at, delivered,
-                event_type, session_id, timestamp, model_id, provider, user,
-                prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                sequence_number, policy_result, parent_execution_id,
-                tool_name, tool_type, request_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            rows,
-        )
-        conn.commit()
+        with self._write_lock:
+            conn.executemany(
+                """INSERT OR REPLACE INTO wal_records
+                   (execution_id, record_json, created_at, delivered,
+                    event_type, session_id, timestamp, model_id, provider, user,
+                    prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                    sequence_number, policy_result, parent_execution_id,
+                    tool_name, tool_type, request_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            conn.commit()
         logger.debug("WAL write_batch count=%d", len(rows))
 
     def get_chain_heads(self, ttl_hours: int = 24) -> list[tuple[str, int, str, str | None]]:
@@ -511,20 +549,22 @@ class WALWriter:
         Only loads sessions active within *ttl_hours* to avoid loading stale data.
         """
         conn = self._ensure_conn()
-        cur = conn.execute(
-            """SELECT session_id, MAX(sequence_number) AS seq,
-                      json_extract(record_json, '$.record_hash') AS rh,
-                      json_extract(record_json, '$.record_id') AS rid
-               FROM wal_records
-               WHERE event_type = 'execution'
-                 AND session_id IS NOT NULL
-                 AND sequence_number IS NOT NULL
-                 AND timestamp >= datetime('now', ?)
-               GROUP BY session_id""",
-            (f"-{ttl_hours} hours",),
-        )
+        with self._write_lock:
+            cur = conn.execute(
+                """SELECT session_id, MAX(sequence_number) AS seq,
+                          json_extract(record_json, '$.record_hash') AS rh,
+                          json_extract(record_json, '$.record_id') AS rid
+                   FROM wal_records
+                   WHERE event_type = 'execution'
+                     AND session_id IS NOT NULL
+                     AND sequence_number IS NOT NULL
+                     AND timestamp >= datetime('now', ?)
+                   GROUP BY session_id""",
+                (f"-{ttl_hours} hours",),
+            )
+            rows = cur.fetchall()
         results = []
-        for row in cur.fetchall():
+        for row in rows:
             sid, seq, rh, rid = row
             if sid and seq is not None and (rh or rid):
                 results.append((sid, int(seq), str(rh or ""), rid))
@@ -533,33 +573,92 @@ class WALWriter:
     def get_undelivered(self, limit: int = 50) -> list[tuple[str, str, str]]:
         """Return list of (execution_id, record_json, created_at) for undelivered records, oldest first."""
         conn = self._ensure_conn()
-        cur = conn.execute(
-            "SELECT execution_id, record_json, created_at FROM wal_records WHERE delivered = 0 ORDER BY created_at ASC LIMIT ?",
-            (limit,),
-        )
-        return list(cur.fetchall())
+        with self._write_lock:
+            cur = conn.execute(
+                "SELECT execution_id, record_json, created_at FROM wal_records WHERE delivered = 0 ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            )
+            return list(cur.fetchall())
 
     def mark_delivered(self, execution_id: str) -> None:
         conn = self._ensure_conn()
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            "UPDATE wal_records SET delivered = 1, delivered_at = ? WHERE execution_id = ?",
-            (now, execution_id),
+        with self._write_lock:
+            conn.execute(
+                "UPDATE wal_records SET delivered = 1, delivered_at = ? WHERE execution_id = ?",
+                (now, execution_id),
+            )
+            conn.commit()
+
+    def mark_dead_lettered(self, execution_id: str, reason: str | None = None) -> None:
+        """Permanently park a record in the DLQ — control plane returned 4xx.
+
+        Sets ``delivery_status='dead_letter'`` so operators can see why the
+        record was abandoned, and ``delivered=1`` so ``get_undelivered``
+        skips it on every subsequent cycle.  ``reason`` is best-effort: it
+        is appended to the JSON blob under ``$.delivery_error`` so it
+        surfaces in the lineage drawer without needing a new column.
+        """
+        conn = self._ensure_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write_lock:
+            if reason:
+                # Patch reason into record_json so it survives a future
+                # purge of the row by remaining queryable through
+                # json_extract().
+                cur = conn.execute(
+                    "SELECT record_json FROM wal_records WHERE execution_id = ?",
+                    (execution_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    try:
+                        body = json.loads(row[0])
+                    except Exception:
+                        body = {}
+                    if isinstance(body, dict):
+                        body["delivery_error"] = reason
+                        try:
+                            patched = json.dumps(body)
+                        except Exception:
+                            patched = row[0]
+                        conn.execute(
+                            "UPDATE wal_records SET record_json = ? WHERE execution_id = ?",
+                            (patched, execution_id),
+                        )
+            conn.execute(
+                "UPDATE wal_records SET delivered = 1, delivered_at = ?,"
+                " delivery_status = 'dead_letter' WHERE execution_id = ?",
+                (now, execution_id),
+            )
+            conn.commit()
+        logger.warning(
+            "WAL dead-letter execution_id=%s reason=%s", execution_id, reason
         )
-        conn.commit()
+
+    def dead_letter_count(self) -> int:
+        """Return the number of rows currently parked in the DLQ."""
+        conn = self._ensure_conn()
+        with self._write_lock:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM wal_records WHERE delivery_status = 'dead_letter'"
+            )
+            return cur.fetchone()[0]
 
     def pending_count(self) -> int:
         conn = self._ensure_conn()
-        cur = conn.execute("SELECT COUNT(*) FROM wal_records WHERE delivered = 0")
-        return cur.fetchone()[0]
+        with self._write_lock:
+            cur = conn.execute("SELECT COUNT(*) FROM wal_records WHERE delivered = 0")
+            return cur.fetchone()[0]
 
     def oldest_pending_seconds(self) -> float | None:
         """Seconds since oldest undelivered record's created_at. None if no pending records."""
         conn = self._ensure_conn()
-        cur = conn.execute(
-            "SELECT created_at FROM wal_records WHERE delivered = 0 ORDER BY created_at ASC LIMIT 1"
-        )
-        row = cur.fetchone()
+        with self._write_lock:
+            cur = conn.execute(
+                "SELECT created_at FROM wal_records WHERE delivered = 0 ORDER BY created_at ASC LIMIT 1"
+            )
+            row = cur.fetchone()
         if not row:
             return None
         from datetime import datetime, timezone
@@ -593,13 +692,14 @@ class WALWriter:
         """Append one row to gateway_attempts for the completeness invariant."""
         conn = self._ensure_conn()
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """INSERT OR REPLACE INTO gateway_attempts
-               (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
-        )
-        conn.commit()
+        with self._write_lock:
+            conn.execute(
+                """INSERT OR REPLACE INTO gateway_attempts
+                   (request_id, timestamp, tenant_id, provider, model_id, path, disposition, execution_id, status_code, user, reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (request_id, now, tenant_id, provider or None, model_id or None, path, disposition, execution_id or None, status_code, user or None, reason or None),
+            )
+            conn.commit()
         logger.debug("gateway_attempts request_id=%s disposition=%s user=%s", request_id, disposition, user)
 
     def write_tool_event(self, record: dict[str, Any]) -> None:
@@ -607,45 +707,48 @@ class WALWriter:
         conn = self._ensure_conn()
         event_id = record["event_id"]
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """INSERT OR REPLACE INTO wal_records
-               (execution_id, record_json, created_at, delivered,
-                event_type, session_id, timestamp, parent_execution_id,
-                tool_name, tool_type)
-               VALUES (?, ?, ?, 0,
-                       'tool_call', ?, ?, ?, ?, ?)""",
-            (event_id, json.dumps(record), now,
-             record.get("session_id"), record.get("timestamp") or now,
-             record.get("execution_id"), record.get("tool_name"),
-             record.get("tool_type")),
-        )
-        conn.commit()
+        with self._write_lock:
+            conn.execute(
+                """INSERT OR REPLACE INTO wal_records
+                   (execution_id, record_json, created_at, delivered,
+                    event_type, session_id, timestamp, parent_execution_id,
+                    tool_name, tool_type)
+                   VALUES (?, ?, ?, 0,
+                           'tool_call', ?, ?, ?, ?, ?)""",
+                (event_id, json.dumps(record), now,
+                 record.get("session_id"), record.get("timestamp") or now,
+                 record.get("execution_id"), record.get("tool_name"),
+                 record.get("tool_type")),
+            )
+            conn.commit()
         logger.debug("WAL write_tool_event event_id=%s", event_id)
 
     def purge_delivered(self, max_age_hours: float) -> int:
         """Delete delivered wal_records older than max_age_hours. Returns count deleted."""
         conn = self._ensure_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-        cur = conn.execute(
-            "DELETE FROM wal_records WHERE delivered = 1 AND delivered_at < ?",
-            (cutoff,),
-        )
-        conn.commit()
-        deleted = cur.rowcount
-        if deleted > 0:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        with self._write_lock:
+            cur = conn.execute(
+                "DELETE FROM wal_records WHERE delivered = 1 AND delivered_at < ?",
+                (cutoff,),
+            )
+            conn.commit()
+            deleted = cur.rowcount
+            if deleted > 0:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return deleted
 
     def purge_attempts(self, max_age_hours: float) -> int:
         """Delete gateway_attempts older than max_age_hours. Returns count deleted."""
         conn = self._ensure_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-        cur = conn.execute(
-            "DELETE FROM gateway_attempts WHERE timestamp < ?",
-            (cutoff,),
-        )
-        conn.commit()
-        return cur.rowcount
+        with self._write_lock:
+            cur = conn.execute(
+                "DELETE FROM gateway_attempts WHERE timestamp < ?",
+                (cutoff,),
+            )
+            conn.commit()
+            return cur.rowcount
 
     def close(self) -> None:
         self.stop()

@@ -261,15 +261,30 @@ async def lineage_attempts(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def _request_tenant_id(request: Request) -> str:
+    """Resolve tenant_id for cache scoping. Prefers the caller identity attached to
+    request.state, falls back to the gateway-level tenant from settings."""
+    ident = getattr(request.state, "caller_identity", None)
+    tid = getattr(ident, "tenant_id", "") if ident is not None else ""
+    if tid:
+        return tid
+    try:
+        from gateway.config import get_settings
+        return get_settings().gateway_tenant_id or "default"
+    except Exception:
+        return "default"
+
+
 async def lineage_metrics_history(request: Request) -> JSONResponse:
     """GET /v1/lineage/metrics?range=1h|24h|7d|30d — time-bucketed attempt metrics for charting."""
     reader = _reader_or_503()
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
+    tenant = _request_tenant_id(request)
     try:
         data = await _cached_analytics(
-            f"metrics:{range_key}",
+            f"metrics:{tenant}:{range_key}",
             lambda: _call(reader.get_metrics_history, range_key),
         )
         return JSONResponse(data)
@@ -284,9 +299,10 @@ async def lineage_token_latency_history(request: Request) -> JSONResponse:
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
+    tenant = _request_tenant_id(request)
     try:
         data = await _cached_analytics(
-            f"token_latency:{range_key}",
+            f"token_latency:{tenant}:{range_key}",
             lambda: _call(reader.get_token_latency_history, range_key),
         )
         return JSONResponse(data)
@@ -314,6 +330,7 @@ async def lineage_metrics_stream(request: Request) -> StreamingResponse:
     if reader is None:
         return JSONResponse({"error": "Lineage reader not available"}, status_code=503)
     range_key = request.query_params.get("range", "1h")
+    tenant = _request_tenant_id(request)
     # Tick just above the cache TTL so each emission usually hits a fresh
     # value without forcing more DB work than the cached REST endpoint.
     tick_seconds = 3.0
@@ -329,7 +346,7 @@ async def lineage_metrics_stream(request: Request) -> StreamingResponse:
                     return
                 try:
                     data = await _cached_analytics(
-                        f"metrics:{range_key}",
+                        f"metrics:{tenant}:{range_key}",
                         lambda: _call(reader.get_metrics_history, range_key),
                     )
                     payload = _json.dumps_bytes(data)

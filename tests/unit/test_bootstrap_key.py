@@ -77,3 +77,50 @@ def test_bootstrap_key_stable_false_when_malformed(tmp_path):
     from gateway.auth.bootstrap_key import bootstrap_key_stable
     (tmp_path / "gateway-bootstrap-key.txt").write_text("bogus")
     assert bootstrap_key_stable(str(tmp_path)) is False
+
+
+def test_file_mode_is_0600_under_loose_umask(tmp_path, monkeypatch):
+    """SECURITY: even with a permissive umask (022) inherited from the environment,
+    the bootstrap key file must be born 0600 thanks to the explicit umask 077 set
+    inside ensure_bootstrap_key. Without that, a chmod failure or interrupt between
+    open() and chmod() would leave the file world-readable."""
+    if os.name != "posix":
+        pytest.skip("POSIX-only file-mode invariants")
+    from gateway.auth.bootstrap_key import ensure_bootstrap_key
+
+    saved = os.umask(0o022)  # simulate a loose default umask
+    try:
+        ensure_bootstrap_key(str(tmp_path))
+    finally:
+        os.umask(saved)
+
+    path = tmp_path / "gateway-bootstrap-key.txt"
+    mode = stat_mod.S_IMODE(path.stat().st_mode)
+    assert (mode & 0o077) == 0, f"Expected no group/world perms, got mode {oct(mode)}"
+
+
+def test_chmod_failure_logs_error_does_not_silently_pass(tmp_path, monkeypatch, caplog):
+    """SECURITY: chmod failure must be logged at ERROR; before the fix it was a bare `pass`."""
+    if os.name != "posix":
+        pytest.skip("POSIX-only file-mode invariants")
+    from gateway.auth.bootstrap_key import ensure_bootstrap_key
+
+    real_chmod = Path.chmod
+
+    def _raise_chmod(self, *a, **kw):  # noqa: ARG001
+        # Only raise for the bootstrap-key tmp file, leave anything else (parent dirs etc.) alone.
+        if self.name.startswith("gateway-bootstrap-key.txt"):
+            raise OSError("simulated chmod failure")
+        return real_chmod(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "chmod", _raise_chmod)
+
+    with caplog.at_level("ERROR", logger="gateway.auth.bootstrap_key"):
+        key, stable = ensure_bootstrap_key(str(tmp_path))
+
+    assert stable is True  # umask + O_CREAT mode means the file is still safely 0600
+    assert key.startswith("wgk-")
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("chmod" in r.message.lower() for r in errors), (
+        f"Expected an ERROR log mentioning chmod, got: {[r.message for r in errors]}"
+    )

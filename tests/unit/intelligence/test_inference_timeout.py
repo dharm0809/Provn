@@ -75,6 +75,11 @@ def test_safety_classifier_falls_back_when_session_hangs():
     assert decision.reason == "onnx_timeout"
 
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 @pytest.mark.anyio
 async def test_safety_analyze_offloaded_to_thread_does_not_block_loop():
     """Run _run_analyzer with a hanging SafetyClassifier; the loop must stay live.

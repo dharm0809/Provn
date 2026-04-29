@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,8 +17,22 @@ logger = logging.getLogger(__name__)
 
 
 def _get_log_path() -> Path:
-    """Resolve the event log file path — always in the project directory."""
-    return Path(__file__).resolve().parents[3] / "openwebui_events.log"
+    """Resolve the event log file path.
+
+    Anchors to ``settings.wal_path`` so the log lives alongside the WAL
+    volume (bounded, persistent, mounted in container deployments).  If
+    ``wal_path`` is missing or unwritable we fall back to the system temp
+    directory rather than the repo root — writing to the repo root in
+    dev/prod creates an unbounded file that nothing rotates.
+    """
+    wal_path = ""
+    try:
+        wal_path = (get_settings().wal_path or "").strip()
+    except Exception:
+        wal_path = ""
+    if wal_path:
+        return Path(wal_path) / "openwebui_events.log"
+    return Path(tempfile.gettempdir()) / "openwebui_events.log"
 
 
 async def openwebui_events_receive(request: Request) -> JSONResponse:

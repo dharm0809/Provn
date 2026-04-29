@@ -200,6 +200,19 @@ class OllamaAdapter(ProviderAdapter):
                 thinking_content = native_reasoning
             elif content:
                 content, thinking_content = strip_thinking_tokens(content)
+            else:
+                # Entire response sat inside <think>...</think> so content came
+                # back empty.  Scan the raw response body for the block — if we
+                # find one, surface its contents as thinking_content rather
+                # than dropping it on the floor (qwen3-class models do this).
+                try:
+                    raw_text = response.content.decode("utf-8", errors="replace")
+                except Exception:
+                    raw_text = ""
+                if raw_text and "<think>" in raw_text.lower():
+                    _, recovered = strip_thinking_tokens(raw_text)
+                    if recovered:
+                        thinking_content = recovered
 
         usage = data.get("usage")
         if usage:
