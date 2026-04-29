@@ -24,13 +24,22 @@ field-level topology will simply fail the shadow gates, which is the
 correct behavior until the verdict log is extended to carry per-field
 verdicts.
 
+ONNX shape
+----------
+The candidate ONNX is **classifier-only**: it takes a
+`FloatTensorType([None, n_features])` input (the DictVectorizer's
+column ordering is fixed at training time). The DictVectorizer is
+NOT in the ONNX graph — `skl2onnx` doesn't faithfully convert the
+dict→float coercion as part of an end-to-end Pipeline (it produces
+a graph whose float-input topology silently diverges from
+`pipeline.predict`). Instead, the trainer ships the fitted
+DictVectorizer as a pickle side-car so the loader can reproduce the
+exact column ordering before running the ONNX. Production
+(`schema/mapper.py`) already does the split this way.
+
 Side-cars
 ---------
-The candidate ONNX takes a `FloatTensorType([None, n_features])` input
-(the DictVectorizer's column ordering is fixed at training time). The
-sanity adapter must therefore reproduce the SAME column ordering at
-inference time — and it can only do that with a side-car. On `train()`
-this trainer emits, next to `schema_mapper-{version}.onnx`:
+On `train()` this trainer emits, next to `schema_mapper-{version}.onnx`:
 
   * `schema_mapper-{version}.dictvec.pkl`         — pickled fitted
     DictVectorizer (used by the adapter to call `.transform([row])`).
@@ -87,19 +96,41 @@ class SchemaMapperTrainer(Trainer):
         return pipeline
 
     def _to_onnx(self, pipeline: Any, X_sample: list[Any]) -> bytes:
+        """Convert ONLY the classifier sub-step to ONNX.
+
+        Converting the full `Pipeline[DictVectorizer, GBC]` with a
+        `FloatTensorType` initial type produces an ONNX graph whose
+        behavior diverges from `pipeline.predict` — DictVectorizer
+        expects dict input, not a float matrix, and skl2onnx silently
+        emits an inconsistent topology. The honest serialization is to
+        convert the fitted classifier alone and ship the
+        DictVectorizer as a pickle side-car (loaders apply
+        `.transform([row_dict])` before calling the ONNX session, which
+        is what production already does).
+        """
         try:
             from skl2onnx import convert_sklearn
             from skl2onnx.common.data_types import FloatTensorType
         except ImportError as e:
             raise TrainingError(f"skl2onnx not available: {e}") from e
 
-        # Feature width is determined by the fitted DictVectorizer —
-        # skl2onnx needs this in the initial type so the graph has a
-        # fixed-shape input tensor.
-        vec = pipeline.named_steps["vec"]
-        n_features = len(vec.feature_names_)
+        try:
+            vec = pipeline.named_steps["vec"]
+            clf = pipeline.named_steps["clf"]
+        except (AttributeError, KeyError) as e:
+            raise TrainingError(
+                f"schema_mapper pipeline missing expected steps (vec/clf): {e}"
+            ) from e
+
+        n_features = len(getattr(vec, "feature_names_", []) or [])
+        if n_features == 0:
+            raise TrainingError(
+                "schema_mapper pipeline DictVectorizer has no feature_names_ "
+                "(was it fitted?)"
+            )
+
         initial_type = [("features", FloatTensorType([None, n_features]))]
-        onx = convert_sklearn(pipeline, initial_types=initial_type)
+        onx = convert_sklearn(clf, initial_types=initial_type)
         return onx.SerializeToString()
 
     def _write_sidecars(

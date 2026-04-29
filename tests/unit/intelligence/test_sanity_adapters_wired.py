@@ -1,6 +1,6 @@
 """SanityAdapter wiring tests for safety + schema_mapper.
 
-Exercises the freshly-wired adapter strategy table in
+Exercises the adapter strategy table in
 `gateway.intelligence.sanity_adapters`:
 
   * trainers emit side-cars next to their candidate ONNX,
@@ -8,20 +8,11 @@ Exercises the freshly-wired adapter strategy table in
   * a candidate without side-cars (older trainer revision) surfaces
     as a sanity FAILURE, not a silent skip.
 
-Strategy: build small but real ONNX candidates plus matching
-side-cars in a tmp directory (mirroring the production candidates/
-layout), then drive `build_infer_fn` directly. We do NOT call
-`SafetyTrainer._to_onnx` here — skl2onnx doesn't currently convert
-char_wb TfidfVectorizer cleanly, and likewise the schema trainer's
-in-graph DictVectorizer emits an invalid ONNX. Both are pre-existing
-trainer issues; the adapters' contract is "load whatever sits at
-candidates/{model}-{version}.onnx + read the side-cars" and that's
-what we verify.
-
-For a true end-to-end trainer-side check we still call
-`SafetyTrainer._write_sidecars` / `SchemaMapperTrainer._write_sidecars`
-directly — those are the methods that landed in this change and
-they DO work without the broken skl2onnx step.
+After the trainer refactor (classifier-only ONNX + side-car-applied
+TF-IDF in Python), the adapters expect a `FloatTensorType` input.
+Test fixtures here build the same classifier-only topology so the
+adapter contract — "feed featurized input via vocab/idf side-cars,
+read predicted-label string back" — is exercised end-to-end.
 """
 from __future__ import annotations
 
@@ -49,20 +40,21 @@ from gateway.intelligence.sanity_runner import SanityRunner
 
 
 def _build_safety_onnx(path: Path) -> tuple[list[str], dict[str, int], np.ndarray]:
-    """Train a tiny *word*-tokenizer TfidfVectorizer + GBC and export to ONNX.
+    """Train a tiny char_wb TF-IDF + GBC and export the CLASSIFIER alone.
 
-    char_wb doesn't convert via skl2onnx (a known limitation), so the
-    test fixture uses the default `analyzer='word'` tokenizer to get
-    a real, runnable ONNX. The adapter's contract is "feed string,
-    read predicted-label string" — it doesn't care which tokenizer
-    the trainer chose, so this still exercises the wired code path.
+    Mirrors the production trainer's classifier-only topology: skl2onnx
+    can't convert char_wb in-graph, so we ship the classifier with a
+    `FloatTensorType` input matching the fitted TF-IDF dimension. The
+    adapter applies char_wb TF-IDF in Python from the side-cars before
+    invoking the session.
+
     Returns (labels, vocab, idf) so the caller can write side-cars.
     """
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.pipeline import Pipeline
     from skl2onnx import convert_sklearn
-    from skl2onnx.common.data_types import StringTensorType
+    from skl2onnx.common.data_types import FloatTensorType
 
     X = [
         "kill bomb attack violent",
@@ -77,17 +69,22 @@ def _build_safety_onnx(path: Path) -> tuple[list[str], dict[str, int], np.ndarra
     y = ["violence", "violence", "violence", "violence", "safe", "safe", "safe", "safe"]
 
     pipeline = Pipeline([
-        ("tfidf", TfidfVectorizer(min_df=1, sublinear_tf=True)),
+        ("tfidf", TfidfVectorizer(
+            analyzer="char_wb", ngram_range=(3, 5),
+            min_df=1, sublinear_tf=True,
+        )),
         ("clf", GradientBoostingClassifier(n_estimators=5, random_state=42)),
     ])
     pipeline.fit(X, y)
 
-    initial_type = [("text", StringTensorType([None, 1]))]
-    onx = convert_sklearn(pipeline, initial_types=initial_type)
-    path.write_bytes(onx.SerializeToString())
-
     tfidf = pipeline.named_steps["tfidf"]
     clf = pipeline.named_steps["clf"]
+    n_features = len(tfidf.vocabulary_)
+
+    initial_type = [("features", FloatTensorType([None, n_features]))]
+    onx = convert_sklearn(clf, initial_types=initial_type)
+    path.write_bytes(onx.SerializeToString())
+
     return (
         [str(c) for c in clf.classes_],
         {k: int(v) for k, v in tfidf.vocabulary_.items()},
