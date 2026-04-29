@@ -8,17 +8,24 @@ into a label string — lives here as a strategy table keyed by model name.
 
 Wiring status:
 
-  * intent          — fully wired. The candidate is a sklearn
-                      Pipeline(TfidfVectorizer + LogisticRegression)
-                      ONNX export; input is a single `"prompt"` string,
-                      output[0] is the predicted label, output[1] is the
-                      probability dict. Mirrors the inference path in
-                      `gateway.classifier.unified._intent_infer_on_session`.
+  * intent          — fully wired. The trainer
+                      (`gateway.intelligence.distillation.trainers.intent_trainer`)
+                      exports a classifier-only ONNX with
+                      `FloatTensorType([None, n_features])` input
+                      (skl2onnx cannot convert `analyzer='char_wb'`
+                      TfidfVectorizer in-graph) plus three side-cars
+                      per candidate: `intent-{version}.labels.json`,
+                      `intent-{version}.vocab.json`,
+                      `intent-{version}.idf.npy`. The adapter applies
+                      char_wb TF-IDF in Python before running the
+                      session.
   * safety          — fully wired. The trainer
                       (`gateway.intelligence.distillation.trainers.safety_trainer`)
-                      emits an end-to-end string-input ONNX (TF-IDF
-                      + GradientBoosting baked into the graph by
-                      skl2onnx) plus three side-cars per candidate:
+                      exports a classifier-only ONNX with
+                      `FloatTensorType([None, n_features])` input
+                      (skl2onnx cannot convert `analyzer='char_wb'`
+                      TfidfVectorizer in-graph) plus three side-cars
+                      per candidate:
                       `safety-{version}.labels.json`,
                       `safety-{version}.vocab.json`,
                       `safety-{version}.idf.npy`.
@@ -26,10 +33,11 @@ Wiring status:
                       candidate emitted by a stale trainer that wrote
                       only the ONNX surfaces as a sanity FAILURE
                       (FileNotFoundError → block promotion). At
-                      inference, the adapter feeds a string directly
-                      (the candidate ONNX accepts strings, mirroring
-                      the intent contract); the side-cars validate the
-                      candidate is well-formed.
+                      inference the adapter applies char_wb TF-IDF in
+                      Python (using vocab + idf) and feeds the
+                      resulting float matrix to the candidate session
+                      — mirroring the production
+                      `SafetyClassifier._tfidf_transform` split.
   * schema_mapper   — fully wired. The trainer
                       (`gateway.intelligence.distillation.trainers.schema_trainer`)
                       exports a classifier-only ONNX with
@@ -84,23 +92,19 @@ class SanityAdapter(Protocol):
 def _intent_adapter(candidate_path: Path) -> Callable[[Any], str]:
     """Build an `infer_fn` for the `intent` candidate.
 
-    The trainer (gateway.intelligence.distillation.trainers.intent) exports
-    a sklearn Pipeline(TfidfVectorizer, LogisticRegression) to ONNX; the
-    runtime contract is:
-
-      input:  one column named `"prompt"` containing a single string
-              (shape (1, 1), dtype=str)
-      output: outputs[0] = predicted label (shape (1,), dtype=str)
-              outputs[1] = probability dict (shape (1,), {label: prob})
-
-    We only need the label here — the SanityRunner doesn't care about
-    confidence (it only checks predicted == label). String coercion is
-    defensive because numpy may return a `numpy.str_` rather than `str`,
-    and `SanityRunner` compares with `str(predicted) == label`.
+    The trainer exports a classifier-only ONNX with
+    `FloatTensorType([None, n_features])` input — the char_wb
+    TfidfVectorizer is NOT in the graph (skl2onnx only supports
+    `tokenizer='word'` for in-graph TF-IDF). The adapter therefore
+    reproduces char_wb TF-IDF in Python from the side-cars
+    (`vocab.json`, `idf.npy`) and feeds the float matrix to the
+    session.
 
     Misuse modes:
       * candidate file missing → `FileNotFoundError` → caught by the gate
         as a sanity failure (block promotion).
+      * any required side-car missing → `FileNotFoundError` with a
+        clear message → gate blocks.
       * topology mismatch (e.g. wrong input shape) → `RuntimeError` from
         ORT → caught per-example by SanityRunner.run, counted as an
         error, and surfaced via `failing_classes` / `error_count`.
@@ -113,19 +117,50 @@ def _intent_adapter(candidate_path: Path) -> Callable[[Any], str]:
     if not candidate_path.exists():
         raise FileNotFoundError(candidate_path)
 
+    vocab_path = _sidecar_path(candidate_path, "vocab.json")
+    idf_path = _sidecar_path(candidate_path, "idf.npy")
+    _require_sidecar(vocab_path, "intent", candidate_path)
+    _require_sidecar(idf_path, "intent", candidate_path)
+
     import numpy as np
     from onnxruntime import InferenceSession
 
+    vocab = json.loads(vocab_path.read_text())
+    idf = np.load(str(idf_path))
+
     session = InferenceSession(str(candidate_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
+    _ngram_range = (3, 5)
+    _n_features = len(idf) if idf is not None and idf.ndim == 1 else len(vocab)
+
+    def _featurize(text: str) -> np.ndarray:
+        text_lower = f" {text.lower()} "
+        ngrams: dict[str, int] = {}
+        for n in range(_ngram_range[0], _ngram_range[1] + 1):
+            for i in range(len(text_lower) - n + 1):
+                gram = text_lower[i:i + n]
+                if gram in vocab:
+                    ngrams[gram] = ngrams.get(gram, 0) + 1
+        tf_vector = np.zeros(_n_features, dtype=np.float32)
+        for gram, count in ngrams.items():
+            idx = vocab.get(gram)
+            if idx is not None and idx < _n_features:
+                tf_vector[idx] = np.log1p(count)  # sublinear_tf
+        if idf is not None:
+            tf_vector *= idf
+        norm = np.linalg.norm(tf_vector)
+        if norm > 0:
+            tf_vector /= norm
+        return tf_vector.reshape(1, -1)
 
     def _infer(text: Any) -> str:
         # Defensive truncation matches the production inference site
         # (`_intent_infer_on_session` in classifier/unified.py); a fixture
         # row longer than the trainer's max would surprise the model.
         s = str(text)[:1000]
-        inp = np.array([[s]]).reshape(1, 1)
-        outputs = session.run(None, {input_name: inp})
+        features = _featurize(s)
+        features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+        outputs = session.run(None, {input_name: features})
         return str(outputs[0][0])
 
     return _infer
@@ -172,15 +207,14 @@ def _require_sidecar(path: Path, model: str, candidate: Path) -> None:
 def _safety_adapter(candidate_path: Path) -> Callable[[Any], str]:
     """Build an `infer_fn` for the `safety` candidate.
 
-    The current `SafetyTrainer` exports an end-to-end Pipeline
-    (TfidfVectorizer + GradientBoostingClassifier) via skl2onnx, so the
-    candidate ONNX accepts a `(None, 1)` string tensor directly — same
-    runtime contract as the intent candidate. The TF-IDF / IDF state is
-    embedded in the ONNX graph by skl2onnx; the side-cars (vocab.json,
-    idf.npy, labels.json) are emitted to assert the candidate is
-    well-formed (so a stale trainer that wrote only the .onnx fails
-    the sanity gate loudly) and to support future classifier-only
-    candidate variants that need to manually featurize.
+    The trainer exports a classifier-only ONNX with
+    `FloatTensorType([None, n_features])` input — the char_wb
+    TfidfVectorizer is NOT in the graph (skl2onnx only supports
+    `tokenizer='word'` for in-graph TF-IDF). The adapter therefore
+    reproduces char_wb TF-IDF in Python from the side-cars
+    (`vocab.json`, `idf.npy`) and feeds the float matrix to the
+    session — mirroring the production
+    `SafetyClassifier._tfidf_transform` split.
 
     Misuse modes:
       * candidate file missing → `FileNotFoundError` → gate blocks.
@@ -214,15 +248,40 @@ def _safety_adapter(candidate_path: Path) -> Callable[[Any], str]:
 
     session = InferenceSession(str(candidate_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
+    # The trainer's TF-IDF uses ngram_range=(3, 5) and char_wb
+    # boundaries — match those exactly so the float matrix lines up
+    # with what the classifier was trained on.
+    _ngram_range = (3, 5)
+    _n_features = len(idf) if idf is not None and idf.ndim == 1 else len(vocab)
+
+    def _featurize(text: str) -> np.ndarray:
+        # char_wb adds a single space at each word boundary; for the
+        # whole-string fallback we just pad with spaces. Mirrors
+        # `SafetyClassifier._tfidf_transform`.
+        text_lower = f" {text.lower()} "
+        ngrams: dict[str, int] = {}
+        for n in range(_ngram_range[0], _ngram_range[1] + 1):
+            for i in range(len(text_lower) - n + 1):
+                gram = text_lower[i:i + n]
+                if gram in vocab:
+                    ngrams[gram] = ngrams.get(gram, 0) + 1
+        tf_vector = np.zeros(_n_features, dtype=np.float32)
+        for gram, count in ngrams.items():
+            idx = vocab.get(gram)
+            if idx is not None and idx < _n_features:
+                tf_vector[idx] = np.log1p(count)  # sublinear_tf
+        if idf is not None:
+            tf_vector *= idf
+        norm = np.linalg.norm(tf_vector)
+        if norm > 0:
+            tf_vector /= norm
+        return tf_vector.reshape(1, -1)
 
     def _infer(text: Any) -> str:
-        # The candidate ONNX is end-to-end: it accepts a string and
-        # emits the label directly. Defensive str() + truncation
-        # mirrors the intent adapter (and the production featurizer
-        # which clamps long inputs anyway).
         s = str(text)[:5000]
-        inp = np.array([[s]]).reshape(1, 1)
-        outputs = session.run(None, {input_name: inp})
+        features = _featurize(s)
+        features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+        outputs = session.run(None, {input_name: features})
         return str(outputs[0][0])
 
     return _infer

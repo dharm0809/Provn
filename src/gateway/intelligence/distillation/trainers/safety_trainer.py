@@ -1,4 +1,4 @@
-"""Safety trainer: TF-IDF char_wb + GradientBoosting → ONNX.
+"""Safety trainer: TF-IDF char_wb + GradientBoosting → classifier-only ONNX.
 
 Mirrors the production `SafetyClassifier` topology (see
 `src/gateway/content/safety_classifier.py`). The 8 output labels match
@@ -18,15 +18,17 @@ featurizer state matches what was actually fit:
     `vocabulary_` (term → column index).
   * `safety-{version}.idf.npy`      — the fitted IDF weights.
 
-The current trainer pipeline is end-to-end (TF-IDF inside the ONNX
-graph via skl2onnx), so the candidate ONNX accepts a string input
-directly — same shape as the intent candidate. The side-cars are
-emitted so the sanity adapter can REQUIRE them as a "well-formed
-candidate" precondition (a candidate emitted by a stale trainer that
-doesn't write side-cars surfaces as a loud sanity FAILURE rather than a
-silent skip). Consumers that need to manually featurize (e.g. future
-classifier-only ONNX exports that mirror the production split) can use
-the same files without trainer changes.
+ONNX shape
+----------
+The candidate ONNX is **classifier-only**: the featurizer state is
+emitted as side-cars (vocab.json, idf.npy, labels.json) so production
+/ sanity-adapter loading can apply char_wb TF-IDF in Python before
+running the ONNX. The graph input is therefore a
+`FloatTensorType([None, n_features])` matrix, NOT a raw string. This
+matches what production already does (`SafetyClassifier._tfidf_transform`
+re-implements TF-IDF in numpy), and avoids the skl2onnx limitation
+that only `tokenizer='word'` is supported for in-graph
+TfidfVectorizer (`char_wb` raises `NotImplementedError`).
 """
 from __future__ import annotations
 
@@ -76,14 +78,39 @@ class SafetyTrainer(Trainer):
         return pipeline
 
     def _to_onnx(self, pipeline: Any, X_sample: list[Any]) -> bytes:
+        """Convert ONLY the classifier sub-step to ONNX.
+
+        skl2onnx cannot convert a `TfidfVectorizer(analyzer='char_wb')`
+        (only `tokenizer='word'` is supported), so we cannot serialize
+        the full pipeline. Instead we serialize the GradientBoosting
+        classifier alone with a `FloatTensorType` input matching the
+        fitted TF-IDF dimension; the sanity adapter / production
+        loader is responsible for applying char_wb TF-IDF in Python
+        first (using the side-car vocab.json + idf.npy) and feeding
+        the float matrix here.
+        """
         try:
             from skl2onnx import convert_sklearn
-            from skl2onnx.common.data_types import StringTensorType
+            from skl2onnx.common.data_types import FloatTensorType
         except ImportError as e:
             raise TrainingError(f"skl2onnx not available: {e}") from e
 
-        initial_type = [("text", StringTensorType([None, 1]))]
-        onx = convert_sklearn(pipeline, initial_types=initial_type)
+        try:
+            tfidf = pipeline.named_steps["tfidf"]
+            clf = pipeline.named_steps["clf"]
+        except (AttributeError, KeyError) as e:
+            raise TrainingError(
+                f"safety pipeline missing expected steps (tfidf/clf): {e}"
+            ) from e
+
+        n_features = len(getattr(tfidf, "vocabulary_", {}))
+        if n_features == 0:
+            raise TrainingError(
+                "safety pipeline tfidf has no vocabulary_ (was it fitted?)"
+            )
+
+        initial_type = [("features", FloatTensorType([None, n_features]))]
+        onx = convert_sklearn(clf, initial_types=initial_type)
         return onx.SerializeToString()
 
     def _write_sidecars(
