@@ -89,41 +89,58 @@ def test_intent_broken_buffer_does_not_break_inference():
 
 
 @requires_numpy
-def test_schema_mapper_records_verdict_with_buffer():
-    """map_response() must record one verdict per call using the raw JSON as input."""
+def test_schema_mapper_records_per_field_verdicts_with_buffer():
+    """map_response() must record one verdict PER FIELD with the 139-d feature vector.
+
+    Post-rewrite contract: per-response coarse verdicts were retired
+    in favor of per-field rows whose `input_features_json` carries the
+    exact feature vector that ONNX evaluated. Each row's
+    `model_name`, `confidence`, and (when the heuristic teacher
+    fired) `divergence_signal` are populated.
+    """
+    import json as _json
+    from gateway.schema.features import FEATURE_DIM, flatten_json
     from gateway.schema.mapper import SchemaMapper
 
-    buf = VerdictBuffer(max_size=10)
+    buf = VerdictBuffer(max_size=10_000)
     mapper = SchemaMapper(verdict_buffer=buf)
+    if mapper._session is None:
+        import pytest as _pytest
+        _pytest.skip("ONNX session unavailable")
 
     raw = {"choices": [{"message": {"content": "hello"}}]}
+    expected_field_count = len(flatten_json(raw))
     mapper.map_response(raw)
 
-    assert buf.size == 1
     drained = buf.drain()
-    assert len(drained) == 1
-    v = drained[0]
-    assert v.model_name == "schema_mapper"
-    # prediction is a canonical completion flag; confidence is mapping confidence.
-    assert v.prediction in {"complete", "incomplete"}
-    assert v.request_id is None
-    assert 0.0 <= v.confidence <= 1.0
+    assert len(drained) == expected_field_count
+    for v in drained:
+        assert v.model_name == "schema_mapper"
+        assert v.request_id is None
+        assert 0.0 <= v.confidence <= 1.0
+        payload = _json.loads(v.input_features_json)
+        assert "feature_vector" in payload
+        assert len(payload["feature_vector"]) == FEATURE_DIM
+        assert "field_path" in payload
 
 
 @requires_numpy
-def test_schema_mapper_records_incomplete_for_non_dict_input():
-    """Non-dict input takes the early-return path; verdict still fires with prediction=incomplete."""
+def test_schema_mapper_non_dict_input_records_no_verdicts():
+    """Non-dict input never reaches `_classify_onnx`, so no verdicts emitted.
+
+    The pre-rewrite shape recorded one verdict at the bottom of
+    `map_response` even on the early-return path; that was the
+    coarse per-response signal. With per-field rows, the early-return
+    path has no fields to record — and that's fine, the trainer
+    couldn't learn from a degenerate row anyway.
+    """
     from gateway.schema.mapper import SchemaMapper
 
     buf = VerdictBuffer(max_size=10)
     mapper = SchemaMapper(verdict_buffer=buf)
 
     mapper.map_response("not a dict")  # type: ignore[arg-type]
-
-    assert buf.size == 1
-    v = buf.drain()[0]
-    assert v.model_name == "schema_mapper"
-    assert v.prediction == "incomplete"
+    assert buf.size == 0
 
 
 @requires_numpy
@@ -146,6 +163,9 @@ def test_schema_mapper_broken_buffer_does_not_break_inference():
     mapper = SchemaMapper(verdict_buffer=broken)
     out = mapper.map_response({"foo": "bar"})
     assert out is not None
+    # `record` is called once per field; once the first call raises,
+    # the producer's defensive try/except short-circuits the whole
+    # batch. Either way, the mapper must NOT propagate the error.
     assert broken.record.called
 
 

@@ -2,11 +2,41 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gateway.telemetry.otel import emit_inference_span, init_tracer, trace_span
+
+
+def _install_fake_otel():
+    """Install a fake `opentelemetry` package into sys.modules.
+
+    `trace_span` does `from opentelemetry import trace as otrace` *inside*
+    the function body. When the OTel SDK isn't installed (e.g. the
+    minimal test env without the `[telemetry]` extra), that import raises
+    ImportError and the context manager yields None — bypassing all the
+    span-creation logic the unit tests want to exercise.
+
+    We install a stub `opentelemetry` module exposing a `trace` submodule
+    with a `SpanKind.INTERNAL` attribute so the import resolves and the
+    real branch runs against a MagicMock tracer.
+    """
+    fake_otel = types.ModuleType("opentelemetry")
+    fake_trace = types.ModuleType("opentelemetry.trace")
+
+    class _SpanKind:
+        INTERNAL = "INTERNAL"
+        CLIENT = "CLIENT"
+
+    fake_trace.SpanKind = _SpanKind
+    fake_otel.trace = fake_trace
+    return patch.dict(
+        sys.modules,
+        {"opentelemetry": fake_otel, "opentelemetry.trace": fake_trace},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +185,7 @@ async def test_trace_span_creates_span(anyio_backend):
     mock_span = MagicMock()
     mock_tracer.start_span.return_value = mock_span
 
-    with patch("gateway.telemetry.otel.otrace", create=True):
+    with _install_fake_otel():
         async with trace_span(mock_tracer, "test_step", {"key": "val"}) as span:
             assert span is mock_span
 
@@ -172,7 +202,7 @@ async def test_trace_span_records_error(anyio_backend):
     mock_tracer.start_span.return_value = mock_span
 
     with pytest.raises(ValueError):
-        with patch("gateway.telemetry.otel.otrace", create=True):
+        with _install_fake_otel():
             async with trace_span(mock_tracer, "failing_step") as span:
                 raise ValueError("test error")
 
@@ -188,7 +218,7 @@ async def test_trace_span_no_attributes(anyio_backend):
     mock_span = MagicMock()
     mock_tracer.start_span.return_value = mock_span
 
-    with patch("gateway.telemetry.otel.otrace", create=True):
+    with _install_fake_otel():
         async with trace_span(mock_tracer, "plain_step") as span:
             assert span is mock_span
 

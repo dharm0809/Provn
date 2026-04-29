@@ -28,7 +28,17 @@ class Settings(BaseSettings):
     control_plane_url: str = Field(default="", description="Base URL of the control plane")
 
     # Auth
-    gateway_api_keys: str = Field(default="", description="Comma-separated API keys for caller auth")
+    # Format: "key1,key2,key3"  → flat list, no tenant binding (uses gateway_tenant_id).
+    # Format: "key1:tenantA,key2:tenantB,key3"  → per-key tenant binding; key3 has none.
+    # The colon separator is unambiguous: gateway-issued keys are alphanumeric or
+    # `wgk-{hex}` and never contain `:`. See gateway.auth.api_key.parse_api_keys_with_tenants.
+    gateway_api_keys: str = Field(
+        default="",
+        description=(
+            "Comma-separated API keys for caller auth. Entries may be plain "
+            "(`key`) or tenant-bound (`key:tenant_id`)."
+        ),
+    )
     control_plane_api_key: str = Field(default="", description="API key for gateway→control plane (X-API-Key or Bearer); required when control plane has WALACOR_API_KEYS")
 
     # Phase 21: JWT/SSO authentication
@@ -693,7 +703,25 @@ class Settings(BaseSettings):
 
     @property
     def api_keys_list(self) -> list[str]:
-        return [k.strip() for k in self.gateway_api_keys.split(",") if k.strip()]
+        """Parsed list of bare API keys (with any ``:tenant`` suffix stripped).
+
+        See ``api_keys_tenant_map`` for the per-key tenant bindings.
+        """
+        from gateway.auth.api_key import parse_api_keys_with_tenants
+        raw = [k.strip() for k in self.gateway_api_keys.split(",") if k.strip()]
+        keys, _ = parse_api_keys_with_tenants(raw)
+        return keys
+
+    @property
+    def api_keys_tenant_map(self) -> dict[str, str]:
+        """Mapping of API key → tenant_id parsed from ``WALACOR_GATEWAY_API_KEYS``.
+
+        Plain (non-colon) entries do not appear in the map.
+        """
+        from gateway.auth.api_key import parse_api_keys_with_tenants
+        raw = [k.strip() for k in self.gateway_api_keys.split(",") if k.strip()]
+        _, tenant_map = parse_api_keys_with_tenants(raw)
+        return tenant_map
 
     @property
     def jwt_algorithms_list(self) -> list[str]:

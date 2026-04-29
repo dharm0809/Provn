@@ -112,8 +112,14 @@ def test_sec02_green_probe_returns_401(monkeypatch):
         def get(self, url):
             return _FakeResp()
 
+    # The check imports TestClient INSIDE its run() method via
+    # `from starlette.testclient import TestClient`, so we have to patch
+    # the source module (not the gateway module). Patching
+    # `gateway.readiness.checks.security.TestClient` with create=True
+    # silently no-ops because the local name is rebound by the
+    # function-level import each call.
     import unittest.mock as mock
-    with mock.patch("gateway.readiness.checks.security.TestClient", _FakeClient, create=True):
+    with mock.patch("starlette.testclient.TestClient", _FakeClient):
         from gateway.readiness.checks.security import _Sec02LineageAuthActive
         result = _run(_Sec02LineageAuthActive().run(_make_ctx()))
     assert result.status == "green"

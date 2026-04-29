@@ -195,33 +195,14 @@ class SchemaMapper:
                 # 4. Assemble canonical response
                 result = self._assemble(fields, classifications, raw)
 
-        # record verdict for self-learning (observational only).
-        # Never allowed to break inference — wrap the whole stanza defensively.
-        if self._verdict_buffer is not None:
-            try:
-                from gateway.util.request_context import request_id_var
-                from gateway.intelligence.types import ModelVerdict
-                # Serialize raw dict as input_text for input_hash. Use sort_keys
-                # so logically-equal dicts produce a stable hash. Fallback to
-                # repr() if the dict contains non-JSON-serializable values.
-                try:
-                    input_text = json.dumps(raw, sort_keys=True, default=str)
-                except (TypeError, ValueError):
-                    input_text = repr(raw)
-                prediction = "incomplete" if result.mapping.incomplete else "complete"
-                rid = request_id_var.get() or None
-                self._verdict_buffer.record(
-                    ModelVerdict.from_inference(
-                        model_name="schema_mapper",
-                        input_text=input_text,
-                        prediction=prediction,
-                        confidence=float(result.mapping.confidence or 0.0),
-                        request_id=rid,
-                        version=self._reload_state.current_version,
-                    )
-                )
-            except Exception:
-                logger.debug("verdict recording failed", exc_info=True)
+        # Per-field verdicts are recorded inside `_classify_onnx` —
+        # they carry the 139-d feature vector and a heuristic teacher
+        # signal that the distillation trainer consumes. The
+        # previous per-response verdict (one row, empty
+        # `input_features_json`, coarse "complete"/"incomplete"
+        # prediction) was retired because it carried no usable
+        # training signal: the trainer needs per-field features to
+        # match production's `_classify_onnx` shape.
 
         return result
 
@@ -264,12 +245,21 @@ class SchemaMapper:
         return self._classify_heuristic(fields)
 
     def _classify_onnx(self, fields: list[FlatField]) -> list[tuple[str, float]]:
-        """Batch ONNX inference on all fields."""
+        """Batch ONNX inference on all fields.
+
+        Side-effect: when a `verdict_buffer` is wired, every field
+        emits a per-field `ModelVerdict` whose `input_features_json`
+        carries the full 139-d float vector that fed the ONNX session.
+        That row is what the schema_mapper trainer (and its sanity
+        adapter) consume — the per-response row the previous
+        revision recorded had `input_features_json="{}"` and was
+        useless for training. Verdicts are non-fatal: a buffer error
+        never breaks inference (caller wraps the loop defensively).
+        """
         from gateway.intelligence._inference_timeout import run_with_timeout
 
-        feature_matrix = np.array(
-            [extract_features(f) for f in fields], dtype=np.float32
-        )
+        per_field_features = [extract_features(f) for f in fields]
+        feature_matrix = np.array(per_field_features, dtype=np.float32)
         feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=1.0, neginf=-1.0)
 
         outputs = run_with_timeout(
@@ -289,10 +279,88 @@ class SchemaMapper:
                 else:
                     confidence = float(probs[i][idx]) if hasattr(probs[i], '__getitem__') else 0.5
                 results.append((label, confidence))
-            return results
         else:
-            return [(self._labels[idx] if idx < len(self._labels) else "UNKNOWN", 0.8)
-                    for idx in predicted_indices]
+            results = [
+                (self._labels[idx] if idx < len(self._labels) else "UNKNOWN", 0.8)
+                for idx in predicted_indices
+            ]
+
+        self._record_per_field_verdicts(fields, per_field_features, results)
+        return results
+
+    def _record_per_field_verdicts(
+        self,
+        fields: list["FlatField"],
+        feature_vectors: list[Any],
+        classifications: list[tuple[str, float]],
+    ) -> None:
+        """Emit one verdict per field with the actual 139-d features.
+
+        Volume: a typical response flattens to ~10-50 fields. A 100-field
+        burst maps to 100 verdict rows for that request. The bounded
+        `VerdictBuffer` (default `max_size=10_000`) drops oldest on
+        overflow — that's the right knob; we don't sample at the call
+        site because the trainer benefits from every field, not just
+        the high-confidence ones.
+
+        Teacher signal (`divergence_signal`): we use the heuristic
+        classifier as a rule-based "ground truth" reference. When the
+        heuristic and ONNX agree on a non-UNKNOWN label, that's a
+        positive teaching example. When they disagree (or ONNX says
+        UNKNOWN and heuristic has an opinion), the heuristic label is
+        the teacher. Self-distillation pitfall: we DO NOT use the ONNX
+        prediction itself as the teacher — that would teach the model
+        whatever it already does. Rows where the heuristic also says
+        UNKNOWN get no teacher and are skipped from training (the
+        dataset builder filters on `divergence_signal IS NOT NULL`).
+        """
+        if self._verdict_buffer is None:
+            return
+        try:
+            from gateway.util.request_context import request_id_var
+            from gateway.intelligence.types import ModelVerdict
+            rid = request_id_var.get() or None
+            version = self._reload_state.current_version
+            for field, feat_vec, (label, confidence) in zip(
+                fields, feature_vectors, classifications,
+            ):
+                # Heuristic teacher signal — independent of ONNX.
+                teacher, _ = self._heuristic_classify_one(field)
+                divergence_signal = teacher if teacher != "UNKNOWN" else None
+                # `input_text` is only used to derive `input_hash` for
+                # dedupe. Per-field uniqueness comes from path + value;
+                # without it every field on a response would collide.
+                try:
+                    value_repr = json.dumps(field.value, sort_keys=True, default=str)
+                except (TypeError, ValueError):
+                    value_repr = repr(field.value)
+                input_text = f"{field.path}|{field.value_type}|{value_repr}"
+                # The 139-d feature vector serialized as a JSON list. The
+                # trainer + sanity adapter detect this shape and skip
+                # re-featurization. Coerce to a plain list of floats so
+                # NumPy types don't trip json.dumps.
+                features_payload = {
+                    "feature_vector": [float(v) for v in feat_vec],
+                    "field_path": field.path,
+                }
+                verdict = ModelVerdict(
+                    model_name="schema_mapper",
+                    input_hash=__import__("hashlib").sha256(
+                        input_text.encode()
+                    ).hexdigest(),
+                    input_features_json=json.dumps(features_payload),
+                    prediction=label,
+                    confidence=float(confidence),
+                    request_id=rid,
+                    divergence_signal=divergence_signal,
+                    divergence_source=(
+                        "schema_mapper_heuristic" if divergence_signal else None
+                    ),
+                    version=version,
+                )
+                self._verdict_buffer.record(verdict)
+        except Exception:
+            logger.debug("per-field verdict recording failed", exc_info=True)
 
     def _classify_heuristic(self, fields: list[FlatField]) -> list[tuple[str, float]]:
         """Fallback heuristic classification when ONNX is unavailable."""
