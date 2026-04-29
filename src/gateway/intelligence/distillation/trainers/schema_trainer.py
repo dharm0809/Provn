@@ -23,11 +23,30 @@ against the production classifier — a candidate that doesn't match the
 field-level topology will simply fail the shadow gates, which is the
 correct behavior until the verdict log is extended to carry per-field
 verdicts.
+
+Side-cars
+---------
+The candidate ONNX takes a `FloatTensorType([None, n_features])` input
+(the DictVectorizer's column ordering is fixed at training time). The
+sanity adapter must therefore reproduce the SAME column ordering at
+inference time — and it can only do that with a side-car. On `train()`
+this trainer emits, next to `schema_mapper-{version}.onnx`:
+
+  * `schema_mapper-{version}.dictvec.pkl`         — pickled fitted
+    DictVectorizer (used by the adapter to call `.transform([row])`).
+    Pickle is acceptable here: these files are produced and consumed
+    locally on the same gateway host; they never round-trip over a
+    network boundary. The adapter loads with `pickle.load` from a
+    file path under the controlled `candidates/` directory.
+  * `schema_mapper-{version}.feature_names.json` — the
+    DictVectorizer's `feature_names_` list (column ordering). Useful
+    for diff/audit tools that don't want to unpickle a sklearn object.
 """
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -82,6 +101,51 @@ class SchemaMapperTrainer(Trainer):
         initial_type = [("features", FloatTensorType([None, n_features]))]
         onx = convert_sklearn(pipeline, initial_types=initial_type)
         return onx.SerializeToString()
+
+    def _write_sidecars(
+        self,
+        pipeline: Any,
+        version: str,
+        candidates_dir: Path,
+    ) -> None:
+        """Emit DictVectorizer pickle + feature names side-cars.
+
+        The candidate ONNX expects a `(None, n_features)` float matrix
+        whose columns are ordered by the fitted DictVectorizer's
+        `feature_names_`. The sanity adapter must reproduce that
+        ordering EXACTLY — easiest path is to ship the fitted
+        DictVectorizer itself (pickled) so the adapter can call
+        `.transform([row_dict])`. We additionally emit a JSON list of
+        feature names so audit / diff tools don't need pickle access.
+
+        Pickle is safe here: files are produced AND consumed locally on
+        the same gateway host under the controlled `candidates/`
+        directory. They never traverse a network boundary, and the
+        adapter only ever loads from that controlled path.
+        """
+        try:
+            vec = pipeline.named_steps["vec"]
+        except (AttributeError, KeyError) as e:
+            logger.warning(
+                "schema_mapper trainer: could not extract vec step (%s); "
+                "side-cars skipped", e,
+            )
+            return
+
+        # JSON: stable ordering for diffability. The list ordering IS
+        # the column ordering the candidate ONNX expects.
+        feature_names = list(getattr(vec, "feature_names_", []) or [])
+        names_path = (
+            candidates_dir / f"{self.model_name}-{version}.feature_names.json"
+        )
+        names_path.write_text(json.dumps(feature_names))
+
+        # Pickle: import locally to keep the symbol scoped to this
+        # method (it's never used by the inference path).
+        import pickle  # noqa: S403 — see module docstring; trusted local path
+        pkl_path = candidates_dir / f"{self.model_name}-{version}.dictvec.pkl"
+        with open(pkl_path, "wb") as fh:
+            pickle.dump(vec, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _parse_features(x: Any) -> dict[str, float]:

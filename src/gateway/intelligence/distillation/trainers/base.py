@@ -52,6 +52,14 @@ class Trainer(abc.ABC):
         onnx_bytes = self._to_onnx(pipeline, X)
         candidate_path.write_bytes(onnx_bytes)
         self._write_calibration(y, pipeline, version, calibration_path)
+        # Side-cars (vocab.json, idf.npy, dictvec.pkl, …) — concrete trainers
+        # that need them override `_write_sidecars`. Default: no-op (intent's
+        # end-to-end string-input ONNX needs none — TF-IDF state is embedded
+        # in the ONNX graph by skl2onnx). Sanity adapters for safety /
+        # schema_mapper REQUIRE these files to exist; missing side-cars
+        # surface as a sanity FAILURE (block promotion) — see
+        # `gateway.intelligence.sanity_adapters`.
+        self._write_sidecars(pipeline, version, candidates_dir)
         logger.info(
             "%s trainer: wrote candidate=%s calibration=%s (rows=%d)",
             self.model_name, candidate_path, calibration_path, len(X),
@@ -67,6 +75,23 @@ class Trainer(abc.ABC):
     @abc.abstractmethod
     def _to_onnx(self, pipeline: Any, X_sample: list[Any]) -> bytes:
         """Serialize the fitted pipeline to ONNX bytes via skl2onnx."""
+
+    def _write_sidecars(
+        self,
+        pipeline: Any,
+        version: str,
+        candidates_dir: Path,
+    ) -> None:
+        """Write per-candidate side-cars next to the ONNX file.
+
+        Default implementation is a no-op (intent's end-to-end ONNX
+        carries all featurizer state inside the graph). Concrete
+        trainers that need to expose featurizer state at sanity time
+        (safety, schema_mapper) override this hook. Side-car filename
+        convention: `{model}-{version}.{name}` so they sit next to the
+        candidate ONNX and the calibration JSON in the same dir.
+        """
+        return None
 
     # ── Shared helpers ─────────────────────────────────────────────────
 

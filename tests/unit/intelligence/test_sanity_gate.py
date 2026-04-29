@@ -220,11 +220,15 @@ async def test_sanity_runner_raises_blocks_promotion(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_sanity_skipped_when_model_unwired(tmp_path):
-    """`safety` has no wired adapter — sanity skips, promotion proceeds.
+async def test_sanity_blocks_promotion_when_safety_sidecars_missing(tmp_path):
+    """`safety` is now wired — a candidate without side-cars must fail loud.
 
-    Drives the real `_run_sanity_check` (no `sanity_check` override) so
-    we're testing the actual `is_wired` carve-out, not a stub.
+    Drives the real `_run_sanity_check` (no `sanity_check` override) so we
+    exercise the actual adapter. Writes only the .onnx blob (no labels /
+    vocab / idf side-cars), which is exactly the shape produced by an
+    older trainer revision. The adapter must raise `FileNotFoundError`
+    on the missing side-car so the gate translates that to a sanity
+    FAILURE — never silently approve.
     """
     reg = ModelRegistry(base_path=str(tmp_path))
     reg.ensure_structure()
@@ -238,9 +242,13 @@ async def test_sanity_skipped_when_model_unwired(tmp_path):
         settings=settings, registry=reg, walacor_writer=writer,
     )
 
-    assert result.promoted is True
-    assert result.promotion_blocked_event is None
-    assert result.sanity_result is None  # skipped, not run
+    # Promotion blocked because side-cars don't exist on the bare blob.
+    assert result.promoted is False
+    assert result.promotion_blocked_event is not None
+    payload = result.promotion_blocked_event.payload
+    assert "side-car missing" in payload["detail"] or "candidate file missing" in payload["detail"]
+    # Production untouched.
+    assert (tmp_path / "production" / "safety.onnx").exists() is False
 
 
 @pytest.mark.anyio
@@ -316,14 +324,20 @@ def test_run_sanity_check_blocks_when_candidate_file_missing(tmp_path):
     assert "candidate file missing" in reason
 
 
-def test_run_sanity_check_skips_unwired_model(tmp_path):
+def test_run_sanity_check_blocks_safety_when_sidecars_missing(tmp_path):
+    """`safety` is wired now — a bare-onnx candidate must fail loud."""
     from gateway.intelligence.shadow_gate import _run_sanity_check
 
     reg = ModelRegistry(base_path=str(tmp_path))
     reg.ensure_structure()
+    # Write the .onnx but no side-cars. The adapter must reject this as
+    # an incomplete candidate (FileNotFoundError on the missing side-car
+    # gets translated to a sanity FAILURE by the helper).
+    (tmp_path / "candidates" / "safety-v9.onnx").write_bytes(b"v9")
     runner = SanityRunner(fixtures_dir=tmp_path)
-    # `safety` is unwired — should return (None, None), the
-    # "skip-but-allow-promotion" signal.
     result, reason = _run_sanity_check("safety", "v9", reg, runner)
     assert result is None
-    assert reason is None
+    assert reason is not None
+    # The reason names a missing side-car so the operator can tell
+    # this from a missing-onnx case.
+    assert "side-car" in reason.lower() or "candidate file missing" in reason.lower()

@@ -71,6 +71,8 @@ from gateway.control.api import (
     control_get_key_tools,
     control_set_key_tools,
     control_remove_key_tool,
+    control_get_key_tenant,
+    control_set_key_tenant,
 )
 from gateway.control.sync_api import (
     sync_attestation_proofs,
@@ -114,6 +116,52 @@ def _resolve_header_identity_fallback(request: Request) -> None:
                 request.state.caller_identity = identity
     except Exception:
         logger.debug("resolve_identity_from_headers failed", exc_info=True)
+
+
+def _apply_api_key_tenant_binding(request: Request) -> None:
+    """Override caller_identity.tenant_id from the API-key→tenant binding.
+
+    Run after a successful API-key auth (env-list or control-plane). If the
+    raw key hashes to a row with a non-null tenant_id in the control plane,
+    overlay it onto the CallerIdentity.
+
+    Env-list keys configured via WALACOR_GATEWAY_API_KEYS only have a tenant
+    binding if an admin has explicitly POSTed to
+    /v1/control/api-keys/{hash}/tenant — there is no automatic onboarding for
+    them. Keys with no binding leave tenant_id untouched; downstream
+    `_resolve_tenant` falls back to ``settings.gateway_tenant_id``.
+    """
+    try:
+        import dataclasses
+        import hashlib
+
+        from gateway.auth.api_key import get_api_key_from_request
+
+        ctx = get_pipeline_context()
+        if ctx.control_store is None:
+            return
+        raw_key = get_api_key_from_request(request)
+        if not raw_key:
+            return
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        tenant_id = ctx.control_store.get_key_tenant(key_hash)
+        if not tenant_id:
+            return
+        identity = getattr(request.state, "caller_identity", None)
+        if identity is None:
+            return
+        if getattr(identity, "tenant_id", None) == tenant_id:
+            return
+        # CallerIdentity is frozen; dataclasses.replace is the only way to
+        # apply the binding without losing source/role provenance.
+        new_identity = dataclasses.replace(
+            identity,
+            tenant_id=tenant_id,
+            source="api_key_tenant_binding",
+        )
+        request.state.caller_identity = new_identity
+    except Exception:
+        logger.debug("api_key tenant binding lookup failed", exc_info=True)
 
 
 def _try_jwt_auth(request: Request, settings) -> bool:
@@ -277,6 +325,7 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
             request.state.walacor_reason = "both_mode: JWT failed and API key missing/invalid"
             return err
         _resolve_header_identity_fallback(request)
+        _apply_api_key_tenant_binding(request)
         _cross_validate_identity(request, settings)
         return await call_next(request)
 
@@ -287,6 +336,7 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
         request.state.walacor_reason = "api_key missing or not in allowlist"
         return err
     _resolve_header_identity_fallback(request)
+    _apply_api_key_tenant_binding(request)
     _cross_validate_identity(request, settings)
     return await call_next(request)
 
@@ -2066,6 +2116,8 @@ def create_app() -> Starlette:
         Route("/v1/control/keys/{key_hash}/tools", control_get_key_tools, methods=["GET"]),
         Route("/v1/control/keys/{key_hash}/tools", control_set_key_tools, methods=["PUT"]),
         Route("/v1/control/keys/{key_hash}/tools/{tool_name:path}", control_remove_key_tool, methods=["DELETE"]),
+        Route("/v1/control/api-keys/{key_hash}/tenant", control_get_key_tenant, methods=["GET"]),
+        Route("/v1/control/api-keys/{key_hash}/tenant", control_set_key_tenant, methods=["POST"]),
         # intelligence read endpoints
         Route("/v1/control/intelligence/models", intel_list_production_models, methods=["GET"]),
         Route("/v1/control/intelligence/candidates", intel_list_candidates, methods=["GET"]),

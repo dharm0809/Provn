@@ -690,6 +690,75 @@ async def control_list_key_policy_assignments(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
+# ── Key-Tenant Binding endpoints ───────────────────────────────
+#
+# Tenant_id is held on `key_policy_assignments` (Option A in the migration
+# decision). A key with no policy assignments has no row to attach a tenant
+# to; admins must assign at least one policy first. The 404 below makes
+# that contract explicit so silent no-op binds can't happen.
+
+async def control_get_key_tenant(request: Request) -> JSONResponse:
+    """GET /v1/control/api-keys/{key_hash}/tenant — read the tenant binding."""
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    key_hash = request.path_params["key_hash"]
+    try:
+        if not store.has_key(key_hash):
+            return JSONResponse(
+                {"error": "API key has no policy assignments; assign a policy first"},
+                status_code=404,
+            )
+        tenant_id = store.get_key_tenant(key_hash)
+        return JSONResponse({"api_key_hash": key_hash, "tenant_id": tenant_id})
+    except Exception:
+        logger.error("control_get_key_tenant error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+async def control_set_key_tenant(request: Request) -> JSONResponse:
+    """POST /v1/control/api-keys/{key_hash}/tenant — bind/unbind tenant_id.
+
+    Body ``{"tenant_id": "acme"}`` sets the binding; ``{"tenant_id": null}``
+    clears it (the key reverts to settings-driven tenant resolution).
+    """
+    store = _store_or_503()
+    if store is None:
+        return JSONResponse({"error": "Control plane not available"}, status_code=503)
+    key_hash = request.path_params["key_hash"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    if not isinstance(body, dict) or "tenant_id" not in body:
+        return JSONResponse(
+            {"error": "Body must be a JSON object with a 'tenant_id' field"},
+            status_code=400,
+        )
+    raw = body.get("tenant_id")
+    if raw is None:
+        tenant_id: str | None = None
+    elif isinstance(raw, str):
+        tenant_id = raw.strip() or None
+    else:
+        return JSONResponse(
+            {"error": "tenant_id must be a string or null"}, status_code=400
+        )
+    try:
+        if not store.has_key(key_hash):
+            return JSONResponse(
+                {"error": "API key has no policy assignments; assign a policy first"},
+                status_code=404,
+            )
+        store.set_key_tenant(key_hash, tenant_id)
+        return JSONResponse(
+            {"api_key_hash": key_hash, "tenant_id": tenant_id, "status": "updated"}
+        )
+    except Exception:
+        logger.error("control_set_key_tenant error", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
 # ── Key-Tool Permission endpoints ─────────────────────────────
 
 async def control_get_key_tools(request: Request) -> JSONResponse:

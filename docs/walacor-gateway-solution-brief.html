@@ -594,7 +594,7 @@ p {
     </div>
     <div class="arch-audit">
       <div class="arch-audit-arrow">&darr;</div>
-      <div class="arch-audit-box">Tamper-Proof Audit Trail &middot; SHA3-512 Session Chain &middot; Live Dashboard</div>
+      <div class="arch-audit-box">Tamper-Evident Audit Trail &middot; ID-Pointer Session Chain &middot; Live Dashboard</div>
     </div>
   </div>
 
@@ -677,10 +677,10 @@ p {
       <div class="flow-step fs-orange">
         <div class="flow-num">5</div>
         <div class="flow-body">
-          <div class="flow-title">Cryptographic Record</div>
-          <div class="flow-desc">Record is hash-chained to the previous record in the session using SHA3-512. Written to tamper-proof storage.</div>
+          <div class="flow-title">Tamper-Evident Record</div>
+          <div class="flow-desc">Record links to the previous record in the session via UUIDv7 ID-pointer (record_id + previous_record_id). Written to Walacor's tamper-evident ledger, which returns a DH digest on ingest.</div>
         </div>
-        <div class="flow-badge fb-orange">SHA3-512</div>
+        <div class="flow-badge fb-orange">Walacor DH</div>
       </div>
       <div class="flow-conn"></div>
       <div class="flow-step fs-blue">
@@ -698,18 +698,18 @@ p {
     <div>
       <h3>Completeness Guarantee</h3>
       <p class="small">The completeness middleware wraps the entire pipeline in a <code>try/finally</code> block. Whether a request succeeds, fails, gets denied by policy, or drops mid-stream &mdash; an attempt record is always written. This means your audit trail has <span class="strong">zero gaps</span>. Every request that touched the gateway is accounted for.</p>
-      <p class="small">Execution records contain the full prompt, full response, model identity, content analysis verdicts, policy decisions, token counts, latency, and session chain hashes. <span class="strong">Caller identity</span> (user ID, team, roles) is resolved from JWT claims or headers and attached to every record &mdash; answering "who asked this?" for every interaction.</p>
+      <p class="small">Execution records contain the full prompt, full response, model identity, content analysis verdicts, policy decisions, token counts, latency, and session chain pointers. <span class="strong">Caller identity</span> (user ID, team, roles) is resolved from JWT claims or headers and attached to every record &mdash; answering "who asked this?" for every interaction.</p>
     </div>
     <div>
       <h3>Session Chain Integrity</h3>
-      <p class="small">Every record in a conversation links to the previous one via a cryptographic hash. The formula chains six fields &mdash; execution ID, policy version, policy result, previous hash, sequence number, and timestamp &mdash; into a SHA3-512 digest.</p>
+      <p class="small">Every record in a conversation links to the previous one via a UUIDv7 ID-pointer (record_id + previous_record_id). The canonical chain ID string &mdash; record_id, previous_record_id, sequence number, execution ID, timestamp &mdash; is signed with Ed25519 for non-repudiation. Walacor returns a tamper-evident DH digest on ingest, anchoring the chain in an independent ledger.</p>
       <p class="small">If anyone modifies a record after the fact &mdash; changing a response, altering a policy verdict, or deleting a turn &mdash; the chain breaks. The lineage dashboard detects this instantly and highlights exactly which record was tampered with. This gives auditors <span class="strong">mathematical proof</span> of integrity, not just a promise.</p>
     </div>
   </div>
 
   <div class="callout">
     <div class="callout-title">Why This Matters for Compliance</div>
-    <p>Regulations like the EU AI Act, SOC 2, HIPAA, and industry-specific frameworks increasingly require organizations to demonstrate that AI systems are governed, monitored, and auditable. A log file is not sufficient &mdash; regulators want proof that logs haven't been tampered with. Walacor Gateway's cryptographic session chain provides exactly this: a Merkle-chain audit trail where any modification is mathematically detectable.</p>
+    <p>Regulations like the EU AI Act, SOC 2, HIPAA, and industry-specific frameworks increasingly require organizations to demonstrate that AI systems are governed, monitored, and auditable. A log file is not sufficient &mdash; regulators want proof that logs haven't been tampered with. Walacor Gateway's session chain provides exactly this: an ID-pointer audit trail anchored to Walacor's tamper-evident ledger, where any modification is mathematically detectable.</p>
   </div>
 
   <div class="page-foot">
@@ -745,8 +745,8 @@ p {
     </thead>
     <tbody>
       <tr>
-        <td class="feat">Cryptographic audit chain</td>
-        <td class="us-col yes"><span class="check">&check;</span> SHA3-512 Merkle chain</td>
+        <td class="feat">Tamper-evident audit chain</td>
+        <td class="us-col yes"><span class="check">&check;</span> ID-pointer chain + Walacor DH</td>
         <td class="no">&times; Not offered</td>
         <td class="no">&times; Mutable logs only</td>
         <td class="no">&times; Not offered</td>
@@ -873,7 +873,7 @@ p {
       <h4>Walacor Gateway</h4>
       <ul>
         <li><span>&check;</span> Routes + governs + audits every request</li>
-        <li><span>&check;</span> SHA3-512 Merkle chain &mdash; tamper-proof by design</li>
+        <li><span>&check;</span> ID-pointer chain + Walacor DH &mdash; tamper-evident by design</li>
         <li><span>&check;</span> 3 content analyzers (PII, toxicity, Llama Guard)</li>
         <li><span>&check;</span> JWT/SSO auth with caller identity in every record</li>
         <li><span>&check;</span> Self-service control plane + live dashboard</li>
@@ -918,7 +918,7 @@ p {
     <div class="pillar">
       <div class="pillar-num">02</div>
       <h4>Prove, Don't Promise</h4>
-      <p>Logging is not auditing. Any system that stores records in a mutable database can have those records altered. Our SHA3-512 session chain creates a Merkle-chain where each record's hash depends on the previous one. Tampering with any record breaks the chain forward &mdash; and the dashboard shows exactly where. This gives auditors mathematical certainty, not organizational trust.</p>
+      <p>Logging is not auditing. Any system that stores records in a mutable database can have those records altered. Our ID-pointer session chain links each record to the previous via record_id, with Walacor's DH digest providing tamper-evident anchoring on an independent ledger. Tampering with any record breaks the chain forward &mdash; and the dashboard shows exactly where. This gives auditors mathematical certainty, not organizational trust.</p>
     </div>
     <div class="pillar">
       <div class="pillar-num">03</div>
