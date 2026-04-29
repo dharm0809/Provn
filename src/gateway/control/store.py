@@ -6,12 +6,20 @@ import fnmatch
 import json
 import logging
 import sqlite3
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# TTL (seconds) for the in-process api_key_hash → tenant_id cache.
+# The mapping is read on every authenticated request that resolves a tenant
+# from a control-plane API key, so we keep a small TTL to avoid hammering
+# SQLite while still letting admin updates propagate quickly.
+_KEY_TENANT_CACHE_TTL_SECONDS = 60.0
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS attestations (
@@ -89,6 +97,7 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 CREATE TABLE IF NOT EXISTS key_policy_assignments (
     api_key_hash  TEXT NOT NULL,
     policy_id     TEXT NOT NULL,
+    tenant_id     TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (api_key_hash, policy_id)
 );
@@ -112,6 +121,12 @@ class ControlPlaneStore:
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._conn: sqlite3.Connection | None = None
+        # In-process cache for api_key_hash → tenant_id with TTL. Hot path
+        # (`get_key_tenant`) reads it on every authenticated request, so a
+        # small TTL avoids repeat SQLite round-trips. Mutations
+        # (`set_key_tenant`) invalidate the entry immediately.
+        self._key_tenant_cache: dict[str, tuple[str | None, float]] = {}
+        self._key_tenant_cache_lock = threading.Lock()
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -124,6 +139,21 @@ class ControlPlaneStore:
             # Migrate existing DBs that predate the model_hash column
             try:
                 self._conn.execute("ALTER TABLE attestations ADD COLUMN model_hash TEXT DEFAULT ''")
+                self._conn.commit()
+            except Exception:
+                pass  # column already exists
+            # Migrate existing DBs that predate the per-key tenant binding.
+            # Decision: Option A — extend `key_policy_assignments` rather than
+            # introduce a new `api_keys` table. The existing table is the
+            # canonical record of "control-plane-known API keys" and gating
+            # the tenant binding on its presence (404 when no row) gives a
+            # clean invariant: admins must assign at least one policy before
+            # they can bind a tenant. tenant_id is replicated across all rows
+            # for the same hash; helper methods enforce that invariant.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE key_policy_assignments ADD COLUMN tenant_id TEXT"
+                )
                 self._conn.commit()
             except Exception:
                 pass  # column already exists
@@ -602,18 +632,33 @@ class ControlPlaneStore:
         return [row[0] for row in rows]
 
     def set_key_policies(self, api_key_hash: str, policy_ids: list[str]) -> None:
-        """Replace all policy assignments for a key."""
+        """Replace all policy assignments for a key.
+
+        Preserves any existing tenant_id binding so admins don't need to
+        re-issue ``set_key_tenant`` after every policy update.
+        """
         conn = self._ensure_conn()
         with conn:
+            existing_tenant_row = conn.execute(
+                "SELECT tenant_id FROM key_policy_assignments"
+                " WHERE api_key_hash = ? AND tenant_id IS NOT NULL LIMIT 1",
+                (api_key_hash,),
+            ).fetchone()
+            existing_tenant = existing_tenant_row[0] if existing_tenant_row else None
             conn.execute(
                 "DELETE FROM key_policy_assignments WHERE api_key_hash = ?",
                 (api_key_hash,),
             )
             for pid in policy_ids:
                 conn.execute(
-                    "INSERT OR REPLACE INTO key_policy_assignments (api_key_hash, policy_id) VALUES (?, ?)",
-                    (api_key_hash, pid),
+                    "INSERT OR REPLACE INTO key_policy_assignments"
+                    " (api_key_hash, policy_id, tenant_id) VALUES (?, ?, ?)",
+                    (api_key_hash, pid, existing_tenant),
                 )
+        # Tenant value didn't change but the cache may now reference rows
+        # we just rewrote; drop the entry to avoid stale reads after delete.
+        with self._key_tenant_cache_lock:
+            self._key_tenant_cache.pop(api_key_hash, None)
 
     def remove_key_policy(self, api_key_hash: str, policy_id: str) -> bool:
         """Remove a single policy from a key. Returns True if it existed."""
@@ -623,16 +668,128 @@ class ControlPlaneStore:
                 "DELETE FROM key_policy_assignments WHERE api_key_hash = ? AND policy_id = ?",
                 (api_key_hash, policy_id),
             )
+        # If the removed row was the last one for this key, the cached
+        # tenant value (if any) no longer corresponds to a real binding.
+        with self._key_tenant_cache_lock:
+            self._key_tenant_cache.pop(api_key_hash, None)
         return cursor.rowcount > 0
 
     def list_key_policy_assignments(self) -> list[dict]:
         """Return all key-policy assignments."""
         conn = self._ensure_conn()
         rows = conn.execute(
-            "SELECT api_key_hash, policy_id, created_at FROM key_policy_assignments"
+            "SELECT api_key_hash, policy_id, tenant_id, created_at FROM key_policy_assignments"
             " ORDER BY api_key_hash, policy_id"
         ).fetchall()
-        return [{"api_key_hash": r[0], "policy_id": r[1], "created_at": r[2]} for r in rows]
+        return [
+            {
+                "api_key_hash": r[0],
+                "policy_id": r[1],
+                "tenant_id": r[2],
+                "created_at": r[3],
+            }
+            for r in rows
+        ]
+
+    # ── API-key tenant binding ────────────────────────────────
+    #
+    # tenant_id is stored on every row in `key_policy_assignments` for a
+    # given api_key_hash; this denormalisation is a small price for keeping
+    # the migration to a single ALTER TABLE. Helpers below enforce the
+    # invariant that all rows for the same hash share a single tenant value.
+
+    def get_key_tenant(self, api_key_hash: str) -> str | None:
+        """Return the tenant_id bound to ``api_key_hash`` or ``None``.
+
+        ``None`` means either the key is unknown to the control plane or the
+        key is known but has no tenant binding. Callers fall back to
+        ``settings.gateway_tenant_id`` either way.
+
+        Cached in-process for ~60s. Mutations through ``set_key_tenant`` /
+        ``set_key_policies`` invalidate the entry; the TTL bounds the
+        staleness window for any out-of-band SQL writes.
+        """
+        if not api_key_hash:
+            return None
+
+        # Cache hit?
+        now = time.monotonic()
+        with self._key_tenant_cache_lock:
+            cached = self._key_tenant_cache.get(api_key_hash)
+            if cached is not None:
+                value, expires_at = cached
+                if expires_at > now:
+                    return value
+                # Expired — drop and fall through to a fresh read.
+                self._key_tenant_cache.pop(api_key_hash, None)
+
+        conn = self._ensure_conn()
+        row = conn.execute(
+            "SELECT tenant_id FROM key_policy_assignments"
+            " WHERE api_key_hash = ? AND tenant_id IS NOT NULL"
+            " LIMIT 1",
+            (api_key_hash,),
+        ).fetchone()
+        tenant_id: str | None
+        if row is None:
+            tenant_id = None
+        else:
+            value = row[0]
+            tenant_id = value if value else None
+
+        with self._key_tenant_cache_lock:
+            self._key_tenant_cache[api_key_hash] = (
+                tenant_id,
+                time.monotonic() + _KEY_TENANT_CACHE_TTL_SECONDS,
+            )
+        return tenant_id
+
+    def has_key(self, api_key_hash: str) -> bool:
+        """Return True iff at least one policy assignment row exists for the key.
+
+        Used by the control-plane HTTP layer to 404 tenant-binding requests
+        for keys that have no policy assignments (and so are unknown to the
+        control plane).
+        """
+        if not api_key_hash:
+            return False
+        conn = self._ensure_conn()
+        row = conn.execute(
+            "SELECT 1 FROM key_policy_assignments WHERE api_key_hash = ? LIMIT 1",
+            (api_key_hash,),
+        ).fetchone()
+        return row is not None
+
+    def set_key_tenant(self, api_key_hash: str, tenant_id: str | None) -> bool:
+        """Bind (or unbind) ``tenant_id`` for every assignment row of the key.
+
+        Returns True if at least one row was updated, False if the key has no
+        assignments. Callers should treat False as "key not found".
+
+        Passing ``tenant_id=None`` clears the binding; lookup will subsequently
+        return None and downstream code falls back to ``gateway_tenant_id``.
+        """
+        if not api_key_hash:
+            return False
+        normalised = (tenant_id or "").strip() or None
+        conn = self._ensure_conn()
+        with conn:
+            cur = conn.execute(
+                "UPDATE key_policy_assignments SET tenant_id = ?"
+                " WHERE api_key_hash = ?",
+                (normalised, api_key_hash),
+            )
+        with self._key_tenant_cache_lock:
+            self._key_tenant_cache.pop(api_key_hash, None)
+        return cur.rowcount > 0
+
+    def invalidate_key_tenant_cache(self, api_key_hash: str | None = None) -> None:
+        """Drop ``api_key_hash`` from the tenant cache (or clear all when None)."""
+        with self._key_tenant_cache_lock:
+            if api_key_hash is None:
+                self._key_tenant_cache.clear()
+            else:
+                self._key_tenant_cache.pop(api_key_hash, None)
 
     # ── Key-Tool Permission CRUD ──────────────────────────────
 

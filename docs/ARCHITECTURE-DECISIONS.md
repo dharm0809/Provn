@@ -79,3 +79,38 @@ connections opened by `WALWriter` — the main-thread connection in
   re-examine this decision in light of the actual recovery semantics:
   the gateway is expected to lose at most one in-flight commit per
   process, not a record visible to a caller.
+
+## ADR-002: HTML marketing docs are hand-edited, not generated
+
+Date: 2026-04-29
+Status: Accepted
+
+### Context
+
+`docs/*.html` files (`gateway-workflow.html`, `walacor-gateway-solution-brief.html`,
+`walacor-gateway-2pager.html`, `enterprise-architecture.html`, etc.) are static
+marketing artifacts: each is a self-contained HTML page with embedded `<style>`
+blocks, hand-tuned typography, and bespoke layout. There is no markdown source,
+no generator script, and no template — the HTML is the source of truth.
+
+This means whenever the markdown docs (`docs/*.md`) are rewritten — for example,
+when a feature is removed or terminology changes (Merkle chain → ID-pointer chain)
+— the corresponding HTML files must be hand-edited to match. There is no automated
+sync.
+
+### Decision
+
+We accept the hand-edit cost rather than building a docs generator. Marketing
+artifacts have low edit frequency, the styling is bespoke (a generator would
+either constrain it or balloon in complexity), and the audience for HTML
+(prospects, executives) is more sensitive to visual polish than the audience
+for markdown (engineers, operators).
+
+### Consequences
+
+- When a doc rewrite affects user-facing terminology, search `docs/*.html` for
+  the old phrasing and update each file in parallel with the markdown.
+- A regression check: `grep -niE "merkle|sha3-512|transparency.log|hedge" docs/*.html`
+  should return zero matches if the cleanup is complete.
+- If a future regeneration framework lands (e.g. mkdocs with custom themes), this
+  ADR can be revisited.

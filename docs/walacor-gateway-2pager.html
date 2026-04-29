@@ -898,8 +898,8 @@
 
         <div class="audit-arrow">&darr;</div>
         <div class="audit-box">
-          <div class="title">Tamper-Proof Audit Trail</div>
-          <div class="detail">SHA3-512 session chain &middot; every prompt, response, tool call recorded</div>
+          <div class="title">Tamper-Evident Audit Trail</div>
+          <div class="detail">ID-pointer session chain &middot; every prompt, response, tool call recorded</div>
         </div>
       </div>
 
@@ -1034,10 +1034,10 @@
       <div class="flow-step step-orange">
         <div class="step-num">5</div>
         <div class="step-content">
-          <div class="step-title">Create Cryptographic Record</div>
-          <div class="step-desc">Link to session chain + write tamper-proof audit record</div>
+          <div class="step-title">Create Tamper-Evident Record</div>
+          <div class="step-desc">Link to session chain via ID-pointer + write to Walacor ledger</div>
         </div>
-        <div class="step-badge badge-record">SHA3-512</div>
+        <div class="step-badge badge-record">Walacor DH</div>
       </div>
       <div class="flow-connector"></div>
 

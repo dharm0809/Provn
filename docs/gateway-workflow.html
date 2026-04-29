@@ -380,7 +380,7 @@
       <li>Security & compliance proxy for LLM traffic</li>
       <li>Like a WAF (Web Application Firewall) for AI</li>
       <li>Transparent — apps don't change their code</li>
-      <li>Cryptographic audit trail (SHA3-512 Merkle chain)</li>
+      <li>Tamper-evident audit trail (ID-pointer chain + Walacor DH)</li>
       <li>Content safety scanner (PII, toxicity, Llama Guard)</li>
       <li>Tool execution engine for local models</li>
       <li>Provider-agnostic (Ollama, OpenAI, Anthropic, etc.)</li>
@@ -535,7 +535,7 @@
     <div class="step-num write">8</div>
     <div class="step-body">
       <div class="step-title">Audit Record + Session Chain (G5)</div>
-      <div class="step-desc">Build execution record with all metadata. Compute SHA3-512 chain hash linking to previous record (Merkle chain). Dual-write to Walacor ledger + local WAL. Emit OTel span.</div>
+      <div class="step-desc">Build execution record with all metadata. Link to previous record via ID-pointer (record_id + previous_record_id). Sign canonical ID string with Ed25519. Dual-write to Walacor ledger + local WAL — Walacor returns a tamper-evident DH digest on ingest. Emit OTel span.</div>
       <div class="step-outcomes">
         <span class="outcome pass">Record written &rarr; tamper-proof audit trail</span>
       </div>
@@ -595,7 +595,7 @@
   </div>
   <div class="loop-return">
     Loop repeats until model stops requesting tools (max iterations configurable).
-    <br>Every tool call is <span>SHA3-512 hashed</span> and recorded as a first-class audit event.
+    <br>Every tool call is recorded as a first-class audit event with full input/output data (Walacor backend hashes on ingest).
   </div>
 </div>
 
@@ -766,16 +766,15 @@
   <div class="step">
     <div class="step-num" style="background: #1e2a3a; border: 2px solid #06b6d4; color: #06b6d4;">E</div>
     <div class="step-body">
-      <div class="step-title">Hash + Record Tool Event</div>
+      <div class="step-title">Record Tool Event</div>
       <div class="step-desc">
-        Gateway computes SHA3-512 hashes of the tool's input and output, records source URLs,
+        Gateway records the tool's input and output verbatim (Walacor backend hashes on ingest), captures source URLs,
         duration, and content analysis results. This becomes a first-class audit event.
       </div>
       <div class="record-card" style="margin-top: 8px; padding: 12px; font-size: 12px; line-height: 1.5;">
         { <span class="key">"tool_name"</span>: <span class="str">"web_search"</span>,<br>
         &nbsp;&nbsp;<span class="key">"input_data"</span>: { <span class="key">"query"</span>: <span class="str">"Python programming"</span> },<br>
-        &nbsp;&nbsp;<span class="key">"input_hash"</span>: <span class="str">"a3f8c2...SHA3-512"</span>,<br>
-        &nbsp;&nbsp;<span class="key">"output_hash"</span>: <span class="str">"7b1d4e...SHA3-512"</span>,<br>
+        &nbsp;&nbsp;<span class="key">"output_data"</span>: <span class="str">"...verbatim tool output..."</span>,<br>
         &nbsp;&nbsp;<span class="key">"sources"</span>: [{ <span class="key">"title"</span>: <span class="str">"Python.org"</span>, <span class="key">"url"</span>: <span class="str">"..."</span> }],<br>
         &nbsp;&nbsp;<span class="key">"content_analysis"</span>: [{ <span class="key">"verdict"</span>: <span class="str">"pass"</span> }],<br>
         &nbsp;&nbsp;<span class="key">"duration_ms"</span>: <span class="num">342</span> }
@@ -830,8 +829,8 @@
     </div>
     <div style="flex: 1; min-width: 180px; background: #0a0e17; border: 1px solid #2a3a52; border-radius: 8px; padding: 14px; text-align: center;">
       <div style="font-size: 11px; text-transform: uppercase; color: #7a8ba5;">Step 4</div>
-      <div style="font-size: 14px; color: #fff; font-weight: 600;">Hash Everything</div>
-      <div style="font-size: 12px; color: #7a8ba5;">SHA3-512 of input + output for audit</div>
+      <div style="font-size: 14px; color: #fff; font-weight: 600;">Record Everything</div>
+      <div style="font-size: 12px; color: #7a8ba5;">Verbatim input + output stored for audit</div>
     </div>
   </div>
 </div>
@@ -884,10 +883,11 @@
 &nbsp;&nbsp;<span class="key">"latency_ms"</span>: <span class="num">8500</span>,<br>
 &nbsp;&nbsp;<span class="key">"user"</span>: <span class="str">"dharmpratap"</span>,<br>
 &nbsp;&nbsp;<span class="key">"team"</span>: <span class="str">"engineering"</span>,<br>
-&nbsp;&nbsp;<span class="comment">// Merkle chain — links to previous record</span><br>
+&nbsp;&nbsp;<span class="comment">// ID-pointer chain — links to previous record</span><br>
 &nbsp;&nbsp;<span class="key">"sequence_number"</span>: <span class="num">5</span>,<br>
-&nbsp;&nbsp;<span class="key">"previous_record_hash"</span>: <span class="str">"a3f8c2d1..."</span>,<br>
-&nbsp;&nbsp;<span class="key">"record_hash"</span>: <span class="str">"7b1d4e9f..."</span> <span class="comment">// SHA3-512 — if anyone edits this record, the chain breaks</span><br>
+&nbsp;&nbsp;<span class="key">"record_id"</span>: <span class="str">"01HVRXC..."</span>,<br>
+&nbsp;&nbsp;<span class="key">"previous_record_id"</span>: <span class="str">"01HVRXB..."</span>,<br>
+&nbsp;&nbsp;<span class="key">"DH"</span>: <span class="str">"7b1d4e9f..."</span> <span class="comment">// Walacor's tamper-evident digest — if anyone edits this record, the chain breaks</span><br>
 }
 </div>
 
@@ -909,7 +909,7 @@
   </div>
   <div class="compliance-badge">
     <div class="framework">Crypto</div>
-    <div class="name">SHA3-512</div>
+    <div class="name">Ed25519 + Walacor DH</div>
   </div>
   <div class="compliance-badge">
     <div class="framework">Observability</div>
@@ -926,7 +926,7 @@
   <tr><td>EU AI Act Art. 12 — Record-keeping</td><td>Every interaction recorded with full prompt, response, model, user, timestamp</td></tr>
   <tr><td>EU AI Act Art. 14 — Human oversight</td><td>Lineage dashboard, content analysis verdicts, chain verification</td></tr>
   <tr><td>NIST AI RMF — Govern</td><td>Policy rules, model attestation, token budgets, role-based access</td></tr>
-  <tr><td>SOC 2 — Processing Integrity</td><td>SHA3-512 Merkle chain — tamper-evident, independently verifiable</td></tr>
+  <tr><td>SOC 2 — Processing Integrity</td><td>ID-pointer chain + Walacor DH — tamper-evident, independently verifiable</td></tr>
   <tr><td>SOC 2 — Confidentiality</td><td>PII detection, API key/credential scanning in responses</td></tr>
 </table>
 
