@@ -40,12 +40,27 @@ class VerdictFlushWorker:
         self._interval = flush_interval_s
         self._batch = batch_size
         self._running = False
+        # Cancellable sleep handle so stop_and_drain() can wake the
+        # current tick instead of waiting up to flush_interval_s for it
+        # to expire on its own.
+        self._sleep_task: asyncio.Task | None = None
 
     async def run(self) -> None:
         self._running = True
         while self._running:
             try:
-                await asyncio.sleep(self._interval)
+                self._sleep_task = asyncio.ensure_future(asyncio.sleep(self._interval))
+                try:
+                    await self._sleep_task
+                except asyncio.CancelledError:
+                    # stop_and_drain() cancelled our sleep; fall through
+                    # to the loop check (`self._running` is now False) so
+                    # the worker exits cleanly without re-raising.
+                    if not self._running:
+                        break
+                    raise
+                finally:
+                    self._sleep_task = None
                 batch = self._buf.drain(max_batch=self._batch)
                 if batch:
                     await asyncio.to_thread(self._write_batch, batch)
@@ -72,7 +87,43 @@ class VerdictFlushWorker:
             logger.debug("verdict_buffer_size metric failed", exc_info=True)
 
     def stop(self) -> None:
+        """Synchronous stop — flips the running flag and cancels the
+        in-flight sleep so the run loop exits promptly. Does NOT drain
+        the buffer; callers that need a final drain (graceful shutdown)
+        must use `stop_and_drain()` instead.
+        """
         self._running = False
+        sleep_task = self._sleep_task
+        if sleep_task is not None and not sleep_task.done():
+            sleep_task.cancel()
+
+    async def stop_and_drain(self) -> None:
+        """Stop the loop, cancel the in-flight sleep, and flush whatever
+        remains in the buffer. Bounded by the buffer's max size — drains
+        in `batch_size` chunks until empty.
+
+        Invariant for graceful shutdown: every verdict that was in the
+        buffer at the time stop_and_drain() is invoked is written to
+        SQLite (or surfaces as a write failure — never silently lost).
+        """
+        self.stop()
+        # Drain in batches until the buffer is empty. Bound the loop so
+        # a runaway producer can't keep us in here forever — we cap at
+        # the buffer's configured max so worst case is one full
+        # buffer-equivalent of writes.
+        max_iterations = max(1, (self._buf.size // max(1, self._batch)) + 2)
+        for _ in range(max_iterations):
+            batch = self._buf.drain(max_batch=self._batch)
+            if not batch:
+                break
+            try:
+                await asyncio.to_thread(self._write_batch, batch)
+                self._update_size_gauge()
+            except Exception:
+                # Same hot-path discipline as run(): log + continue so a
+                # broken final write doesn't prevent shutdown.
+                logger.exception("verdict flush stop_and_drain iteration failed")
+                break
 
     def _write_batch(self, verdicts: list[ModelVerdict]) -> None:
         # Explicit transaction per IntelligenceDB's autocommit contract —

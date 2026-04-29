@@ -20,6 +20,15 @@ needs_cryptography = pytest.mark.skipif(
 )
 
 
+_CANONICAL_KWARGS = dict(
+    record_id="rec-1",
+    previous_record_id=None,
+    sequence_number=0,
+    execution_id="exec-1",
+    timestamp="2026-01-01T00:00:00Z",
+)
+
+
 @needs_cryptography
 def test_generate_keypair():
     """Generate keypair creates a valid PEM file."""
@@ -35,7 +44,7 @@ def test_generate_keypair():
 
 @needs_cryptography
 def test_load_and_sign():
-    """Load key and sign a hash."""
+    """Load key and sign canonical metadata."""
     from gateway.crypto import signing
 
     # Reset module state
@@ -46,7 +55,7 @@ def test_load_and_sign():
         key_path = os.path.join(tmp, "test_key.pem")
         signing.generate_keypair(key_path)
         assert signing.load_signing_key(key_path) is True
-        sig = signing.sign_hash("abc123hash")
+        sig = signing.sign_canonical(**_CANONICAL_KWARGS)
         assert sig is not None
         assert len(sig) > 0
 
@@ -68,18 +77,17 @@ def test_sign_and_verify():
         signing.generate_keypair(key_path)
         signing.load_signing_key(key_path)
 
-        record_hash = "deadbeef" * 16
-        sig = signing.sign_hash(record_hash)
+        sig = signing.sign_canonical(**_CANONICAL_KWARGS)
         assert sig is not None
-        assert signing.verify_signature(record_hash, sig) is True
+        assert signing.verify_canonical(signature=sig, **_CANONICAL_KWARGS) is True
 
     signing._signing_key = None
     signing._verify_key = None
 
 
 @needs_cryptography
-def test_verify_wrong_hash():
-    """Verification fails for wrong hash."""
+def test_verify_wrong_metadata():
+    """Verification fails when canonical metadata changes."""
     from gateway.crypto import signing
 
     signing._signing_key = None
@@ -90,9 +98,10 @@ def test_verify_wrong_hash():
         signing.generate_keypair(key_path)
         signing.load_signing_key(key_path)
 
-        sig = signing.sign_hash("original_hash")
+        sig = signing.sign_canonical(**_CANONICAL_KWARGS)
         assert sig is not None
-        assert signing.verify_signature("different_hash", sig) is False
+        tampered = {**_CANONICAL_KWARGS, "execution_id": "exec-tampered"}
+        assert signing.verify_canonical(signature=sig, **tampered) is False
 
     signing._signing_key = None
     signing._verify_key = None
@@ -111,7 +120,7 @@ def test_verify_wrong_signature():
         signing.generate_keypair(key_path)
         signing.load_signing_key(key_path)
 
-        assert signing.verify_signature("hash", "bm90YXNpZw==") is False
+        assert signing.verify_canonical(signature="bm90YXNpZw==", **_CANONICAL_KWARGS) is False
 
     signing._signing_key = None
     signing._verify_key = None
@@ -123,7 +132,7 @@ def test_sign_without_key():
 
     signing._signing_key = None
     signing._verify_key = None
-    assert signing.sign_hash("test") is None
+    assert signing.sign_canonical(**_CANONICAL_KWARGS) is None
 
 
 def test_verify_without_key():
@@ -132,7 +141,7 @@ def test_verify_without_key():
 
     signing._signing_key = None
     signing._verify_key = None
-    assert signing.verify_signature("test", "sig") is False
+    assert signing.verify_canonical(signature="sig", **_CANONICAL_KWARGS) is False
 
 
 def test_load_nonexistent_key():
@@ -170,3 +179,11 @@ def test_get_public_key_without_key():
     signing._signing_key = None
     signing._verify_key = None
     assert signing.get_public_key_pem() is None
+
+
+def test_deprecated_aliases_removed():
+    """sign_hash and verify_signature must no longer exist on the module."""
+    from gateway.crypto import signing
+
+    assert not hasattr(signing, "sign_hash"), "sign_hash should be deleted"
+    assert not hasattr(signing, "verify_signature"), "verify_signature should be deleted"

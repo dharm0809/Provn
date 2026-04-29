@@ -43,13 +43,30 @@ class HuggingFaceAdapter(ProviderAdapter):
         if not prompt_text and "inputs" in data:
             prompt_text = str(data.get("inputs", ""))
         is_streaming = data.get("stream", False)
+
+        # Caller-identity plumbing: mirror the openai/ollama adapters so
+        # downstream governance (budget, audit, lineage) sees a populated
+        # metadata dict instead of an empty one.  HF's request body doesn't
+        # carry user/team/email natively, but headers may, and at minimum
+        # we tag the adapter + model so attribution is non-empty.
+        metadata: dict[str, Any] = {
+            "adapter": "huggingface",
+            "model_id": model_id,
+        }
+        if request.headers.get("x-user-id"):
+            metadata["user"] = request.headers["x-user-id"]
+        if request.headers.get("x-team-id"):
+            metadata["team"] = request.headers["x-team-id"]
+        if request.headers.get("x-user-email"):
+            metadata["caller_email"] = request.headers["x-user-email"]
+
         return ModelCall(
             provider=self.get_provider_name(),
             model_id=model_id,
             prompt_text=prompt_text,
             raw_body=body_bytes,
             is_streaming=is_streaming,
-            metadata={},
+            metadata=metadata,
         )
 
     async def build_forward_request(self, call: ModelCall, original: Request) -> httpx.Request:

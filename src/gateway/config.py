@@ -193,14 +193,44 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = Field(default=120, description="Requests per minute limit")
     rate_limit_per_model: bool = Field(default=True, description="Rate limit per user+model (vs per user only)")
     ip_rate_limit_rpm: int = Field(default=300, description="Per-IP pre-auth rate limit (requests per minute)")
+    ip_rate_limit_trusted_proxies: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of trusted proxy IPs/CIDRs. When request.client.host is in this set, "
+            "the rightmost untrusted entry of X-Forwarded-For is used as the client IP for rate limiting. "
+            "Empty (default) = use request.client.host directly (correct only when not behind a proxy)."
+        ),
+    )
+
+    # Plugin-path auth (OpenWebUI plugin events + native Ollama proxy)
+    plugin_auth_required: bool = Field(
+        default=False,
+        description=(
+            "When True, /v1/openwebui/* and /api/* paths go through the normal auth middleware. "
+            "When False (default, for backward compatibility with existing OpenWebUI deployments), "
+            "those paths are unauthenticated — restrict them to loopback or set this flag in production."
+        ),
+    )
+
+    # Reject requests with Transfer-Encoding: chunked (no Content-Length cap possible)
+    reject_chunked_transfer: bool = Field(
+        default=True,
+        description=(
+            "When True (default), requests with `Transfer-Encoding: chunked` are rejected with 411 "
+            "Length Required because the body-size middleware cannot enforce max_request_body_mb on "
+            "a chunked stream. Set False to allow chunked uploads (only safe behind a proxy that "
+            "enforces a body cap)."
+        ),
+    )
 
     # Phase 26: Alerting
     webhook_urls: str = Field(default="", description="Comma-separated webhook URLs for alerts")
+    alert_webhook_secret: str = Field(default="", description="Shared secret for HMAC-SHA256 signing of webhook alerts (X-Walacor-Signature). Empty = unsigned (insecure).")
     pagerduty_routing_key: str = Field(default="", description="PagerDuty Events API v2 routing key")
     alert_budget_thresholds: str = Field(default="70,90,100", description="Comma-separated budget usage % thresholds for alerts")
 
     # Phase 13: Session chain integrity
-    session_chain_enabled: bool = Field(default=True, description="Enable Merkle chain for session records (G5)")
+    session_chain_enabled: bool = Field(default=True, description="Enable ID-pointer chain (record_id + previous_record_id) for session records (G5)")
     session_chain_max_sessions: int = Field(default=10000, description="Max concurrent sessions tracked in memory")
     session_chain_ttl: int = Field(default=3600, description="Session state TTL seconds (evict inactive sessions)")
 
@@ -450,9 +480,15 @@ class Settings(BaseSettings):
         description="Timeout in seconds for completeness middleware storage writes",
     )
 
-    # Hedged requests (tail latency reduction)
-    hedged_requests_enabled: bool = Field(default=False, description="Enable hedged cross-provider requests")
-    hedge_delay_factor: float = Field(default=1.5, description="Hedge after p95_latency * this factor")
+    # Stream PII handling: bytes already streamed cannot be retracted, so this
+    # configures what to do when PII is detected mid-stream.
+    #   - "warn"   : log a warning and continue (default; preserves existing behaviour)
+    #   - "abort"  : close the stream early so no further bytes leak
+    #   - "redact" : (TODO) replace detected PII with [REDACTED] in subsequent chunks
+    stream_pii_mode: str = Field(
+        default="warn",
+        description="Behaviour when PII is detected mid-stream: warn|abort|redact",
+    )
 
     # Resilience tuning
     delivery_batch_size: int = Field(default=50, description="WAL delivery batch size per cycle")
@@ -560,14 +596,6 @@ class Settings(BaseSettings):
     record_signing_enabled: bool = Field(default=False, description="Sign record hashes with Ed25519 for non-repudiation")
     record_signing_key_path: str = Field(default="", description="Path to Ed25519 private key PEM file")
 
-    # Phase 24: Periodic Merkle tree checkpoints
-    merkle_checkpoint_enabled: bool = Field(default=True, description="Enable periodic Merkle tree checkpoints for session chains")
-    merkle_checkpoint_interval_seconds: int = Field(default=3600, description="Seconds between Merkle tree checkpoint builds")
-
-    # Transparency log publishing
-    transparency_log_enabled: bool = Field(default=False, description="Publish Merkle checkpoint roots to external transparency log")
-    transparency_log_url: str = Field(default="", description="Transparency log endpoint URL for POST requests")
-
     # ── B.4: Semantic caching (exact-match tier) ──────────────────────────────
     semantic_cache_enabled: bool = Field(
         default=True,
@@ -611,6 +639,14 @@ class Settings(BaseSettings):
     # ── Phase 25: Intelligence / ONNX Self-Learning ──────────────────────────
     intelligence_enabled: bool = Field(default=True, description="Enable ONNX intelligence layer (intent, schema, safety verdict capture and distillation)")
     intelligence_db_path: str = Field(default="", description="SQLite path for intelligence verdict store. Empty defaults to {wal_path}/intelligence.db")
+    # TODO(#47): not yet implemented. When set, CapabilityRegistry would persist
+    # cross-worker capability state (supports_tools, observed latencies) at this
+    # path so a fresh uvicorn worker doesn't pay one extra retry-cycle on first
+    # contact with each model. Today the per-worker LRU cache is sufficient —
+    # a worker self-populates after a single 400/422 retry — so this flag is
+    # additive and unread by gateway code. Wire up only if a real deployment
+    # demonstrates that the retry cost is unacceptable.
+    shared_capability_cache_path: str = Field(default="", description="(TODO, not implemented) SQLite path for cross-worker model capability cache. Empty = per-worker in-memory only.")
     onnx_models_base_path: str = Field(default="", description="Base directory for ONNX model artifacts. Empty defaults to src/gateway/models/")
     verdict_retention_days: int = Field(default=30, ge=1, description="Retention for captured ONNX verdicts in days")
     distillation_schedule_cron: str = Field(default="0 2 * * *", description="Cron expression for nightly distillation job")
@@ -634,6 +670,7 @@ class Settings(BaseSettings):
     post_promotion_min_samples: int = Field(default=200, ge=1, description="Minimum signal-bearing samples in pre AND post windows before auto-rollback fires")
     post_promotion_cooldown_h: int = Field(default=12, ge=1, description="Hours after an auto-rollback during which the same model is exempt from further auto-rollback")
     post_promotion_settle_minutes: int = Field(default=15, ge=1, description="Minutes after a promotion before its candidate is eligible for evaluation")
+    distillation_buffer_max: int = Field(default=10000, ge=1, description="Maximum number of distillation samples retained in the IntelligenceWorker in-memory buffer; oldest samples are evicted when full")
 
     # ── Phase 26: Readiness self-check ───────────────────────────────────────
     readiness_enabled: bool = Field(default=True, description="Enable GET /v1/readiness endpoint")

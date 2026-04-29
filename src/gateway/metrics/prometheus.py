@@ -1,4 +1,32 @@
-"""Prometheus metrics for the gateway."""
+"""Prometheus metrics for the gateway.
+
+Cardinality budget
+------------------
+Prometheus storage cost scales with the cross-product of a metric's labels.
+Two label dimensions matter most here:
+
+  * ``tenant_id`` — bounded by the number of tenants (≤ a few hundred in
+    typical deployments).
+  * ``model``    — bounded by the model catalog (≤ a few dozen).
+
+Convention used in this module:
+
+  * **Counters** that drive billing/quota dashboards (``token_usage_total``,
+    ``budget_exceeded_total``, ``budget_utilization_ratio``) keep BOTH
+    ``tenant_id`` and ``model``.  Cardinality is bounded by tenant×model
+    (~ low thousands) and the breakdown is required for chargeback.
+  * **Histograms** (``pipeline_duration``, ``forward_duration``,
+    ``forward_duration_by_model``, ``distillation_run_duration_seconds``,
+    ``tool_loop_iterations``) deliberately omit ``tenant_id``.  Each
+    histogram already explodes into ~10 buckets per series, and a
+    tenant×bucket cross-product would balloon scrape size with no
+    operational signal that the unlabelled histogram doesn't already give.
+    If you need per-tenant latency, derive it from the request log /
+    lineage DB, not Prometheus.
+
+Add new high-cardinality labels (user_id, request_id, prompt_hash …) only
+after explicitly justifying them against this budget.
+"""
 
 from __future__ import annotations
 

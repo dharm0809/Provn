@@ -45,6 +45,11 @@ class DeliveryWorker:
         self._max_backoff = self._MAX_BACKOFF
         self._cycles = 0
         self._client: httpx.AsyncClient | None = None
+        # Running tally of records moved to the dead-letter queue this
+        # process lifetime.  Logged at WARNING (not ERROR — ERROR pages
+        # on-call) every time a new DLQ entry is written, plus a periodic
+        # rollup so dashboards can scrape from logs if they need to.
+        self._dlq_count = 0
 
     def start(self) -> None:
         if self._running:
@@ -127,9 +132,19 @@ class DeliveryWorker:
                     delivery_total.labels(result="duplicate").inc()
                     self._wal.mark_delivered(execution_id)
                 elif 400 <= r.status_code < 500:
-                    delivery_total.labels(result="error").inc()
-                    logger.error("Delivery client error for %s: %s", execution_id, r.status_code)
-                    self._wal.mark_delivered(execution_id)
+                    # 4xx is non-retryable: the control plane explicitly
+                    # rejected the body.  Park the record in the DLQ
+                    # (delivery_status='dead_letter') instead of silently
+                    # marking it delivered — operators can query the DLQ
+                    # to see what was lost and why.
+                    delivery_total.labels(result="dead_letter").inc()
+                    reason = f"HTTP {r.status_code}: {r.text[:200] if r.text else ''}"
+                    self._wal.mark_dead_lettered(execution_id, reason)
+                    self._dlq_count += 1
+                    logger.warning(
+                        "Delivery dead-lettered execution_id=%s status=%s dlq_total=%d",
+                        execution_id, r.status_code, self._dlq_count,
+                    )
                 else:
                     delivery_total.labels(result="error").inc()
                     logger.warning("Delivery server error for %s: HTTP %s — will retry next cycle", execution_id, r.status_code)

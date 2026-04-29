@@ -480,10 +480,26 @@ async def stream_with_tee(
                     )
                     yield b'event: error\ndata: {"error": "content_safety", "message": "Response blocked by safety filter (S4)"}\n\n'
                     return
-                # Windowed PII check — warn only (can't un-send streamed chunks)
+                # Windowed PII check. Mode is configurable via WALACOR_STREAM_PII_MODE:
+                #   "warn"   — log only; bytes already on the wire (default, no behaviour change)
+                #   "abort"  — yield an SSE error and stop the generator so no further bytes leak
+                #   "redact" — TODO: substitute [REDACTED] for matched spans in subsequent chunks.
+                #              Requires per-chunk tokenization plus span tracking across the
+                #              boundary buffer so we don't redact a span twice or miss a span
+                #              that straddles two chunks. Not implemented.
                 pii_found, pii_checked_len = check_stream_pii(accumulated_text, pii_checked_len)
                 if pii_found:
-                    logger.warning("PII detected in stream, logging warning")
+                    pii_mode = (settings.stream_pii_mode or "warn").lower()
+                    if pii_mode == "abort":
+                        logger.warning("PII detected in stream — aborting (mode=abort)")
+                        record_stream_interruption(
+                            provider=adapter.get_provider_name() if adapter else "unknown",
+                            detail="pii_abort",
+                        )
+                        yield b'event: error\ndata: {"error": "pii_detected", "message": "Response truncated: PII detected in stream"}\n\n'
+                        return
+                    # "warn" (default) and unrecognized values fall through to log-only
+                    logger.warning("PII detected in stream, logging warning (mode=%s)", pii_mode)
 
                 if _stream_translator is not None:
                     translated = _stream_translator.feed(chunk)

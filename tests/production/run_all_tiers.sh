@@ -68,8 +68,8 @@ echo ""
 echo "=== Pre-Tier 5: Governance Stress Run ==="
 GATEWAY_URL="http://$GATEWAY_IP:$GATEWAY_PORT/v1/chat/completions" \
 GATEWAY_MODEL="$GATEWAY_MODEL" \
-python3.12 tests/governance_stress.py 2>&1 | tee tests/artifacts/governance_stress_output.txt || true
-echo "  Stress run complete (failures above are non-blocking)"
+python3.12 tests/governance_stress.py 2>&1 | tee tests/artifacts/governance_stress_output.txt
+echo "  Stress run complete"
 
 # ── Tier 4: Resilience ────────────────────────────────────────────────────────
 echo ""

@@ -1,4 +1,4 @@
-"""Attestation cache: (provider, model_id) -> CachedAttestation. Fail-closed when expired and control plane unreachable."""
+"""Attestation cache: (provider, model_id, tenant_id) -> CachedAttestation. Fail-closed when expired and control plane unreachable."""
 
 from __future__ import annotations
 
@@ -36,21 +36,30 @@ class CachedAttestation:
 
 
 class AttestationCache:
-    """In-memory cache keyed by (provider, model_id). Fail-closed on expiry if refresh fails."""
+    """In-memory cache keyed by (provider, model_id, tenant_id). Fail-closed on expiry if refresh fails.
+
+    tenant_id is included in the key so an attestation cached for tenant A can never be served
+    to tenant B. ``set`` derives the tenant from the entry's own ``tenant_id`` field; ``get``
+    accepts an optional tenant_id (default "") which scopes the lookup to that tenant's bucket.
+    """
 
     def __init__(self, ttl_seconds: int = 300) -> None:
         self._ttl = ttl_seconds
-        self._cache: dict[tuple[str, str], CachedAttestation] = {}
+        self._cache: dict[tuple[str, str, str], CachedAttestation] = {}
         self._lock: Any = None  # optional asyncio.Lock if needed
 
-    def _key(self, provider: str, model_id: str) -> tuple[str, str]:
-        return (provider.strip().lower(), (model_id or "").strip())
+    def _key(self, provider: str, model_id: str, tenant_id: str = "") -> tuple[str, str, str]:
+        return (
+            provider.strip().lower(),
+            (model_id or "").strip(),
+            (tenant_id or "").strip(),
+        )
 
-    def get(self, provider: str, model_id: str) -> CachedAttestation | None:
-        return self._cache.get(self._key(provider, model_id))
+    def get(self, provider: str, model_id: str, tenant_id: str = "") -> CachedAttestation | None:
+        return self._cache.get(self._key(provider, model_id, tenant_id))
 
     def set(self, entry: CachedAttestation) -> None:
-        self._cache[self._key(entry.provider, entry.model_id)] = entry
+        self._cache[self._key(entry.provider, entry.model_id, entry.tenant_id)] = entry
 
     def set_from_proof(self, provider: str, proof: dict) -> None:
         model_id = proof.get("model_id") or ""
@@ -69,8 +78,8 @@ class AttestationCache:
         )
         self.set(entry)
 
-    def invalidate(self, provider: str, model_id: str) -> None:
-        self._cache.pop(self._key(provider, model_id), None)
+    def invalidate(self, provider: str, model_id: str, tenant_id: str = "") -> None:
+        self._cache.pop(self._key(provider, model_id, tenant_id), None)
 
     def clear(self) -> None:
         self._cache.clear()

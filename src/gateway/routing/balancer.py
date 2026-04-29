@@ -34,9 +34,37 @@ class LoadBalancer:
 
     def __init__(self, groups: list[ModelGroup]):
         self._groups = groups
+        # Track when we last ran the cooldown sweep so we don't busy-loop on every
+        # request. Cheap O(N) walk of all endpoints, but only needed when at least
+        # one is currently in cooldown.
+        self._last_health_check: float = 0.0
 
     def select_endpoint(self, model_id: str) -> Endpoint | None:
-        """P2C selection from healthy endpoints matching *model_id*."""
+        """P2C selection from healthy endpoints matching *model_id*.
+
+        Lazily re-enables endpoints whose cooldown window has elapsed before
+        selection. This replaces the missing background health-check loop —
+        any caller of ``select_endpoint`` will now revive cooled-down peers
+        on the first selection past their ``cooldown_until``.
+        """
+        # Lazy revival: if any endpoint is currently unhealthy and the soonest
+        # cooldown has already passed, run check_health() before selecting.
+        # Cheap fast-path when nothing is in cooldown.
+        now = time.monotonic()
+        if now >= self._last_health_check + 1.0:
+            # Throttle the sweep itself to once per second to avoid scanning
+            # every group on every request under load. Granularity within 1s
+            # is irrelevant for cooldown windows that default to 30s.
+            for group in self._groups:
+                for ep in group.endpoints:
+                    if not ep.healthy:
+                        self.check_health()
+                        break
+                else:
+                    continue
+                break
+            self._last_health_check = now
+
         for group in self._groups:
             if not fnmatch(model_id.lower(), group.pattern.lower()):
                 continue

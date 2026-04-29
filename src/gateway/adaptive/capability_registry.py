@@ -4,6 +4,25 @@
 Replaces the simple _model_capabilities dict in orchestrator.py with
 a richer registry that supports TTL expiry, model type classification,
 per-model timeouts, and optional persistence to the control plane store.
+
+Per-worker lifetime (intentional)
+---------------------------------
+``self._cache`` is a process-local ``LRUCache``; under a multi-worker
+uvicorn deployment each worker maintains its own copy and there is no
+cross-worker sharing.  This is deliberate:
+
+  * The data the cache holds — "does model X accept tools?", observed
+    P95 latency — is *self-healing*: a worker that lacks an entry runs
+    one extra retry-cycle (a 400/422 with a tool-unsupported phrase
+    triggers strip-and-retry, then caches False) and is fully populated.
+  * Adding SQLite or Redis sharing would introduce a write-on-every-probe
+    hot path and a new failure mode for what is, at most, one extra
+    retry per worker per model lifetime.  Not worth it.
+
+If a deployment ever genuinely needs shared capability state (e.g. very
+large model catalogs on slow/expensive providers where a single retry
+is unacceptable), set ``WALACOR_SHARED_CAPABILITY_CACHE_PATH`` in
+config.py — TODO, not implemented today.
 """
 from __future__ import annotations
 
@@ -11,7 +30,15 @@ import logging
 import time
 from typing import Any, NamedTuple
 
+from cachetools import LRUCache
+
 logger = logging.getLogger(__name__)
+
+# Bound the cache so a misbehaving caller (or an attacker spamming
+# bogus model IDs) can't grow it without limit.  100 entries comfortably
+# covers the largest realistic model catalog and keeps the worker-local
+# memory footprint trivial.
+_CACHE_MAXSIZE = 100
 
 
 class ModelCapability(NamedTuple):
@@ -31,7 +58,9 @@ class CapabilityRegistry:
     """Model capability cache with TTL and optional persistence."""
 
     def __init__(self, ttl_seconds: int = 86400, control_store: Any = None):
-        self._cache: dict[str, ModelCapability] = {}
+        # See module docstring re: per-worker lifetime — bounded LRUCache
+        # keeps memory bounded; entries evict in LRU order on overflow.
+        self._cache: LRUCache = LRUCache(maxsize=_CACHE_MAXSIZE)
         self._ttl = ttl_seconds
         self._store = control_store
 

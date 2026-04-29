@@ -101,12 +101,17 @@ async def _run_analyzer(analyzer: ContentAnalyzer, text: str) -> Decision | None
         )
 
 
-async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict]:
+async def analyze_text(
+    text: str,
+    analyzers: list[ContentAnalyzer],
+    tenant_id: str = "",
+) -> list[dict]:
     """Run all analyzers on arbitrary text (tool outputs, injected content, etc.).
 
-    Results are cached by SHA256 hash of *text* so repeated identical content
-    skips re-running analyzers.  Cache is bounded at 5000 entries with a 60s
-    TTL to prevent unbounded memory growth and ensure stale verdicts expire.
+    Results are cached by (tenant_id, SHA256(text)) so repeated identical content
+    within the same tenant skips re-running analyzers, while tenants remain
+    isolated. Cache is bounded at 5000 entries with a 60s TTL to prevent
+    unbounded memory growth and ensure stale verdicts expire.
 
     Returns a list of decision dicts -- same shape as analyzer_decisions in
     evaluate_post_inference.  Never raises; timeouts and errors are skipped
@@ -115,7 +120,8 @@ async def analyze_text(text: str, analyzers: list[ContentAnalyzer]) -> list[dict
     if not analyzers or not text:
         return []
 
-    cache_key = hashlib.sha256(text.encode()).hexdigest()[:16]
+    text_digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+    cache_key = f"{tenant_id}:{text_digest}"
 
     if cache_key in _analysis_cache:
         return _analysis_cache[cache_key]
@@ -141,6 +147,7 @@ async def evaluate_post_inference(
     policy_cache: PolicyCache,
     model_response: ModelResponse,
     analyzers: list[ContentAnalyzer],
+    tenant_id: str = "",
 ) -> tuple[bool, int, str, list[dict], JSONResponse | None]:
     """
     Run all content analyzers on model_response.content (or thinking_content as fallback).

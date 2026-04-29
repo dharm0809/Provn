@@ -8,7 +8,9 @@ from gateway.adaptive.startup_probes import (
 )
 from gateway.adaptive.interfaces import ProbeResult
 
-anyio_backend = ["asyncio"]
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 @pytest.fixture

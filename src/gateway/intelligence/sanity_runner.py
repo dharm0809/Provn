@@ -48,6 +48,30 @@ class SanityResult:
 
 
 class SanityRunner:
+    # TODO(intelligence): wire into shadow_gate.process_candidate before
+    # next release — currently UNUSED in production. The runner is fully
+    # tested (tests/unit/test_sanity_runner.py) but no production caller
+    # invokes it before promotion.
+    #
+    # Wiring plan (~50 LOC across 2 files; deferred from this PR scope):
+    #   1. shadow_gate.process_candidate: after `gate.passed and should_auto`,
+    #      load the candidate ONNX session via `registry.candidate_path(...)`,
+    #      build a model-specific infer_fn (text-prompt for intent/safety,
+    #      feature-tensor for schema_mapper), call SanityRunner.run(...).
+    #      If `result.passed=False`, set `should_auto=False`, append the
+    #      failing classes to `gate.reasons`, and route through the
+    #      shadow_complete (manual-review) branch — DO NOT swallow.
+    #   2. Add a `model_promotion_blocked` lifecycle event so the
+    #      dashboard can render the sanity-block reason next to the
+    #      candidate.
+    #
+    # Tracked separately to keep the bug-fix PR small. Promotion is
+    # already gated by ShadowMetrics (accuracy delta + McNemar +
+    # disagreement + error rate) so the practical risk window is narrow:
+    # a candidate passing those gates but failing per-class accuracy on
+    # the labeled fixture set. Until wired, operators MUST not enable
+    # `auto_promote_models` in production without manually verifying the
+    # candidate against `<model>_sanity.json`.
     def __init__(self, fixtures_dir: Path | None = None) -> None:
         self._fixtures_dir = fixtures_dir or _DEFAULT_FIXTURES_DIR
 

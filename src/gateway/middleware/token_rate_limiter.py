@@ -50,14 +50,32 @@ class TokenRateLimiter(BaseHTTPMiddleware):
         self._last_cleanup = time.monotonic()
 
     def _get_scope_key(self, request: Request) -> str:
+        # SECURITY: never trust X-User-Id / X-Team-Id headers directly here — those
+        # headers are caller-supplied input to the AUTH pipeline. Once auth runs,
+        # the authenticated identity lands on `request.state.caller_identity`
+        # (see api_key_middleware → _resolve_header_identity_fallback / JWT path).
+        # Read identity from there. If no auth ran, fall back to per-IP buckets so
+        # a header-spoofed user can't escape another user's bucket.
         if self._scope == "user":
-            return request.headers.get("x-user-id", "anonymous")
+            ident = getattr(getattr(request, "state", None), "caller_identity", None)
+            user_id = getattr(ident, "user_id", "") if ident else ""
+            if user_id:
+                return f"user:{user_id}"
+            client = getattr(request, "client", None)
+            host = getattr(client, "host", None) or "unknown"
+            return f"ip:{host}"
         if self._scope == "key":
             import hashlib
             auth = request.headers.get("authorization", "")
             return hashlib.sha256(auth.encode()).hexdigest()[:16]
         if self._scope == "tenant":
-            return request.headers.get("x-team-id", "default")
+            ident = getattr(getattr(request, "state", None), "caller_identity", None)
+            team = getattr(ident, "team", None) if ident else None
+            if team:
+                return f"team:{team}"
+            client = getattr(request, "client", None)
+            host = getattr(client, "host", None) or "unknown"
+            return f"ip:{host}"
         return "global"
 
     def _current_window(self) -> int:

@@ -582,7 +582,7 @@ class WalacorLineageReader:
         expected_prev_id: str | None = records[0].get("previous_record_id")
         per_record: list[dict] = []
         sig_valid = sig_invalid = sig_absent = sig_unverifiable = 0
-        anchor_ok = anchor_missing = anchor_mismatched = 0
+        anchor_ok = anchor_missing = anchor_mismatched = anchor_unverifiable = 0
         roundtrips_attempted = False
 
         for i, r in enumerate(records):
@@ -660,12 +660,15 @@ class WalacorLineageReader:
                             f"roundtrip=(block={fresh_block}, trans={fresh_trans}, dh={fresh_dh})"
                         )
                 except Exception as exc:
-                    # Fail-open on transport error: report "present" so we
-                    # don't spuriously fail a chain because Walacor is
-                    # unreachable. Callers can inspect "independent_roundtrip".
+                    # Transport error during round-trip: we cannot confirm the
+                    # anchor either way. Mark "unverifiable" rather than
+                    # inflating "present" — a network partition must NOT silently
+                    # turn into valid:true. Callers can distinguish "anchor
+                    # confirmed missing" (anchor_missing) from "anchor
+                    # confirmation failed" (anchor_unverifiable).
                     logger.warning("anchor round-trip failed for EId=%s: %s", eid, exc)
-                    anchor_ok += 1
-                    anchor_status = "present"
+                    anchor_unverifiable += 1
+                    anchor_status = "unverifiable"
             elif has_anchor:
                 anchor_ok += 1
                 anchor_status = "present"
@@ -684,8 +687,17 @@ class WalacorLineageReader:
                 "walacor_dh": dh,
             })
 
+        # `valid` requires structural integrity (no errors), zero
+        # unverifiable anchor round-trips, and zero missing anchors. A
+        # network partition that makes the round-trip fail must NOT
+        # produce valid:true — the pre-fix code did, which is the
+        # bug this method now guards against.
         return {
-            "valid": len(errors) == 0,
+            "valid": (
+                len(errors) == 0
+                and anchor_unverifiable == 0
+                and anchor_missing == 0
+            ),
             "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
@@ -697,6 +709,7 @@ class WalacorLineageReader:
                                "verify_key_loaded": signing_key_available()},
                 "anchors":    {"present": anchor_ok, "absent": anchor_missing,
                                "mismatched": anchor_mismatched,
+                               "unverifiable": anchor_unverifiable,
                                "independent_roundtrip": roundtrips_attempted},
             },
             "records": per_record,

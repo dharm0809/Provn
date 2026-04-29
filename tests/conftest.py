@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 # ── Isolate tests from local `.env.gateway` credentials ──────────────────
 #
 # pydantic-settings auto-loads `.env.gateway` from the repo root. Three
@@ -37,3 +39,20 @@ if sys.platform == "darwin":
             if str(_brew_lib) not in parts:
                 parts.append(str(_brew_lib))
                 os.environ[_var] = ":".join(parts)
+
+
+# ── Settings cache isolation ─────────────────────────────────────────────
+#
+# `gateway.config.get_settings` is `@lru_cache(maxsize=1)`. When tests
+# monkeypatch env vars without clearing the cache, a later test can see
+# a stale Settings object captured from a previous test — producing
+# order-dependent failures that only surface in CI's randomized order.
+# This autouse fixture clears the cache before AND after every test so
+# each test starts and ends with a clean settings slot.
+@pytest.fixture(autouse=True)
+def _reset_settings_cache():
+    from gateway.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()

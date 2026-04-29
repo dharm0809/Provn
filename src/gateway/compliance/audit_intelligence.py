@@ -108,7 +108,7 @@ def assess_audit_readiness(
     d2_score = min(d2_score, 100)
     dimensions.append({
         "name": "Chain Integrity", "score": d2_score, "weight": 20,
-        "description": "Tamper-evident Merkle chain verification across all sessions",
+        "description": "Tamper-evident ID-pointer chain verification across all sessions",
         "evidence": d2_evidence,
     })
 

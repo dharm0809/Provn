@@ -41,16 +41,30 @@ def validate_outbound_url(url: str, allow_private: bool = False) -> str:
     if allow_private:
         return url
 
-    # Resolve DNS and check all addresses
+    # Resolve DNS and check all addresses.
+    #
+    # NOTE: Pre-resolution validation is fundamentally vulnerable to DNS
+    # rebinding — an attacker can serve a public IP at validation time and
+    # a private IP at connect time. Defending against rebinding is a
+    # validate-at-connect-time concern (pin to the resolved IP for the
+    # actual outbound request) and is intentionally out of scope here.
+    # What this function MUST do is fail closed: an unresolvable host or
+    # other DNS error must NOT slip through as "let the actual request
+    # decide". By the time a downstream request runs, other code paths
+    # may already have trusted the URL.
     try:
         addrs = socket.getaddrinfo(parsed.hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        for _, _, _, _, sockaddr in addrs:
-            ip = ipaddress.ip_address(sockaddr[0])
-            for network in _BLOCKED_NETWORKS:
-                if ip in network:
-                    logger.warning("SSRF blocked: %s resolves to private IP %s", parsed.hostname, ip)
-                    raise ValueError(f"Blocked: '{parsed.hostname}' resolves to private/internal IP {ip}")
-    except socket.gaierror:
-        pass  # DNS resolution failed — let the actual request fail naturally
+    except socket.gaierror as exc:
+        logger.warning("URL hostname unresolvable, blocking: %s (%s)", parsed.hostname, exc)
+        raise ValueError(
+            f"URL hostname '{parsed.hostname}' could not be resolved"
+        ) from exc
+
+    for _, _, _, _, sockaddr in addrs:
+        ip = ipaddress.ip_address(sockaddr[0])
+        for network in _BLOCKED_NETWORKS:
+            if ip in network:
+                logger.warning("SSRF blocked: %s resolves to private IP %s", parsed.hostname, ip)
+                raise ValueError(f"Blocked: '{parsed.hostname}' resolves to private/internal IP {ip}")
 
     return url

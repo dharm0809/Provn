@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import time
+import types
 
 import pytest
 
-from gateway.auth.jwt_auth import validate_jwt, _jwks_cache
+from gateway.auth.jwt_auth import (
+    JWTConfigurationError,
+    _jwks_cache,
+    assert_jwt_runtime_config,
+    validate_jwt,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +108,97 @@ class TestValidateJWT:
         assert identity is not None
         with pytest.raises(AttributeError):
             identity.user_id = "bob"  # type: ignore[misc]
+
+
+def _settings(**kw):
+    """Build a stand-in for the pydantic Settings object used by assert_jwt_runtime_config."""
+    defaults = dict(
+        auth_mode="api_key",
+        jwt_secret="",
+        jwt_jwks_url="",
+        jwt_issuer="",
+        jwt_audience="",
+    )
+    defaults.update(kw)
+    return types.SimpleNamespace(**defaults)
+
+
+class TestAssertJWTRuntimeConfig:
+    def test_api_key_mode_skips_check(self):
+        # In api_key mode, JWT is never consulted — empty config is fine.
+        assert_jwt_runtime_config(_settings(auth_mode="api_key"))
+
+    def test_jwt_mode_missing_iss_raises(self):
+        with pytest.raises(JWTConfigurationError) as exc_info:
+            assert_jwt_runtime_config(_settings(
+                auth_mode="jwt",
+                jwt_secret="x" * 32,
+                jwt_audience="my-app",
+                # jwt_issuer missing
+            ))
+        assert "ISSUER" in str(exc_info.value).upper()
+
+    def test_jwt_mode_missing_aud_raises(self):
+        with pytest.raises(JWTConfigurationError) as exc_info:
+            assert_jwt_runtime_config(_settings(
+                auth_mode="jwt",
+                jwt_secret="x" * 32,
+                jwt_issuer="https://idp.example.com",
+                # jwt_audience missing
+            ))
+        assert "AUDIENCE" in str(exc_info.value).upper()
+
+    def test_jwt_mode_missing_secret_and_jwks_raises(self):
+        with pytest.raises(JWTConfigurationError):
+            assert_jwt_runtime_config(_settings(
+                auth_mode="jwt",
+                jwt_issuer="https://idp.example.com",
+                jwt_audience="my-app",
+            ))
+
+    def test_jwt_mode_fully_configured_passes(self):
+        assert_jwt_runtime_config(_settings(
+            auth_mode="jwt",
+            jwt_secret="x" * 32,
+            jwt_issuer="https://idp.example.com",
+            jwt_audience="my-app",
+        ))
+
+    def test_both_mode_requires_full_config(self):
+        with pytest.raises(JWTConfigurationError):
+            assert_jwt_runtime_config(_settings(
+                auth_mode="both",
+                jwt_jwks_url="https://idp.example.com/.well-known/jwks.json",
+                # iss/aud missing
+            ))
+
+    def test_both_mode_fully_configured_passes(self):
+        assert_jwt_runtime_config(_settings(
+            auth_mode="both",
+            jwt_jwks_url="https://idp.example.com/.well-known/jwks.json",
+            jwt_issuer="https://idp.example.com",
+            jwt_audience="my-app",
+        ))
+
+
+class TestMissingIssuerWarning:
+    def test_missing_issuer_logs_warning(self, caplog):
+        """When iss is unset, validate_jwt logs a WARNING (not debug)."""
+        token = _make_hs256_token({"sub": "alice"})
+        with caplog.at_level("WARNING", logger="gateway.auth.jwt_auth"):
+            validate_jwt(token, secret="test-secret", algorithms=["HS256"], audience="my-app")
+        # At least one WARNING about no issuer
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("issuer" in r.message.lower() for r in warnings), (
+            f"Expected a WARNING about missing issuer, got {[r.message for r in warnings]}"
+        )
+
+    def test_missing_audience_logs_warning(self, caplog):
+        """When aud is unset, validate_jwt logs a WARNING (not debug)."""
+        token = _make_hs256_token({"sub": "alice"})
+        with caplog.at_level("WARNING", logger="gateway.auth.jwt_auth"):
+            validate_jwt(token, secret="test-secret", algorithms=["HS256"], issuer="https://idp.example.com")
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("audience" in r.message.lower() for r in warnings), (
+            f"Expected a WARNING about missing audience, got {[r.message for r in warnings]}"
+        )
