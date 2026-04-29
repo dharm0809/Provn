@@ -121,15 +121,23 @@ def _resolve_header_identity_fallback(request: Request) -> None:
 def _apply_api_key_tenant_binding(request: Request) -> None:
     """Override caller_identity.tenant_id from the API-key→tenant binding.
 
-    Run after a successful API-key auth (env-list or control-plane). If the
-    raw key hashes to a row with a non-null tenant_id in the control plane,
-    overlay it onto the CallerIdentity.
+    Run after a successful API-key auth (env-list or control-plane). Two
+    sources of binding are consulted, in this order of precedence:
 
-    Env-list keys configured via WALACOR_GATEWAY_API_KEYS only have a tenant
-    binding if an admin has explicitly POSTed to
-    /v1/control/api-keys/{hash}/tenant — there is no automatic onboarding for
-    them. Keys with no binding leave tenant_id untouched; downstream
-    `_resolve_tenant` falls back to ``settings.gateway_tenant_id``.
+    1. **Control-plane DB** (``key_policy_assignments.tenant_id``). Set via
+       ``POST /v1/control/api-keys/{hash}/tenant``. Admin-managed; wins over
+       env config so an operator can re-bind a key at runtime.
+    2. **Env mapping** from ``WALACOR_GATEWAY_API_KEYS`` (entries shaped
+       ``key:tenant_id``). Used only when the DB has no binding for this key.
+       This unblocks multi-tenant deployments that don't run the embedded
+       control plane.
+
+    If neither source provides a binding, ``tenant_id`` is left untouched and
+    downstream ``_resolve_tenant`` falls back to ``settings.gateway_tenant_id``.
+
+    Note on conflicts: if the same key has both an env binding and a DB
+    binding, DB wins silently — admins are expected to be the source of truth
+    when both are present.
     """
     try:
         import dataclasses
@@ -137,18 +145,35 @@ def _apply_api_key_tenant_binding(request: Request) -> None:
 
         from gateway.auth.api_key import get_api_key_from_request
 
-        ctx = get_pipeline_context()
-        if ctx.control_store is None:
-            return
         raw_key = get_api_key_from_request(request)
         if not raw_key:
             return
-        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-        tenant_id = ctx.control_store.get_key_tenant(key_hash)
-        if not tenant_id:
-            return
         identity = getattr(request.state, "caller_identity", None)
         if identity is None:
+            return
+
+        tenant_id: str | None = None
+
+        # 1. DB binding (admin authority, takes precedence).
+        ctx = get_pipeline_context()
+        if ctx.control_store is not None:
+            try:
+                key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                tenant_id = ctx.control_store.get_key_tenant(key_hash)
+            except Exception:
+                logger.debug("control_store.get_key_tenant raised", exc_info=True)
+                tenant_id = None
+
+        # 2. Env mapping fallback (only when DB has no binding for this key).
+        if not tenant_id:
+            try:
+                env_map = get_settings().api_keys_tenant_map
+                tenant_id = env_map.get(raw_key)
+            except Exception:
+                logger.debug("api_keys_tenant_map lookup failed", exc_info=True)
+                tenant_id = None
+
+        if not tenant_id:
             return
         if getattr(identity, "tenant_id", None) == tenant_id:
             return

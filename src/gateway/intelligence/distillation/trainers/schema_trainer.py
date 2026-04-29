@@ -181,6 +181,18 @@ def _featurize_row(x: Any, dim: int) -> np.ndarray:
     See the module docstring for the priority order of accepted input
     shapes. Always returns a vector of `dim` floats — never raises on
     shape; degenerate rows become zero vectors.
+
+    Priority (highest to lowest):
+      0. Pre-computed feature vector — when the producer has already
+         called `extract_features` and serialized the 139-d list under
+         `feature_vector`, we skip re-featurization. This is the
+         post-Phase-25 shape the SchemaMapper writes per field; it's
+         the cheap path and avoids re-running the rules on a
+         potentially mutated value.
+      1. FlatField-like dict — keys among `path`, `value_type`, etc.
+         Reconstruct the FlatField and featurize.
+      2. Raw response — flatten and pick the first non-trivial leaf.
+      3. Placeholder zero vector.
     """
     from gateway.schema.features import (
         FEATURE_DIM,
@@ -195,6 +207,17 @@ def _featurize_row(x: Any, dim: int) -> np.ndarray:
             payload = json.loads(x)
         except (ValueError, TypeError):
             payload = None
+
+    # ── 0. Pre-computed feature vector (per-field producer rows) ─────
+    if isinstance(payload, dict):
+        feat_vec = payload.get("feature_vector")
+        if isinstance(feat_vec, list) and len(feat_vec) == FEATURE_DIM:
+            try:
+                vec = np.asarray(feat_vec, dtype=np.float32)
+            except (TypeError, ValueError):
+                vec = None
+            if vec is not None and vec.shape == (FEATURE_DIM,):
+                return vec
 
     field: FlatField | None = None
 
