@@ -1,60 +1,94 @@
-"""SchemaMapper trainer: value-aware features → GradientBoosting → ONNX.
+"""SchemaMapper trainer: production-featurized inputs → GradientBoosting → ONNX.
 
-The production SchemaMapper is a per-FIELD classifier over numeric
-features from `gateway.schema.features.extract_features`. Training
-candidates here reuse the same feature dimension so a produced
-candidate can drop directly into `production/schema_mapper.onnx` at
-promotion time.
+Mirrors the production `SchemaMapper` topology EXACTLY (see
+`src/gateway/schema/mapper.py`). The candidate ONNX is shape-identical
+to `schema_mapper.onnx`:
 
-Input `X` is a list of feature-dict JSON strings (one per divergent
-verdict row; the verdict log stores these as `input_features_json`).
-The trainer parses them into a numeric matrix and fits a
-GradientBoostingClassifier targeting `y` labels produced by the
-SchemaMapper harvester (canonical labels from `_PATH_FALLBACK_RULES`).
+  * input  — `FloatTensorType([None, 139])` (the dimensionality of
+             `gateway.schema.features.extract_features`)
+  * output — `tensor(int64)` label indices into the production
+             `schema_mapper_labels.json` ordering
 
-Known caveat
-------------
-The Phase 25 verdict log stores ONE row per `map_response` call, not
-per field. The SchemaMapper harvester (Task 14) emits a single
-canonical label for the whole response based on overflow-key analysis.
-This trainer therefore trains a coarser classifier than the production
-per-field model. Tasks 21-25 (Phase F) will shadow-test candidates
-against the production classifier — a candidate that doesn't match the
-field-level topology will simply fail the shadow gates, which is the
-correct behavior until the verdict log is extended to carry per-field
-verdicts.
+This is a deliberate departure from the previous "fit a fresh
+`DictVectorizer` on whatever raw feature dicts the harvester wrote and
+ship the pickled vectorizer as a side-car" design. That design
+produced an ONNX whose input dimension was determined by the
+distillation corpus's distinct keys, not by the production
+`extract_features` contract — typically a much smaller and entirely
+different feature set than the 139-d vector production runs ORT
+against. The candidate could pass the sanity gate (which used the same
+DictVectorizer pickle) but would fail to drop into the production
+`SchemaMapper._classify_onnx` pipeline because the input shape
+mismatched.
 
-ONNX shape
-----------
-The candidate ONNX is **classifier-only**: it takes a
-`FloatTensorType([None, n_features])` input (the DictVectorizer's
-column ordering is fixed at training time). The DictVectorizer is
-NOT in the ONNX graph — `skl2onnx` doesn't faithfully convert the
-dict→float coercion as part of an end-to-end Pipeline (it produces
-a graph whose float-input topology silently diverges from
-`pipeline.predict`). Instead, the trainer ships the fitted
-DictVectorizer as a pickle side-car so the loader can reproduce the
-exact column ordering before running the ONNX. Production
-(`schema/mapper.py`) already does the split this way.
+The fix
+-------
+Trainer reuses production's deterministic `extract_features` pipeline.
+Each X item is parsed into a `FlatField` and fed through the SAME
+function `mapper._classify_onnx` calls at serve time. There is no
+DictVectorizer — `extract_features` is itself the featurizer, and its
+output dimensionality is fixed (`features.FEATURE_DIM == 139`). Only
+the GradientBoostingClassifier is retrained, on (N, 139) float
+features. The candidate ONNX is therefore drop-in compatible: copying
+`schema_mapper-{version}.onnx` on top of
+`production/schema_mapper.onnx` is enough.
 
-Side-cars
+Training-data shape
+-------------------
+The Phase 25 verdict log stores ONE row per `map_response` call (whole
+response → one label) and `from_inference` is invoked WITHOUT a
+`features=` kwarg, so `input_features_json` is `"{}"` for every
+schema_mapper verdict in production today. The trainer accepts X as
+JSON-serialized dicts and tries, in priority order, to interpret each
+as:
+
+  1. A "FlatField-like" dict — keys among `path`, `key`, `value`,
+     `value_type`, `depth`, `parent_key`, `sibling_keys`,
+     `sibling_types`, `int_siblings`. Constructs a `FlatField` and
+     featurizes directly. This is the format a future per-field
+     harvester revision would emit.
+  2. A raw response JSON — flatten via `flatten_json`, take the FIRST
+     non-trivial leaf field as the example, and featurize. Coarse but
+     produces a plausible 139-d vector.
+  3. Anything else (incl. `"{}"`) — featurize a placeholder
+     `FlatField` (zero features). The classifier still trains; it just
+     can't learn anything from a degenerate row. The dataset
+     builder's per-class balance + `min_samples` gate keeps this from
+     polluting promotion.
+
+Known gap
 ---------
-On `train()` this trainer emits, next to `schema_mapper-{version}.onnx`:
+A useful candidate requires per-FIELD training signal, but the verdict
+log only carries per-RESPONSE labels (the SchemaMapperHarvester
+back-writes one canonical label per overflow burst). Until the
+harvester is upgraded to emit per-field rows (or `from_inference` is
+called with `features=extract_features(field)` at the inference site),
+the trainer cannot match the production model's accuracy on its
+in-graph features. The shape contract is intact, but the candidate
+will likely fail the `SanityRunner.run` accuracy gate and be blocked
+from promotion. That's the correct behavior — silently approving a
+weakly-supervised candidate would be worse.
 
-  * `schema_mapper-{version}.dictvec.pkl`         — pickled fitted
-    DictVectorizer (used by the adapter to call `.transform([row])`).
-    Pickle is acceptable here: these files are produced and consumed
-    locally on the same gateway host; they never round-trip over a
-    network boundary. The adapter loads with `pickle.load` from a
-    file path under the controlled `candidates/` directory.
-  * `schema_mapper-{version}.feature_names.json` — the
-    DictVectorizer's `feature_names_` list (column ordering). Useful
-    for diff/audit tools that don't want to unpickle a sklearn object.
+Side-cars emitted
+-----------------
+On `train()`, the trainer writes next to `schema_mapper-{version}.onnx`:
+
+  * `schema_mapper-{version}.labels.json`        — copy of the
+    production label list (must match production ordering for int64
+    indices to align). Mirrors `schema_mapper_labels.json`
+    byte-for-byte.
+  * `schema_mapper-{version}.featurizer_ref.json` — sha256 hash of
+    the production labels file plus a record of `FEATURE_DIM`. The
+    featurizer itself is code (`extract_features`), so its
+    "fingerprint" is the source-file hash of `schema/features.py`,
+    captured here for promotion-time drift detection.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -65,135 +99,240 @@ from gateway.intelligence.distillation.trainers.base import Trainer, TrainingErr
 logger = logging.getLogger(__name__)
 
 
+# ── Production featurizer paths ──────────────────────────────────────────────
+
+
+def _prod_dir() -> Path:
+    from gateway.schema import mapper as _prod
+    return Path(_prod.__file__).parent
+
+
+def _prod_labels_path() -> Path:
+    return _prod_dir() / "schema_mapper_labels.json"
+
+
+def _features_module_path() -> Path:
+    from gateway.schema import features as _features
+    return Path(_features.__file__)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+@dataclass(frozen=True)
+class _ProductionFeaturizer:
+    """Frozen snapshot of production featurizer state.
+
+    Schema mapper's "featurizer" is the function
+    `gateway.schema.features.extract_features` (139-d output). There
+    is no fitted state — the dim is constant, the rules are constant.
+    We hash the source file so a promotion-time check can detect a
+    breaking change to the feature pipeline.
+    """
+    feature_dim: int
+    labels: list[str]
+    file_hashes: dict[str, str]
+
+
+def _load_production_featurizer() -> _ProductionFeaturizer:
+    from gateway.schema.features import FEATURE_DIM
+
+    labels_path = _prod_labels_path()
+    if not labels_path.exists():
+        raise TrainingError(
+            f"schema_mapper trainer: production labels missing — {labels_path}. "
+            "Cannot produce a shape-compatible candidate without this state."
+        )
+
+    try:
+        labels = json.loads(labels_path.read_text())
+    except (ValueError, OSError) as e:
+        raise TrainingError(
+            f"schema_mapper trainer: failed to parse {labels_path}: {e}"
+        ) from e
+
+    if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+        raise TrainingError(
+            f"schema_mapper trainer: {labels_path} is not a list[str]"
+        )
+
+    features_src = _features_module_path()
+    file_hashes = {
+        "labels": _sha256(labels_path),
+        "features_module": _sha256(features_src),
+    }
+
+    return _ProductionFeaturizer(
+        feature_dim=int(FEATURE_DIM),
+        labels=list(labels),
+        file_hashes=file_hashes,
+    )
+
+
+# ── Production-pipeline featurization ────────────────────────────────────────
+
+
+def _featurize_row(x: Any, dim: int) -> np.ndarray:
+    """Coerce one X item into a (dim,) float32 vector via production rules.
+
+    See the module docstring for the priority order of accepted input
+    shapes. Always returns a vector of `dim` floats — never raises on
+    shape; degenerate rows become zero vectors.
+    """
+    from gateway.schema.features import (
+        FEATURE_DIM,
+        FlatField,
+        extract_features,
+        flatten_json,
+    )
+
+    payload: Any = x
+    if isinstance(x, str):
+        try:
+            payload = json.loads(x)
+        except (ValueError, TypeError):
+            payload = None
+
+    field: FlatField | None = None
+
+    if isinstance(payload, dict):
+        # 1. FlatField-like — construct directly.
+        if "path" in payload and "value_type" in payload:
+            try:
+                field = FlatField(
+                    path=str(payload.get("path", "")),
+                    key=str(payload.get("key", "")),
+                    value=payload.get("value"),
+                    value_type=str(payload.get("value_type", "null")),
+                    depth=int(payload.get("depth", 0) or 0),
+                    parent_key=str(payload.get("parent_key", "")),
+                    sibling_keys=list(payload.get("sibling_keys") or []),
+                    sibling_types=list(payload.get("sibling_types") or []),
+                    int_siblings=list(payload.get("int_siblings") or []),
+                )
+            except (TypeError, ValueError):
+                field = None
+        else:
+            # 2. Raw response — flatten and pick the first leaf-ish field.
+            try:
+                fields = flatten_json(payload)
+            except Exception:  # noqa: BLE001 — flatten is defensive but cheap
+                fields = []
+            for f in fields:
+                if f.value_type not in ("object", "array", "null"):
+                    field = f
+                    break
+
+    if field is None:
+        # 3. Placeholder zero-vector field. Won't carry signal but
+        #    preserves shape / row count.
+        field = FlatField(
+            path="", key="", value=None, value_type="null",
+            depth=0, parent_key="",
+            sibling_keys=[], sibling_types=[], int_siblings=[],
+        )
+
+    vec = np.asarray(extract_features(field), dtype=np.float32)
+    if vec.shape[0] != FEATURE_DIM:
+        # Should never happen unless features.py is mid-edit and the
+        # cached module disagrees with FEATURE_DIM.
+        raise TrainingError(
+            f"schema_mapper trainer: extract_features returned dim={vec.shape[0]}, "
+            f"expected FEATURE_DIM={FEATURE_DIM}."
+        )
+    return vec
+
+
+def featurize_batch(rows: list[Any], dim: int) -> np.ndarray:
+    if not rows:
+        return np.zeros((0, dim), dtype=np.float32)
+    matrix = np.vstack([_featurize_row(r, dim) for r in rows]).astype(np.float32, copy=False)
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=1.0, neginf=-1.0)
+    return matrix
+
+
+# ── Trainer ──────────────────────────────────────────────────────────────────
+
+
 class SchemaMapperTrainer(Trainer):
     model_name = "schema_mapper"
 
     def _fit(self, X: list[Any], y: list[str]) -> Any:
         try:
             from sklearn.ensemble import GradientBoostingClassifier
-            from sklearn.feature_extraction import DictVectorizer
-            from sklearn.pipeline import Pipeline
         except ImportError as e:
             raise TrainingError(f"sklearn not available: {e}") from e
 
-        # Parse feature JSONs to dicts. Invalid / non-dict rows are
-        # coerced to empty dicts — DictVectorizer will represent them
-        # as a zero vector, which is the correct "no signal" fallback.
-        dicts = [self._parse_features(x) for x in X]
-        pipeline = Pipeline([
-            # `DictVectorizer(sparse=False)` is required because
-            # GradientBoostingClassifier doesn't accept sparse input
-            # and skl2onnx converts dense arrays more reliably.
-            ("vec", DictVectorizer(sparse=False)),
-            ("clf", GradientBoostingClassifier(
-                n_estimators=50,
-                max_depth=3,
-                learning_rate=0.1,
-                random_state=42,
-            )),
-        ])
-        pipeline.fit(dicts, y)
-        return pipeline
+        feat = _load_production_featurizer()
 
-    def _to_onnx(self, pipeline: Any, X_sample: list[Any]) -> bytes:
-        """Convert ONLY the classifier sub-step to ONNX.
+        unknown = sorted({lbl for lbl in y if lbl not in feat.labels})
+        if unknown:
+            raise TrainingError(
+                f"schema_mapper trainer: y contains labels not in production label set: "
+                f"{unknown!r}. Production labels: {feat.labels!r}. Either correct the "
+                "harvester output or ship a new packaged labels.json before training."
+            )
+        label_to_idx = {lbl: i for i, lbl in enumerate(feat.labels)}
+        y_int = np.array([label_to_idx[lbl] for lbl in y], dtype=np.int64)
 
-        Converting the full `Pipeline[DictVectorizer, GBC]` with a
-        `FloatTensorType` initial type produces an ONNX graph whose
-        behavior diverges from `pipeline.predict` — DictVectorizer
-        expects dict input, not a float matrix, and skl2onnx silently
-        emits an inconsistent topology. The honest serialization is to
-        convert the fitted classifier alone and ship the
-        DictVectorizer as a pickle side-car (loaders apply
-        `.transform([row_dict])` before calling the ONNX session, which
-        is what production already does).
-        """
+        X_features = featurize_batch(X, feat.feature_dim)
+
+        clf = GradientBoostingClassifier(
+            n_estimators=50,
+            max_depth=3,
+            learning_rate=0.1,
+            random_state=42,
+        )
+        clf.fit(X_features, y_int)
+        return _FittedSchemaMapperModel(clf=clf, featurizer=feat)
+
+    def _to_onnx(self, fitted: Any, X_sample: list[Any]) -> bytes:
         try:
             from skl2onnx import convert_sklearn
             from skl2onnx.common.data_types import FloatTensorType
         except ImportError as e:
             raise TrainingError(f"skl2onnx not available: {e}") from e
 
-        try:
-            vec = pipeline.named_steps["vec"]
-            clf = pipeline.named_steps["clf"]
-        except (AttributeError, KeyError) as e:
+        if not isinstance(fitted, _FittedSchemaMapperModel):
             raise TrainingError(
-                f"schema_mapper pipeline missing expected steps (vec/clf): {e}"
-            ) from e
-
-        n_features = len(getattr(vec, "feature_names_", []) or [])
-        if n_features == 0:
-            raise TrainingError(
-                "schema_mapper pipeline DictVectorizer has no feature_names_ "
-                "(was it fitted?)"
+                "schema_mapper trainer: _to_onnx expected _FittedSchemaMapperModel, "
+                f"got {type(fitted)!r}"
             )
 
+        n_features = fitted.featurizer.feature_dim
         initial_type = [("features", FloatTensorType([None, n_features]))]
-        onx = convert_sklearn(clf, initial_types=initial_type)
+        onx = convert_sklearn(fitted.clf, initial_types=initial_type)
         return onx.SerializeToString()
 
     def _write_sidecars(
         self,
-        pipeline: Any,
+        fitted: Any,
         version: str,
         candidates_dir: Path,
     ) -> None:
-        """Emit DictVectorizer pickle + feature names side-cars.
-
-        The candidate ONNX expects a `(None, n_features)` float matrix
-        whose columns are ordered by the fitted DictVectorizer's
-        `feature_names_`. The sanity adapter must reproduce that
-        ordering EXACTLY — easiest path is to ship the fitted
-        DictVectorizer itself (pickled) so the adapter can call
-        `.transform([row_dict])`. We additionally emit a JSON list of
-        feature names so audit / diff tools don't need pickle access.
-
-        Pickle is safe here: files are produced AND consumed locally on
-        the same gateway host under the controlled `candidates/`
-        directory. They never traverse a network boundary, and the
-        adapter only ever loads from that controlled path.
-        """
-        try:
-            vec = pipeline.named_steps["vec"]
-        except (AttributeError, KeyError) as e:
+        if not isinstance(fitted, _FittedSchemaMapperModel):
             logger.warning(
-                "schema_mapper trainer: could not extract vec step (%s); "
-                "side-cars skipped", e,
+                "schema_mapper trainer: unexpected fitted object type %s; side-cars skipped",
+                type(fitted),
             )
             return
 
-        # JSON: stable ordering for diffability. The list ordering IS
-        # the column ordering the candidate ONNX expects.
-        feature_names = list(getattr(vec, "feature_names_", []) or [])
-        names_path = (
-            candidates_dir / f"{self.model_name}-{version}.feature_names.json"
-        )
-        names_path.write_text(json.dumps(feature_names))
+        labels_path = candidates_dir / f"{self.model_name}-{version}.labels.json"
+        labels_path.write_text(json.dumps(fitted.featurizer.labels))
 
-        # Pickle: import locally to keep the symbol scoped to this
-        # method (it's never used by the inference path).
-        import pickle  # noqa: S403 — see module docstring; trusted local path
-        pkl_path = candidates_dir / f"{self.model_name}-{version}.dictvec.pkl"
-        with open(pkl_path, "wb") as fh:
-            pickle.dump(vec, fh, protocol=pickle.HIGHEST_PROTOCOL)
-
-    @staticmethod
-    def _parse_features(x: Any) -> dict[str, float]:
-        """Coerce an X item (JSON string or dict) into a flat feature dict."""
-        if isinstance(x, dict):
-            return {str(k): float(v) for k, v in x.items() if _is_numeric(v)}
-        if isinstance(x, str):
-            try:
-                data = json.loads(x)
-            except (ValueError, TypeError):
-                return {}
-            if not isinstance(data, dict):
-                return {}
-            return {str(k): float(v) for k, v in data.items() if _is_numeric(v)}
-        return {}
+        ref = {
+            "labels_sha256":          fitted.featurizer.file_hashes["labels"],
+            "features_module_sha256": fitted.featurizer.file_hashes["features_module"],
+            "expected_input_dim":     int(fitted.featurizer.feature_dim),
+        }
+        ref_path = candidates_dir / f"{self.model_name}-{version}.featurizer_ref.json"
+        ref_path.write_text(json.dumps(ref, sort_keys=True, indent=2))
 
 
-def _is_numeric(v: Any) -> bool:
-    # `isinstance(True, int)` is True in Python — guard against that.
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+@dataclass
+class _FittedSchemaMapperModel:
+    clf: Any
+    featurizer: _ProductionFeaturizer

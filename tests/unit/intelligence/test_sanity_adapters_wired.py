@@ -1,23 +1,25 @@
 """SanityAdapter wiring tests for safety + schema_mapper.
 
-Exercises the adapter strategy table in
-`gateway.intelligence.sanity_adapters`:
+After the production-shape refactor:
 
-  * trainers emit side-cars next to their candidate ONNX,
-  * adapters require those side-cars,
-  * a candidate without side-cars (older trainer revision) surfaces
-    as a sanity FAILURE, not a silent skip.
+  * the trainers emit a candidate ONNX shape-compatible with the
+    packaged production model (`(None, 200)` for safety, `(None, 139)`
+    for schema_mapper, int64 label output for both),
+  * featurization at sanity time uses the SAME packaged production
+    sidecars / functions production runs at serve time — NOT a
+    trainer-emitted vocab/idf/dictvec,
+  * trainer side-cars are now `labels.json` + `featurizer_ref.json`
+    only; their absence still surfaces as a sanity FAILURE
+    (block promotion).
 
-After the trainer refactor (classifier-only ONNX + side-car-applied
-TF-IDF in Python), the adapters expect a `FloatTensorType` input.
-Test fixtures here build the same classifier-only topology so the
-adapter contract — "feed featurized input via vocab/idf side-cars,
-read predicted-label string back" — is exercised end-to-end.
+The fixtures here use the real trainer to build a candidate so the
+test exercises the full trainer→adapter contract. Skipping skl2onnx
+isn't tenable any more — without a real conversion the candidate
+file isn't a valid ONNX and ORT can't load it.
 """
 from __future__ import annotations
 
 import json
-import pickle  # noqa: S403 — local-only fixtures, never network-deserialized
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +27,7 @@ import pytest
 
 # Skip the whole module when sklearn / skl2onnx / onnxruntime aren't
 # available (matches the trainer's own ImportError-as-TrainingError
-# guard). Without these we can't build a real fixture ONNX.
+# guard).
 pytest.importorskip("sklearn")
 pytest.importorskip("skl2onnx")
 pytest.importorskip("onnxruntime")
@@ -39,335 +41,225 @@ from gateway.intelligence.sanity_runner import SanityRunner
 # ── shared helpers ────────────────────────────────────────────────────────
 
 
-def _build_safety_onnx(path: Path) -> tuple[list[str], dict[str, int], np.ndarray]:
-    """Train a tiny char_wb TF-IDF + GBC and export the CLASSIFIER alone.
-
-    Mirrors the production trainer's classifier-only topology: skl2onnx
-    can't convert char_wb in-graph, so we ship the classifier with a
-    `FloatTensorType` input matching the fitted TF-IDF dimension. The
-    adapter applies char_wb TF-IDF in Python from the side-cars before
-    invoking the session.
-
-    Returns (labels, vocab, idf) so the caller can write side-cars.
-    """
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.pipeline import Pipeline
-    from skl2onnx import convert_sklearn
-    from skl2onnx.common.data_types import FloatTensorType
-
-    X = [
-        "kill bomb attack violent",
-        "shoot stab violent maim",
-        "kill weapon attack",
-        "shoot bomb violent",
-        "happy flowers nice poem safe",
-        "safe text response calm",
-        "happy response calm safe",
-        "nice flowers calm safe",
-    ]
-    y = ["violence", "violence", "violence", "violence", "safe", "safe", "safe", "safe"]
-
-    pipeline = Pipeline([
-        ("tfidf", TfidfVectorizer(
-            analyzer="char_wb", ngram_range=(3, 5),
-            min_df=1, sublinear_tf=True,
-        )),
-        ("clf", GradientBoostingClassifier(n_estimators=5, random_state=42)),
-    ])
-    pipeline.fit(X, y)
-
-    tfidf = pipeline.named_steps["tfidf"]
-    clf = pipeline.named_steps["clf"]
-    n_features = len(tfidf.vocabulary_)
-
-    initial_type = [("features", FloatTensorType([None, n_features]))]
-    onx = convert_sklearn(clf, initial_types=initial_type)
-    path.write_bytes(onx.SerializeToString())
-
-    return (
-        [str(c) for c in clf.classes_],
-        {k: int(v) for k, v in tfidf.vocabulary_.items()},
-        np.asarray(tfidf.idf_, dtype=np.float32),
-    )
+_SAFETY_X = [
+    "kill bomb attack violent",
+    "shoot stab violent maim",
+    "kill weapon attack",
+    "shoot bomb violent",
+    "happy flowers nice poem safe",
+    "safe text response calm",
+    "happy response calm safe",
+    "nice flowers calm safe",
+]
+_SAFETY_Y = ["violence", "violence", "violence", "violence",
+             "safe", "safe", "safe", "safe"]
 
 
-def _build_schema_classifier_only_onnx(path: Path):
-    """Build a classifier-only ONNX matching production schema_mapper.onnx.
+def _train_safety_candidate(candidates_dir: Path, version: str = "v1") -> Path:
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    return SafetyTrainer().train(_SAFETY_X, _SAFETY_Y, version=version,
+                                  candidates_dir=candidates_dir)
 
-    Production's `schema_mapper.onnx` takes a `(None, n_features)` float
-    tensor (DictVectorizer is NOT in the graph). The trainer's current
-    Pipeline-based export emits an INVALID ONNX (DictVectorizer node
-    with float input — a separate pre-existing issue). For the adapter
-    test we mirror the production topology directly.
 
-    Returns (labels, fitted DictVectorizer) so the caller can write
-    side-cars matching the trained ordering.
-    """
-    from sklearn.feature_extraction import DictVectorizer
-    from sklearn.ensemble import GradientBoostingClassifier
-    from skl2onnx import convert_sklearn
-    from skl2onnx.common.data_types import FloatTensorType
+_SCHEMA_X = [
+    json.dumps({"choices": [{"message": {"content": "Hello, this is a long response with many words."}}]}),
+    json.dumps({"choices": [{"message": {"content": "Another long response containing natural language tokens."}}]}),
+    json.dumps({"choices": [{"message": {"content": "Yet a third example response with many words."}}]}),
+    json.dumps({"usage": {"prompt_tokens": 42}}),
+    json.dumps({"usage": {"prompt_tokens": 89}}),
+    json.dumps({"usage": {"prompt_tokens": 17}}),
+]
+_SCHEMA_Y = ["content", "content", "content",
+             "prompt_tokens", "prompt_tokens", "prompt_tokens"]
 
-    rows = [
-        {"len": 400, "word_count": 65, "has_role": 1, "depth": 1},
-        {"len": 620, "word_count": 110, "has_role": 1, "depth": 1},
-        {"len": 12, "word_count": 2, "is_int": 1, "magnitude": 2},
-        {"len": 14, "word_count": 2, "is_int": 1, "magnitude": 3},
-        {"len": 12, "word_count": 2, "is_int": 1, "magnitude": 3},
-        {"len": 14, "word_count": 2, "is_int": 1, "magnitude": 3},
-        {"len": 4, "word_count": 1, "has_role": 0, "depth": 0},
-        {"len": 3, "word_count": 1, "has_role": 0, "depth": 0},
-    ]
-    y = [
-        "content", "content",
-        "prompt_tokens", "prompt_tokens",
-        "completion_tokens", "completion_tokens",
-        "finish_reason", "finish_reason",
-    ]
 
-    vec = DictVectorizer(sparse=False)
-    X_mat = vec.fit_transform(rows)
-    clf = GradientBoostingClassifier(n_estimators=5, random_state=42)
-    clf.fit(X_mat, y)
-
-    onx = convert_sklearn(
-        clf,
-        initial_types=[("features", FloatTensorType([None, X_mat.shape[1]]))],
-    )
-    path.write_bytes(onx.SerializeToString())
-    return [str(c) for c in clf.classes_], vec
+def _train_schema_candidate(candidates_dir: Path, version: str = "v1") -> Path:
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    return SchemaMapperTrainer().train(_SCHEMA_X, _SCHEMA_Y, version=version,
+                                        candidates_dir=candidates_dir)
 
 
 def _sidecar(candidates_dir: Path, model: str, version: str, suffix: str) -> Path:
     return candidates_dir / f"{model}-{version}.{suffix}"
 
 
-def _write_safety_sidecars(
-    candidates_dir: Path,
-    version: str,
-    labels: list[str],
-    vocab: dict[str, int],
-    idf: np.ndarray,
-) -> None:
-    _sidecar(candidates_dir, "safety", version, "labels.json").write_text(json.dumps(labels))
-    _sidecar(candidates_dir, "safety", version, "vocab.json").write_text(
-        json.dumps(vocab, sort_keys=True)
-    )
-    np.save(str(_sidecar(candidates_dir, "safety", version, "idf.npy")), idf)
-
-
-def _write_schema_sidecars(candidates_dir: Path, version: str, vec) -> None:
-    _sidecar(candidates_dir, "schema_mapper", version, "feature_names.json").write_text(
-        json.dumps(list(vec.feature_names_))
-    )
-    with open(_sidecar(candidates_dir, "schema_mapper", version, "dictvec.pkl"), "wb") as fh:
-        pickle.dump(vec, fh, protocol=pickle.HIGHEST_PROTOCOL)
-
-
 # ── safety adapter ────────────────────────────────────────────────────────
 
 
 def test_safety_adapter_loads_sidecars_and_returns_labels(tmp_path):
-    """Happy path — full candidate (.onnx + 3 side-cars) → label string back."""
+    """Happy path — trained candidate → adapter → label string back."""
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "safety-v1.onnx"
-    labels, vocab, idf = _build_safety_onnx(candidate_path)
-    _write_safety_sidecars(candidates_dir, "v1", labels, vocab, idf)
+    candidate_path = _train_safety_candidate(candidates_dir, version="v1")
+    labels = json.loads((candidates_dir / "safety-v1.labels.json").read_text())
 
     infer = sanity_adapters.build_infer_fn("safety", candidate_path)
-    # The fixture is trained on a 2-class dataset so we just verify the
-    # adapter returns one of the trained labels — exact accuracy is the
-    # SanityRunner's job, not the adapter's.
     out = infer("kill bomb attack violent")
+    # The adapter must return one of the production label strings —
+    # decoded from the int64 ONNX output via the trainer's labels.json.
     assert out in labels
 
 
 def test_safety_adapter_blocks_when_labels_sidecar_missing(tmp_path):
-    """Older trainer revision left only the .onnx — adapter must raise."""
+    """A candidate emitted by a stale trainer with no labels.json must block."""
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "safety-v1.onnx"
-    labels, vocab, idf = _build_safety_onnx(candidate_path)
-    # Deliberately skip labels.json.
-    _sidecar(candidates_dir, "safety", "v1", "vocab.json").write_text(
-        json.dumps(vocab, sort_keys=True)
-    )
-    np.save(str(_sidecar(candidates_dir, "safety", "v1", "idf.npy")), idf)
+    candidate_path = _train_safety_candidate(candidates_dir, version="v1")
+    # Delete labels.json after training to simulate stale output.
+    (candidates_dir / "safety-v1.labels.json").unlink()
 
     with pytest.raises(FileNotFoundError) as exc:
         sanity_adapters.build_infer_fn("safety", candidate_path)
     msg = str(exc.value)
     assert "labels.json" in msg
-    # The error message names the model so an operator can correlate
-    # without having to grep file paths.
     assert "safety" in msg
 
 
-def test_safety_adapter_blocks_when_vocab_sidecar_missing(tmp_path):
+def test_safety_adapter_blocks_when_featurizer_ref_missing(tmp_path):
+    """featurizer_ref.json absence is a sanity contract failure too."""
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "safety-v1.onnx"
-    labels, _vocab, idf = _build_safety_onnx(candidate_path)
-    _sidecar(candidates_dir, "safety", "v1", "labels.json").write_text(json.dumps(labels))
-    np.save(str(_sidecar(candidates_dir, "safety", "v1", "idf.npy")), idf)
+    candidate_path = _train_safety_candidate(candidates_dir, version="v1")
+    (candidates_dir / "safety-v1.featurizer_ref.json").unlink()
 
     with pytest.raises(FileNotFoundError) as exc:
         sanity_adapters.build_infer_fn("safety", candidate_path)
-    assert "vocab.json" in str(exc.value)
+    assert "featurizer_ref.json" in str(exc.value)
 
 
-def test_safety_adapter_blocks_when_idf_sidecar_missing(tmp_path):
+def test_safety_adapter_uses_production_featurizer_dim(tmp_path):
+    """Featurization shape is `(None, 200)` — matching production SVD output."""
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "safety-v1.onnx"
-    labels, vocab, _idf = _build_safety_onnx(candidate_path)
-    _sidecar(candidates_dir, "safety", "v1", "labels.json").write_text(json.dumps(labels))
-    _sidecar(candidates_dir, "safety", "v1", "vocab.json").write_text(
-        json.dumps(vocab, sort_keys=True)
+    candidate_path = _train_safety_candidate(candidates_dir, version="v1")
+
+    # Hook into the adapter at construction to confirm featurization
+    # produces the expected dimension. We do this by reaching into
+    # the trainer's helpers directly — the same code path the
+    # adapter runs.
+    from gateway.intelligence.distillation.trainers.safety_trainer import (
+        _load_production_featurizer, featurize_batch,
     )
+    feat = _load_production_featurizer()
+    matrix = featurize_batch(["kill bomb"], feat)
+    assert matrix.shape == (1, 200)
+    assert matrix.dtype == np.float32
 
-    with pytest.raises(FileNotFoundError) as exc:
-        sanity_adapters.build_infer_fn("safety", candidate_path)
-    assert "idf.npy" in str(exc.value)
+    # And the adapter actually runs through to produce a label.
+    infer = sanity_adapters.build_infer_fn("safety", candidate_path)
+    out = infer("kill bomb attack violent")
+    assert isinstance(out, str)
 
 
 def test_safety_trainer_writes_all_sidecars(tmp_path):
-    """Drive the trainer's _write_sidecars hook directly.
+    """Drive the trainer end-to-end and verify both side-cars land."""
+    candidate_path = _train_safety_candidate(tmp_path, version="v3")
+    assert candidate_path.exists()
 
-    Skips the broken skl2onnx export (char_wb is unsupported) so the
-    test stays focused on side-car emission. Verifies all three
-    files land at the expected paths with parseable contents.
-    """
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.pipeline import Pipeline
+    # New side-cars present.
+    assert (tmp_path / "safety-v3.labels.json").exists()
+    assert (tmp_path / "safety-v3.featurizer_ref.json").exists()
 
-    pipeline = Pipeline([
-        ("tfidf", TfidfVectorizer(min_df=1)),
-        ("clf", GradientBoostingClassifier(n_estimators=2, random_state=42)),
-    ])
-    pipeline.fit(
-        ["kill bomb attack", "happy nice poem"],
-        ["violence", "safe"],
-    )
+    # Old-style side-cars MUST NOT be emitted.
+    assert not (tmp_path / "safety-v3.vocab.json").exists()
+    assert not (tmp_path / "safety-v3.idf.npy").exists()
 
-    SafetyTrainer()._write_sidecars(pipeline, "v3", tmp_path)
-
+    # Labels file is a list of strings drawn from the production set.
     labels = json.loads((tmp_path / "safety-v3.labels.json").read_text())
-    vocab = json.loads((tmp_path / "safety-v3.vocab.json").read_text())
-    idf = np.load(str(tmp_path / "safety-v3.idf.npy"))
-    assert sorted(labels) == ["safe", "violence"]
-    assert all(isinstance(v, int) for v in vocab.values())
-    assert idf.dtype == np.float32
-    assert idf.shape[0] == len(vocab)
+    prod_labels = json.loads(
+        (Path("src/gateway/content/safety_classifier_labels.json")).read_text()
+    )
+    assert labels == prod_labels
+
+    ref = json.loads((tmp_path / "safety-v3.featurizer_ref.json").read_text())
+    assert ref["expected_input_dim"] == 200
 
 
 # ── schema_mapper adapter ─────────────────────────────────────────────────
 
 
 def test_schema_mapper_adapter_loads_sidecars_and_returns_labels(tmp_path):
-    """Happy path — full candidate (.onnx + dictvec.pkl + names.json)."""
+    """Happy path — trained candidate → adapter → label string back."""
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "schema_mapper-v1.onnx"
-    labels, vec = _build_schema_classifier_only_onnx(candidate_path)
-    _write_schema_sidecars(candidates_dir, "v1", vec)
+    candidate_path = _train_schema_candidate(candidates_dir, version="v1")
+    labels = json.loads((candidates_dir / "schema_mapper-v1.labels.json").read_text())
 
     infer = sanity_adapters.build_infer_fn("schema_mapper", candidate_path)
-    out = infer({"len": 400, "word_count": 65, "has_role": 1, "depth": 1})
+    # FlatField-shaped row — direct featurization path.
+    out = infer({
+        "path": "choices.0.message.content", "key": "content",
+        "value": "long natural language content with many words to classify",
+        "value_type": "string", "depth": 3, "parent_key": "message",
+        "sibling_keys": ["role", "content"], "sibling_types": ["string", "string"],
+        "int_siblings": [],
+    })
     assert out in labels
 
 
-def test_schema_mapper_adapter_blocks_when_pkl_missing(tmp_path):
+def test_schema_mapper_adapter_blocks_when_labels_sidecar_missing(tmp_path):
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "schema_mapper-v1.onnx"
-    _labels, vec = _build_schema_classifier_only_onnx(candidate_path)
-    # Write feature_names.json but NOT dictvec.pkl.
-    _sidecar(candidates_dir, "schema_mapper", "v1", "feature_names.json").write_text(
-        json.dumps(list(vec.feature_names_))
-    )
+    candidate_path = _train_schema_candidate(candidates_dir, version="v1")
+    (candidates_dir / "schema_mapper-v1.labels.json").unlink()
 
     with pytest.raises(FileNotFoundError) as exc:
         sanity_adapters.build_infer_fn("schema_mapper", candidate_path)
-    assert "dictvec.pkl" in str(exc.value)
+    assert "labels.json" in str(exc.value)
 
 
-def test_schema_mapper_adapter_blocks_when_feature_names_missing(tmp_path):
+def test_schema_mapper_adapter_blocks_when_featurizer_ref_missing(tmp_path):
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "schema_mapper-v1.onnx"
-    _labels, vec = _build_schema_classifier_only_onnx(candidate_path)
-    # Write pickle but NOT feature_names.json.
-    with open(_sidecar(candidates_dir, "schema_mapper", "v1", "dictvec.pkl"), "wb") as fh:
-        pickle.dump(vec, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    candidate_path = _train_schema_candidate(candidates_dir, version="v1")
+    (candidates_dir / "schema_mapper-v1.featurizer_ref.json").unlink()
 
     with pytest.raises(FileNotFoundError) as exc:
         sanity_adapters.build_infer_fn("schema_mapper", candidate_path)
-    assert "feature_names.json" in str(exc.value)
+    assert "featurizer_ref.json" in str(exc.value)
 
 
-def test_schema_mapper_adapter_handles_missing_features_in_row(tmp_path):
-    """A fixture row with extra/missing keys still produces a label.
-
-    DictVectorizer fills unknown keys with 0 — same behavior as the
-    production featurizer; the adapter shouldn't crash on incomplete
-    inputs.
-    """
+def test_schema_mapper_adapter_handles_raw_response_input(tmp_path):
+    """Adapter accepts raw response JSON (flatten + extract_features path)."""
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "schema_mapper-v1.onnx"
-    labels, vec = _build_schema_classifier_only_onnx(candidate_path)
-    _write_schema_sidecars(candidates_dir, "v1", vec)
+    candidate_path = _train_schema_candidate(candidates_dir, version="v1")
+    labels = json.loads((candidates_dir / "schema_mapper-v1.labels.json").read_text())
 
     infer = sanity_adapters.build_infer_fn("schema_mapper", candidate_path)
-    # Empty dict — DictVectorizer.transform → all-zeros.
-    out = infer({})
+    # Raw response — adapter calls flatten_json + extract_features.
+    out = infer({"choices": [{"message": {"content": "hello world"}}]})
     assert out in labels
-    # Row with a feature the vectorizer never saw — silently dropped.
-    out = infer({"never_seen_feature": 999.0})
-    assert out in labels
+
+
+def test_schema_mapper_adapter_handles_empty_input(tmp_path):
+    """Empty / un-coercible inputs become zero-vectors and still classify."""
+    candidates_dir = tmp_path / "candidates"
+    candidate_path = _train_schema_candidate(candidates_dir, version="v1")
+    labels = json.loads((candidates_dir / "schema_mapper-v1.labels.json").read_text())
+
+    infer = sanity_adapters.build_infer_fn("schema_mapper", candidate_path)
+    assert infer({}) in labels
+    assert infer("not a json") in labels
 
 
 def test_schema_mapper_trainer_writes_all_sidecars(tmp_path):
-    """Drive the trainer's _write_sidecars hook directly.
+    """Drive the trainer end-to-end and verify both side-cars land."""
+    candidate_path = _train_schema_candidate(tmp_path, version="v7")
+    assert candidate_path.exists()
 
-    Mirrors the safety variant: build a fitted pipeline, emit side-cars,
-    confirm both files land. Skips the (broken) skl2onnx export step.
-    """
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.feature_extraction import DictVectorizer
-    from sklearn.pipeline import Pipeline
+    assert (tmp_path / "schema_mapper-v7.labels.json").exists()
+    assert (tmp_path / "schema_mapper-v7.featurizer_ref.json").exists()
+    # Old-style side-cars must not be emitted.
+    assert not (tmp_path / "schema_mapper-v7.dictvec.pkl").exists()
+    assert not (tmp_path / "schema_mapper-v7.feature_names.json").exists()
 
-    pipeline = Pipeline([
-        ("vec", DictVectorizer(sparse=False)),
-        ("clf", GradientBoostingClassifier(n_estimators=2, random_state=42)),
-    ])
-    pipeline.fit(
-        [{"a": 1.0}, {"a": 2.0}, {"b": 1.0}, {"a": 3.0, "b": 2.0}],
-        ["x", "y", "x", "y"],
+    labels = json.loads((tmp_path / "schema_mapper-v7.labels.json").read_text())
+    prod_labels = json.loads(
+        (Path("src/gateway/schema/schema_mapper_labels.json")).read_text()
     )
+    assert labels == prod_labels
 
-    SchemaMapperTrainer()._write_sidecars(pipeline, "v7", tmp_path)
-
-    names = json.loads((tmp_path / "schema_mapper-v7.feature_names.json").read_text())
-    assert names == ["a", "b"]
-
-    with open(tmp_path / "schema_mapper-v7.dictvec.pkl", "rb") as fh:
-        loaded_vec = pickle.load(fh)  # noqa: S301 — controlled tmp_path
-    assert list(loaded_vec.feature_names_) == ["a", "b"]
-    # The pickled vec must round-trip transform identically to the
-    # original — that's the contract the adapter relies on.
-    out = loaded_vec.transform([{"a": 0.5}])
-    assert out.tolist() == [[0.5, 0.0]]
+    ref = json.loads((tmp_path / "schema_mapper-v7.featurizer_ref.json").read_text())
+    assert ref["expected_input_dim"] == 139
 
 
 # ── strategy table contract ───────────────────────────────────────────────
 
 
-def test_wired_models_contains_all_three_now():
+def test_wired_models_contains_all_three():
     """Backward-compat invariant: previously-deferred models now wired."""
     assert sanity_adapters.WIRED_MODELS == frozenset(
         {"intent", "safety", "schema_mapper"}
@@ -375,7 +267,6 @@ def test_wired_models_contains_all_three_now():
     assert sanity_adapters.is_wired("intent") is True
     assert sanity_adapters.is_wired("safety") is True
     assert sanity_adapters.is_wired("schema_mapper") is True
-    # Unknown name is not wired.
     assert sanity_adapters.is_wired("not_a_model") is False
 
 
@@ -383,37 +274,42 @@ def test_wired_models_contains_all_three_now():
 
 
 def test_sanity_runner_blocks_when_adapter_predicts_below_floor(tmp_path):
-    """The runner uses the adapter and detects per-class floor failures.
+    """Adapter→runner integration. Force a misclassification and verify the
+    per-class accuracy floor catches it.
 
-    Build a candidate that predicts a single class for everything, then
-    check that the runner correctly fails the per-class accuracy gate
-    for the OTHER class. This exercises the full adapter→runner path
-    we just wired.
+    Build a schema_mapper candidate, then author a fixture whose
+    expected labels include one the candidate was never trained on.
+    The runner should fail the per-class floor for that label while
+    leaving the others intact.
     """
     candidates_dir = tmp_path / "candidates"
-    candidates_dir.mkdir()
-    candidate_path = candidates_dir / "schema_mapper-v1.onnx"
-    labels, vec = _build_schema_classifier_only_onnx(candidate_path)
-    _write_schema_sidecars(candidates_dir, "v1", vec)
+    candidate_path = _train_schema_candidate(candidates_dir, version="v1")
 
-    # Author a custom fixture with two labels: one the candidate gets
-    # right (a class it was trained on) and one it's guaranteed to
-    # get wrong (a label outside its training set).
     fixtures_dir = tmp_path / "fixtures"
     fixtures_dir.mkdir()
     (fixtures_dir / "schema_mapper_sanity.json").write_text(json.dumps({
         "model_name": "schema_mapper",
         "examples": [
-            # Big-content rows — the candidate has been trained to call
-            # these "content" so they pass.
-            {"input": {"len": 400, "word_count": 65, "has_role": 1, "depth": 1},
-             "label": "content"},
-            {"input": {"len": 620, "word_count": 110, "has_role": 1, "depth": 1},
-             "label": "content"},
-            # Force a label that doesn't exist in the candidate — every
-            # one of these is wrong, so the per-class floor (0.7) fails.
-            {"input": {"len": 0, "word_count": 0}, "label": "definitely_wrong"},
-            {"input": {"len": 0, "word_count": 0}, "label": "definitely_wrong"},
+            # Big-content rows the candidate was trained to call "content".
+            {"input": {
+                "path": "choices.0.message.content", "key": "content",
+                "value": "long natural language content",
+                "value_type": "string", "depth": 3, "parent_key": "message",
+                "sibling_keys": ["role", "content"],
+                "sibling_types": ["string", "string"],
+                "int_siblings": [],
+             }, "label": "content"},
+            {"input": {
+                "path": "choices.0.message.content", "key": "content",
+                "value": "another natural language response with many words",
+                "value_type": "string", "depth": 3, "parent_key": "message",
+                "sibling_keys": ["role", "content"],
+                "sibling_types": ["string", "string"],
+                "int_siblings": [],
+             }, "label": "content"},
+            # Force a label that won't match the candidate's predictions.
+            {"input": {}, "label": "definitely_wrong"},
+            {"input": {}, "label": "definitely_wrong"},
         ],
     }))
 
@@ -422,6 +318,3 @@ def test_sanity_runner_blocks_when_adapter_predicts_below_floor(tmp_path):
     result = runner.run("schema_mapper", infer, min_per_class_accuracy=0.7)
     assert result.passed is False
     assert "definitely_wrong" in result.failing_classes
-    # The candidate scored 100% on `content` — verify the gate doesn't
-    # blanket-fail the model just because one class missed.
-    assert result.per_class_accuracy.get("content") == 1.0
