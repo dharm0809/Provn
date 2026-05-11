@@ -90,4 +90,20 @@ walacor-gateway = "gateway.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-gateway = ["lineage/static/**"]
+# Non-Python assets that must travel with the wheel. Without an explicit
+# entry, setuptools drops them and the image boots with classifiers
+# fail-open (`_loaded = False`) — every audit verdict pinned to
+# confidence 0.0. Patterns are intentionally broad so freshly trained
+# baselines and any new sidecar (tokenizer.json, model_card.json, label
+# maps) ship without a pyproject edit.
+gateway = [
+  "lineage/static/**",
+  "classifier/*.onnx",
+  "classifier/*.json",
+  "content/*.onnx",
+  "content/*.json",
+  "content/*.npy",
+  "schema/*.onnx",
+  "schema/*.json",
+  "intelligence/baselines/*.json",
+]
