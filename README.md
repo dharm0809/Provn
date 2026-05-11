@@ -60,16 +60,45 @@ Streaming responses use a tee-buffer: chunks flow to the caller in real time whi
 
 ## Quick Start
 
-### Docker Compose (recommended)
+### One-command install (AWS EC2 — Amazon Linux 2023 / Ubuntu)
+
+```bash
+git clone https://github.com/dharm0809/LLM-Gateway.git Gateway && cd Gateway
+bash deploy/aws-setup.sh
+```
+
+That script installs Docker, prompts you for Walacor + provider creds (or
+reads them from an existing `.env`), generates random API keys, provisions
+the Walacor schemas, `docker compose up -d`, verifies the install, and pulls
+a default Ollama model. Re-runnable — won't overwrite a working `.env`.
+
+### Manual Docker Compose
 
 ```bash
 git clone https://github.com/dharm0809/LLM-Gateway.git && cd LLM-Gateway
+cp .env.example .env                  # fill server/user/pass + provider keys
+scripts/provision-walacor.sh          # idempotent; creates ETIDs on Walacor
 docker compose up -d
-# Wait for Ollama to be ready, then pull a model:
-docker exec gateway-ollama-1 ollama pull qwen3:8b
+scripts/verify-install.sh             # 14 checks; exits 1 on any gap
+docker exec gateway-ollama ollama pull llama3.1:8b
 ```
 
 Gateway: `http://localhost:8002` | Dashboard: `http://localhost:8002/lineage/` | OpenWebUI: `http://localhost:3000`
+
+Override ports via `GATEWAY_PORT` / `OPENWEBUI_PORT` in `.env`.
+
+### Why `provision-walacor.sh` isn't automatic
+
+Schema creation needs Walacor admin creds, not gateway runtime creds. Keeping
+it as an explicit one-time step means the gateway image never carries
+admin-level secrets, and a misconfigured tenant fails loudly before you
+serve traffic instead of silently filling the WAL with rejected writes.
+
+### Upgrading an existing install
+
+```bash
+scripts/pull-and-deploy.sh   # pulls latest image, restarts gateway, runs verify
+```
 
 ### Manual
 

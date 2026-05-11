@@ -18,7 +18,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 app
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl duckduckgo-search && rm -rf /wheels
+# cryptography>=42: required for Ed25519 record signing (PER-05 / INT-01..03).
+# Without it, gateway boots but writes records UNSIGNED and readiness goes red.
+# Listed in pyproject's [signing] extra; pinned here to guarantee image build.
+RUN pip install --no-cache-dir /wheels/*.whl 'cryptography>=42.0' duckduckgo-search && rm -rf /wheels
 RUN mkdir -p /var/walacor/wal && chown app:app /var/walacor/wal
 USER app
 EXPOSE 8000
