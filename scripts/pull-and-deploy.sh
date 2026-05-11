@@ -39,16 +39,25 @@ sed -i '/^GATEWAY_IMAGE=/d' .env 2>/dev/null || true
 echo "GATEWAY_IMAGE=$IMAGE" >> .env
 docker compose up -d --no-build --force-recreate gateway
 
-echo "[5/5] Waiting for healthy..."
+echo "[5/5] Waiting for healthy + verifying install..."
+# Read GATEWAY_PORT from .env (default 8002)
+GATEWAY_PORT=$(grep -E '^GATEWAY_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)
+GATEWAY_PORT="${GATEWAY_PORT:-8002}"
 for i in $(seq 1 30); do
-    if curl -sf http://localhost:8002/health > /dev/null 2>&1; then
-        echo "  Gateway healthy!"
-        curl -s http://localhost:8002/health | python3 -m json.tool | head -5
-        exit 0
+    if curl -sf "http://localhost:${GATEWAY_PORT}/health" > /dev/null 2>&1; then
+        echo "  Gateway healthy on port ${GATEWAY_PORT}"
+        break
     fi
     echo "  Waiting... ($i/30)"
     sleep 3
 done
 
-echo "  Gateway failed to start. Check: docker compose logs gateway --tail=20"
-exit 1
+# Run the post-deploy verifier — catches Walacor 400s, missing env, signing gaps.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -x "$SCRIPT_DIR/verify-install.sh" ]]; then
+    echo
+    "$SCRIPT_DIR/verify-install.sh" || {
+        echo "  Deploy completed with gaps. Check: docker compose logs gateway --tail=20" >&2
+        exit 1
+    }
+fi

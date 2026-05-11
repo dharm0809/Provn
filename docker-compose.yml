@@ -1,11 +1,13 @@
 # Walacor Gateway — single command setup
 #
-#   docker compose up
+# Prereqs (one-time, per Walacor tenant — schemas don't auto-create):
+#   1. Copy .env.example to .env and fill WALACOR_SERVER/USERNAME/PASSWORD
+#   2. scripts/provision-walacor.sh   (creates ETIDs 9000031/32/33 on the backend)
+#   3. docker compose up -d
 #
-# Starts Gateway + Ollama + OpenWebUI
-# OpenWebUI: http://localhost:3000
-# Gateway health: http://localhost:8002/health
-# Gateway lineage: http://localhost:8002/lineage/
+# Default ports (override via GATEWAY_PORT / OPENWEBUI_PORT in .env):
+#   Gateway:  http://localhost:8002/  (health, lineage at /lineage/)
+#   OpenWebUI: http://localhost:3000/
 
 services:
   ollama:
@@ -31,7 +33,7 @@ services:
     #   context: .
     #   dockerfile: deploy/Dockerfile
     ports:
-      - "8002:8000"
+      - "${GATEWAY_PORT:-8002}:8000"
     environment:
       - WALACOR_GATEWAY_TENANT_ID=${WALACOR_GATEWAY_TENANT_ID:-dev-tenant}
       - WALACOR_PROVIDER_OLLAMA_URL=http://ollama:11434
@@ -51,6 +53,15 @@ services:
       - WALACOR_PASSWORD=${WALACOR_PASSWORD:-}
       - WALACOR_PROVIDER_OPENAI_KEY=${OPENAI_API_KEY:-}
       - WALACOR_PROVIDER_ANTHROPIC_KEY=${ANTHROPIC_API_KEY:-}
+      # ETIDs must be provisioned on the Walacor backend before first start —
+      # run scripts/provision-walacor.sh (or python scripts/setup_walacor_schemas.py).
+      # Defaults match what setup_walacor_schemas.py creates.
+      - WALACOR_EXECUTIONS_ETID=${WALACOR_EXECUTIONS_ETID:-9000031}
+      - WALACOR_ATTEMPTS_ETID=${WALACOR_ATTEMPTS_ETID:-9000032}
+      - WALACOR_TOOL_EVENTS_ETID=${WALACOR_TOOL_EVENTS_ETID:-9000033}
+      # Multi-model routing: fnmatch patterns evaluated before path-based routing.
+      # Empty = path-based routing only (uses WALACOR_GATEWAY_PROVIDER).
+      - WALACOR_MODEL_ROUTING_JSON=${WALACOR_MODEL_ROUTING_JSON:-}
     volumes:
       - gateway-wal:/var/walacor/wal
     depends_on:
@@ -68,12 +79,15 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     container_name: gateway-openwebui
     ports:
-      - "3000:8080"
+      - "${OPENWEBUI_PORT:-3000}:8080"
     volumes:
       - webui-data:/app/backend/data
     environment:
       - OPENAI_API_BASE_URL=http://gateway:8000/v1
-      - OPENAI_API_KEY=${WALACOR_GATEWAY_API_KEYS:-dev-key}
+      # If WALACOR_GATEWAY_API_KEYS has multiple comma-separated keys, set
+      # WEBUI_GATEWAY_API_KEY to a single one — OpenWebUI sends the whole
+      # value as the bearer and won't match a comma list.
+      - OPENAI_API_KEY=${WEBUI_GATEWAY_API_KEY:-${WALACOR_GATEWAY_API_KEYS:-dev-key}}
       - ENABLE_OLLAMA_API=false
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
       - ENABLE_DIRECT_CONNECTIONS=false
