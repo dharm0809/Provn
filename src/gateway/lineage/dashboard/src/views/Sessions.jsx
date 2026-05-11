@@ -351,7 +351,7 @@ function VerifyBanner({ result }) {
         )}
       </div>
       <div className="ses-verify-meta mono">
-        {ok ? 'ID chain · ED25519 · Walacor sealed' : 'verification failed'}
+        {ok ? `ID chain · ED25519 · Walacor ${result.sealLabel || 'sealed'}` : 'verification failed'}
       </div>
     </div>
   );
@@ -491,8 +491,19 @@ function SessionTimelineView({ session, onBack }) {
         setNodeResults(prev => [...prev, results[i]]);
       }
       const allOk = res?.valid !== false && results.every(Boolean);
+      // Seal label has to reflect what's actually true for THESE records,
+      // not the union of capabilities. If anchoring is queued for any
+      // record we say "sealed (pending)"; if zero records carry any
+      // anchor signal we say "seal not attempted".
+      const sealStates = records.map(sealState);
+      const anchored = sealStates.filter(s => s === 'sealed').length;
+      const pending = sealStates.filter(s => s === 'pending').length;
+      let sealLabel = 'sealed';
+      if (anchored === 0 && pending > 0) sealLabel = 'sealed (pending)';
+      else if (anchored === 0 && pending === 0) sealLabel = 'seal not attempted';
+      else if (anchored > 0 && pending > 0) sealLabel = `sealed (${anchored}/${records.length})`;
       setVerifyResult(allOk
-        ? { valid: true, message: `Chain verified — ${records.length} records, ID-pointer chain intact, all Ed25519 signatures valid.` }
+        ? { valid: true, sealLabel, message: `Chain verified — ${records.length} records, ID-pointer chain intact, all Ed25519 signatures valid.` }
         : { valid: false, message: res?.message || `Chain invalid — ${results.filter(x => !x).length} mismatch(es)`, errors: res?.errors || [] }
       );
     } catch (e) {
@@ -532,7 +543,17 @@ function SessionTimelineView({ session, onBack }) {
         <div className="ses-timeline-head-right">
           <div className="ses-verify-card">
             <div className="ses-verify-eyebrow mono">CRYPTOGRAPHIC VERIFICATION</div>
-            <div className="ses-verify-algo mono">ID chain · ED25519 · Walacor sealed</div>
+            <div className="ses-verify-algo mono">
+              ID chain · ED25519 · Walacor {(() => {
+                const states = records.map(sealState);
+                const a = states.filter(s => s === 'sealed').length;
+                const p = states.filter(s => s === 'pending').length;
+                if (a === records.length && a > 0) return 'sealed';
+                if (a === 0 && p > 0) return 'sealed (pending)';
+                if (a === 0 && p === 0) return 'seal not attempted';
+                return `sealed (${a}/${records.length})`;
+              })()}
+            </div>
             <button
               className="btn-wal btn-primary"
               onClick={handleVerify}

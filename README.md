@@ -100,6 +100,77 @@ serve traffic instead of silently filling the WAL with rejected writes.
 scripts/pull-and-deploy.sh   # pulls latest image, restarts gateway, runs verify
 ```
 
+### API keys — naming, retrieval, rotation
+
+The gateway accepts a comma-separated list of API keys on the `X-API-Key`
+header (`WALACOR_GATEWAY_API_KEYS` in `.env`). To make keys self-documenting
+and rotation cheap, use this naming convention:
+
+| Format | Entropy | Use |
+|---|---|---|
+| `wgk-walacor-<24 hex>` | 96 bits | Internal Walacor team — dashboard, control-plane CRUD, on-call debugging. One per environment. |
+| `wgk-<customer>-<43 base64url>` | 256 bits | External / per-customer key. Issue one per tenant; revoke without affecting others. |
+| `wgk-<32 hex>` (no label) | 128 bits | Legacy / bootstrap. Acceptable for dev; replace before going live. |
+
+#### Create or rotate a key
+```bash
+# From a dev laptop with SSH access to the gateway host, or directly on the host:
+scripts/rotate-key.sh walacor              # rotates the team key in place
+scripts/rotate-key.sh acme-corp            # mints a 256-bit external key for acme-corp
+scripts/rotate-key.sh acme-corp --revoke   # removes all keys owned by acme-corp
+```
+The script edits `.env`, updates `.keys-registry.yaml` (owner / purpose /
+created_at), and `docker compose up -d gateway` so the change is live in
+seconds. The previous `.env` is backed up to `.env.bak.<timestamp>`.
+
+#### Retrieve a key without SSHing the box
+Add to your `~/.zprofile` (or shell init):
+```bash
+WALACOR_GW_SSH_KEY="$HOME/path/to/gateway_key.pem"
+WALACOR_GW_HOST="ec2-user@<your-gateway-host>"
+
+# Print + copy the Walacor team key to clipboard (macOS)
+wgk() {
+  local k
+  k=$(ssh -i "$WALACOR_GW_SSH_KEY" "$WALACOR_GW_HOST" \
+    'grep ^WALACOR_GATEWAY_API_KEYS ~/Gateway/.env | cut -d= -f2- | tr "," "\n" | grep "^wgk-walacor-" | head -1')
+  [ -z "$k" ] && k=$(ssh -i "$WALACOR_GW_SSH_KEY" "$WALACOR_GW_HOST" \
+    'grep ^WALACOR_GATEWAY_API_KEYS ~/Gateway/.env | cut -d= -f2- | cut -d, -f1')
+  printf "%s" "$k" | pbcopy && echo "$k  (copied)"
+}
+
+# List all keys with their owner labels
+wgk-list() {
+  ssh -i "$WALACOR_GW_SSH_KEY" "$WALACOR_GW_HOST" '
+    grep ^WALACOR_GATEWAY_API_KEYS ~/Gateway/.env | cut -d= -f2- | tr "," "\n" | while read k; do
+      owner=$(awk -v k="$k" "/- key: / && index(\$0,k){f=1;next} f && /owner:/{sub(/^[[:space:]]+owner:[[:space:]]*/,\"\");print;exit}" ~/Gateway/.keys-registry.yaml 2>/dev/null)
+      printf "  %-58s  %s\n" "$k" "${owner:-(unlabeled)}"
+    done'
+}
+
+# Mint or rotate
+wgk-rotate() { ssh -i "$WALACOR_GW_SSH_KEY" "$WALACOR_GW_HOST" "bash ~/Gateway/scripts/rotate-key.sh '$1'"; }
+```
+Then `wgk` (clipboard-ready), `wgk-list`, or `wgk-rotate <label>` from any
+terminal. Nothing is cached on the laptop.
+
+#### Where the dashboard prompts for the key
+Open `http://<host>:8100/lineage/`. The AuthGate prompts on load; paste the
+team key (the `wgk-walacor-…` one). It's stored in `localStorage` so you
+only paste it once per browser profile.
+
+#### First boot without configured keys
+If `WALACOR_GATEWAY_API_KEYS` is empty AND `WALACOR_CONTROL_PLANE_ENABLED=true`,
+the gateway writes a bootstrap key to `{WAL_PATH}/gateway-bootstrap-key.txt`
+(mode 0600) on startup and reloads it on every restart. Useful for getting
+in to a fresh box; rotate it before any real traffic.
+
+#### Don't commit
+`.env` and `.keys-registry.yaml` are both gitignored. Never check them in,
+never paste them into Slack/PRs. For prod, push the values into your secret
+manager (Vault, AWS Secrets Manager, 1Password) and template `.env` from
+there at deploy time.
+
 ### Manual
 
 ```bash
