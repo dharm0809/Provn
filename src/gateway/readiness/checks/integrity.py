@@ -292,11 +292,24 @@ class _Int05AnchorRoundTrip:
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Hashes fetch failed: {exc}", elapsed_ms=elapsed_ms())
 
-        anchored = [h for h in hashes if h.get("DH") and h.get("EId")]
+        # Match INT-04's eligibility window: a record's anchor proof and data
+        # row are written by separate OCM stages, and the hashes endpoint can
+        # be a few seconds ahead of the data table. Only probe records old
+        # enough (2 minutes) that any consistency window has closed — otherwise
+        # the check reports "proof orphaned" on a record that's still
+        # propagating, which is a false positive.
+        cutoff_ms = int(
+            (datetime.now(timezone.utc) - timedelta(minutes=2)).timestamp() * 1000
+        )
+        anchored = [
+            h for h in hashes
+            if h.get("DH") and h.get("EId")
+            and isinstance(h.get("CreatedAt"), (int, float)) and h["CreatedAt"] <= cutoff_ms
+        ]
         if not anchored:
             return CheckResult(
                 status="amber",
-                detail="No anchored records available to probe",
+                detail="No anchored records older than 2m available to probe",
                 elapsed_ms=elapsed_ms(),
             )
 
