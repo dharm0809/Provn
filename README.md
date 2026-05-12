@@ -84,7 +84,7 @@ export WALACOR_PROVIDER_OLLAMA_URL=http://localhost:11434
 walacor-gateway
 
 # Full: Walacor backend + OpenWebUI auto-integration
-export WALACOR_SERVER=https://sandbox.walacor.com/api
+export WALACOR_SERVER=http://32.196.5.38/api
 export WALACOR_USERNAME=your-user
 export WALACOR_PASSWORD=your-pass
 export WALACOR_OPENWEBUI_URL=http://localhost:3000

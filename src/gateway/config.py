@@ -343,7 +343,7 @@ class Settings(BaseSettings):
     #   WALACOR_SERVER, WALACOR_USERNAME, WALACOR_PASSWORD
     walacor_server: str = Field(
         default="",
-        description="Walacor backend server URL (e.g. https://sandbox.walacor.com/api)",
+        description="Walacor backend server URL (e.g. http://32.196.5.38/api)",
         validation_alias=AliasChoices("WALACOR_SERVER", "walacor_server"),
     )
     walacor_username: str = Field(

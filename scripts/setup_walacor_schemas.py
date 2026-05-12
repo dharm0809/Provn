@@ -5,7 +5,7 @@ Usage:
   python scripts/setup_walacor_schemas.py
 
 Reads from environment (or .env):
-  WALACOR_SERVER    — e.g. https://sandbox.walacor.com/api
+  WALACOR_SERVER    — e.g. http://32.196.5.38/api
   WALACOR_USERNAME
   WALACOR_PASSWORD
 
