@@ -80,12 +80,26 @@ cp .env.example .env                  # fill server/user/pass + provider keys
 scripts/provision-walacor.sh          # idempotent; creates ETIDs on Walacor
 docker compose up -d
 scripts/verify-install.sh             # 14 checks; exits 1 on any gap
-docker exec gateway-ollama ollama pull llama3.1:8b
 ```
 
 Gateway: `http://localhost:8002` | Dashboard: `http://localhost:8002/lineage/` | OpenWebUI: `http://localhost:3000`
 
 Override ports via `GATEWAY_PORT` / `OPENWEBUI_PORT` in `.env`.
+
+### Supported model routing (API-only)
+
+The gateway routes by model name via `WALACOR_MODEL_ROUTING_JSON`:
+
+| Pattern | Provider | Verified working |
+|---|---|---|
+| `claude-*` | Anthropic | `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`, `claude-opus-4-7` |
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*` | OpenAI | `gpt-4o-mini`, `gpt-5-mini`, `o3-mini` |
+
+The bundled `gateway-ollama` container runs internally for the Llama Guard
+content analyzer only — Ollama is **not** exposed as a user-facing model
+provider. Calling `llama3.1:8b` (or any ollama-routed model name) from a
+client returns `403 model_not_attested`. If you want to expose local
+models, attest them via `/v1/control/attestations` and add a routing rule.
 
 ### Why `provision-walacor.sh` isn't automatic
 

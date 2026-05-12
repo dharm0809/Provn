@@ -9,7 +9,10 @@
 #   4. Runs scripts/provision-walacor.sh — creates Walacor ETIDs (idempotent)
 #   5. docker compose up -d
 #   6. Runs scripts/verify-install.sh — fails loudly if anything is wrong
-#   7. Pulls a default Ollama model (llama3.1:8b)
+#
+# Note: NO local Ollama models are pulled. Production routes user traffic
+# to OpenAI/Anthropic APIs via WALACOR_MODEL_ROUTING_JSON. The gateway-ollama
+# container runs only for the internal Llama Guard content analyzer.
 #
 # Usage:
 #   ssh ec2-user@<IP>
@@ -18,7 +21,6 @@
 #
 # Flags:
 #   --non-interactive    Don't prompt; require a complete .env up front
-#   --skip-model-pull    Skip the Ollama model download
 #   --image <ref>        Override GATEWAY_IMAGE (ECR or other registry)
 #
 # Idempotent: safe to re-run. Existing .env is preserved unless missing fields
@@ -27,12 +29,11 @@
 set -euo pipefail
 
 INTERACTIVE=1
-SKIP_MODEL=0
 IMAGE_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --non-interactive) INTERACTIVE=0; shift;;
-        --skip-model-pull) SKIP_MODEL=1; shift;;
+        --skip-model-pull) shift;;  # Accepted for back-compat; no local pull happens regardless.
         --image) IMAGE_OVERRIDE="$2"; shift 2;;
         *) echo "Unknown flag: $1"; exit 2;;
     esac
@@ -244,16 +245,13 @@ bash "$REPO_ROOT/scripts/verify-install.sh" "$ENV_FILE" || {
     exit 1
 }
 
-# ── 8. Pull default Ollama model ───────────────────────────────────────────
-if [[ $SKIP_MODEL -eq 0 ]]; then
-    echo
-    echo "[7/7] Default Ollama model (llama3.1:8b)"
-    $DOCKER exec gateway-ollama ollama pull llama3.1:8b 2>&1 | tail -3 || \
-        echo "  model pull failed — pull manually later: docker exec gateway-ollama ollama pull <model>"
-else
-    echo
-    echo "[7/7] Skipping model pull (--skip-model-pull)"
-fi
+# ── 8. Ollama models are NOT pulled by default ─────────────────────────────
+# Production deployments use API providers (OpenAI / Anthropic) routed by
+# WALACOR_MODEL_ROUTING_JSON. The gateway-ollama container runs only for
+# the Llama Guard content analyzer; user traffic doesn't hit Ollama. To
+# expose a local model, pull it manually and attest via /v1/control/attestations.
+echo
+echo "[7/7] Skipping local-model pull — gateway routes user traffic to APIs only"
 
 PUBLIC_IP=$(curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "<this-host>")
 
