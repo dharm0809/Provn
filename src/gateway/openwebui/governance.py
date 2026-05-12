@@ -213,8 +213,6 @@ async def _apply_session_chain(record: dict, session_id: str | None, ctx, settin
 
     return True
 
-    return record_hash_val
-
 
 # ---------------------------------------------------------------------------
 # Main entry point

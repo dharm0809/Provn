@@ -138,10 +138,11 @@ export default function Playground({ navigate }) {
             />
             <datalist id="pg-model-suggestions">
               <option value="llama3.1:8b" />
+              <option value="claude-haiku-4-5-20251001" />
               <option value="claude-sonnet-4-6" />
               <option value="claude-opus-4-7" />
+              <option value="gpt-4o-mini" />
               <option value="gpt-4o" />
-              <option value="gemini-2.5-pro" />
             </datalist>
           </div>
 

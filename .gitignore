@@ -79,6 +79,10 @@ screenshots/
 *.excalidraw.md
 # Keep dashboard branding assets (bundled by Vite at build time)
 !src/gateway/lineage/dashboard/src/assets/**/*.png
+# Keep Vite *build output* — the wheel ships this directory as package-data
+# (pyproject.toml: gateway = ["lineage/static/**"]), so excluding the built
+# PNGs from git means the wheel ships logo-less. Track them.
+!src/gateway/lineage/static/assets/**/*.png
 
 # --- Generated gRPC stubs (regenerate with: cd proto && make python) ---
 *_pb2.py

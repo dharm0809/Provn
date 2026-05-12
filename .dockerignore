@@ -1,0 +1,33 @@
+# .dockerignore — exclude everything by default, opt files into the build
+# context explicitly. This stops the build from inheriting host secrets
+# (.env, wal directories, *.pem) and keeps image layers small.
+#
+# Builder stage in deploy/Dockerfile does `COPY . /build/gateway` then
+# `pip wheel --no-deps`. pyproject.toml's package-data globs decide which
+# files end up in the wheel; everything outside that path is dead weight.
+*
+
+# --- What the wheel needs to be built ---
+!src/
+!pyproject.toml
+!README.md
+!LICENSE
+
+# --- Build-time files we want to avoid even inside src/ ---
+src/**/__pycache__
+src/**/*.pyc
+src/**/*.pyo
+src/gateway/lineage/dashboard/node_modules
+src/gateway/lineage/dashboard/.vite
+
+# --- Secrets and runtime state — never bake these into image layers ---
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/gateway-bootstrap-key.txt
+**/walacor-wal*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log

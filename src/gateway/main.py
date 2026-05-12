@@ -833,7 +833,7 @@ def _init_budget_tracker(settings, ctx) -> None:
 
 
 def _init_session_chain(settings, ctx) -> None:
-    """Phase 13: Merkle session chain tracker (in-memory or Redis-backed)."""
+    """Initialise the UUIDv7 ID-pointer session chain tracker (in-memory or Redis-backed)."""
     if not settings.session_chain_enabled:
         return
     from gateway.pipeline.session_chain import make_session_chain_tracker

@@ -1096,9 +1096,20 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
 
   const onAttestAll = async () => {
     if (!pendingModels.length) return;
-    if (!window.confirm(`Register all ${pendingModels.length} discovered models?`)) return;
+    // Probe ran and at least one model came back uncallable → only register the
+    // ones that responded. callable=null means probe wasn't run; treat as callable.
+    const eligible = pendingModels.filter(m => m.callable !== false);
+    if (!eligible.length) {
+      alert('No callable models to register. Re-run discovery or check provider keys.');
+      return;
+    }
+    const skipped = pendingModels.length - eligible.length;
+    const prompt = skipped > 0
+      ? `Register ${eligible.length} callable model(s)? Skipping ${skipped} that the upstream provider rejected.`
+      : `Register all ${eligible.length} discovered models?`;
+    if (!window.confirm(prompt)) return;
     try {
-      await Promise.all(pendingModels.map(m =>
+      await Promise.all(eligible.map(m =>
         createAttestation({ model_id: m.id, provider: m.provider, status: 'active' })
           .catch(e => ({ error: String(e?.message || e), id: m.id }))
       ));
@@ -1232,29 +1243,43 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
               <tr>
                 <th>Provider</th>
                 <th>Model</th>
+                <th style={{ width: 130 }}>Upstream</th>
                 <th style={{ width: 120 }}>Context</th>
                 <th style={{ width: 140 }}>First seen</th>
                 <th style={{ width: 160 }}></th>
               </tr>
             </thead>
             <tbody>
-              {pendingModels.map((m, i) => (
-                <tr key={i}>
-                  <td><span className="cp-row-primary">{m.provider}</span></td>
-                  <td className="cp-mono">{m.id}</td>
-                  <td className="cp-mono">{m.context != null ? m.context.toLocaleString() + ' tok' : '—'}</td>
-                  <td className="cp-mono cp-dim">{m.seen_at ? timeAgo(m.seen_at) : '—'}</td>
-                  <td>
-                    <div className="cp-row-actions">
-                      <button
-                        className="cp-btn cp-btn-sm cp-btn-primary"
-                        disabled={!canWrite}
-                        onClick={!canWrite ? onUnlock : () => onAttestOne(m)}
-                      >attest →</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {pendingModels.map((m, i) => {
+                const uncallable = m.callable === false;
+                const callable = m.callable === true;
+                const statusLabel = callable ? 'callable' : uncallable ? 'unavailable' : 'not probed';
+                const statusClass = callable ? 'cp-badge ok' : uncallable ? 'cp-badge breach' : 'cp-badge offline';
+                return (
+                  <tr key={i}>
+                    <td><span className="cp-row-primary">{m.provider}</span></td>
+                    <td className="cp-mono">{m.id}</td>
+                    <td>
+                      <span
+                        className={statusClass}
+                        title={m.unavailable_reason || (callable ? 'Upstream responded to a 1-token probe' : 'Probe not run — re-run discovery to verify')}
+                      >{statusLabel}</span>
+                    </td>
+                    <td className="cp-mono">{m.context != null ? m.context.toLocaleString() + ' tok' : '—'}</td>
+                    <td className="cp-mono cp-dim">{m.seen_at ? timeAgo(m.seen_at) : '—'}</td>
+                    <td>
+                      <div className="cp-row-actions">
+                        <button
+                          className="cp-btn cp-btn-sm cp-btn-primary"
+                          disabled={!canWrite || uncallable}
+                          title={uncallable ? `Upstream rejected this model: ${m.unavailable_reason || 'unknown reason'}` : ''}
+                          onClick={!canWrite ? onUnlock : () => onAttestOne(m)}
+                        >attest →</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -1432,6 +1457,9 @@ export default function Control({ navigate }) {
         context: m.context_length || null,
         seen_at: m.seen_at || null,
         attested: attestedIds.has(m.model_id) || m.registered === true,
+        // null = probe wasn't run; true/false = upstream confirmed/refused
+        callable: typeof m.callable === 'boolean' ? m.callable : null,
+        unavailable_reason: m.unavailable_reason || null,
       }));
 
       setProviders({ providers, discovered_models });

@@ -74,8 +74,10 @@ class HuggingFaceAdapter(ProviderAdapter):
         if original.url.query:
             url += f"?{original.url.query}"
         headers = dict(original.headers)
+        for stripped in ("content-length", "host", "authorization", "x-api-key"):
+            headers.pop(stripped, None)
         if self._api_key:
-            headers.setdefault("Authorization", f"Bearer {self._api_key}")
+            headers["Authorization"] = f"Bearer {self._api_key}"
         return httpx.Request(method=original.method, url=url, headers=headers, content=call.raw_body)
 
     def parse_response(self, response: httpx.Response) -> ModelResponse:

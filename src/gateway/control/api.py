@@ -599,7 +599,15 @@ async def control_discover_models(request: Request) -> JSONResponse:
     try:
         from gateway.control.discovery import discover_provider_models
 
-        discovered = await discover_provider_models(settings, ctx.http_client)
+        # Default ON: probe each discovered model with a 1-token chat completion so
+        # the admin sees which models the configured upstream keys can actually
+        # call. Opt out with ?live_check=false for a fast list-only sweep.
+        live_check_param = request.query_params.get("live_check", "true").lower()
+        live_check = live_check_param not in ("0", "false", "no", "off")
+
+        discovered = await discover_provider_models(
+            settings, ctx.http_client, live_check=live_check
+        )
 
         # Mark which models are already registered
         tenant_id = _tenant(request)
