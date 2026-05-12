@@ -276,15 +276,42 @@ class _Int05AnchorRoundTrip:
         if ctx.walacor_client is None:
             return CheckResult(status="amber", detail="Walacor client not available", elapsed_ms=elapsed_ms())
 
-        # Round-trip strategy:
-        #   1. Fetch /envelopes/hashes to find an anchored EId (DH non-null).
-        #   2. Re-query that EId via /query/getcomplex to confirm the data
-        #      record still exists at the same EId — i.e. the anchor proof
-        #      and the data are in sync. (Mismatch ⇒ data deleted or moved
-        #      under the anchor, which would invalidate the proof.)
-        # We deliberately don't compare DH-against-recomputed-hash here — that
-        # would require client-side encryption parity with OCM, which is out
-        # of scope for a readiness check.
+        # Round-trip strategy (corrected for Walacor's actual two-table model):
+        # /envelopes/hashes and /query/getcomplex are loosely-correlated
+        # SEPARATE collections, not two views of the same submit. Not every
+        # data record gets a hash entry, and not every hash entry has a data
+        # record — that asymmetry is normal backend behaviour. The integrity
+        # guarantee we care about is:
+        #
+        #     "For at least one recent gateway-issued record, does its EId
+        #      have a matching DH on the hashes endpoint?"
+        #
+        # If yes, the gateway → data table → hash table → DH anchor chain
+        # is functional end-to-end. If zero recent records round-trip,
+        # anchoring is broken for new traffic.
+        settings = get_settings()
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        try:
+            data_recs = await ctx.walacor_client.query_complex(
+                settings.walacor_executions_etid,
+                [
+                    {"$match": {"timestamp": {"$lte": cutoff_iso}}},
+                    {"$sort": {"timestamp": -1}},
+                    {"$limit": 10},
+                    {"$project": {"EId": 1, "execution_id": 1, "timestamp": 1}},
+                ],
+            )
+        except Exception as exc:
+            return CheckResult(status="amber", detail=f"Data-record fetch failed: {exc}", elapsed_ms=elapsed_ms())
+
+        recent = [r for r in data_recs if r.get("EId")]
+        if not recent:
+            return CheckResult(
+                status="amber",
+                detail="No data records older than 2m to round-trip yet",
+                elapsed_ms=elapsed_ms(),
+            )
+
         try:
             hashes = await ctx.walacor_client.list_envelope_hashes(
                 settings.walacor_executions_etid
@@ -292,72 +319,37 @@ class _Int05AnchorRoundTrip:
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Hashes fetch failed: {exc}", elapsed_ms=elapsed_ms())
 
-        # Eligibility window: hashes between 2 minutes (consistency cutoff)
-        # and 1 hour old. The upper bound excludes long-stale orphan entries
-        # left over from operator probes / failed-validation submits that
-        # legitimately have no data record. The check focuses on current
-        # gateway traffic — the signal we actually want is "is anchoring
-        # functional right now," not "is the historical hash table clean."
-        now_ms = datetime.now(timezone.utc).timestamp() * 1000
-        upper_cutoff = int(now_ms - 2 * 60 * 1000)            # 2 minutes ago
-        lower_cutoff = int(now_ms - 60 * 60 * 1000)           # 1 hour ago
-        anchored = [
-            h for h in hashes
-            if h.get("DH") and h.get("EId")
-            and isinstance(h.get("CreatedAt"), (int, float))
-            and lower_cutoff <= h["CreatedAt"] <= upper_cutoff
-        ]
-        if not anchored:
+        hash_by_eid = {h["EId"]: h for h in hashes if h.get("EId") and h.get("DH")}
+        anchored = [r for r in recent if r["EId"] in hash_by_eid]
+
+        if anchored:
+            # At least one recent record round-tripped — anchoring chain is
+            # functional. Report the rate as evidence.
+            pick = anchored[0]
             return CheckResult(
-                status="amber",
-                detail="No anchored records in the 2m-60m fresh-traffic window to probe",
+                status="green",
+                detail=(
+                    f"Round-trip verified — {len(anchored)}/{len(recent)} recent "
+                    f"gateway records have DH anchors"
+                ),
+                evidence={
+                    "sampled": len(recent),
+                    "anchored": len(anchored),
+                    "verified_eid": pick["EId"],
+                    "execution_id": pick.get("execution_id"),
+                    "dh_prefix": (hash_by_eid[pick["EId"]].get("DH") or "")[:16],
+                },
                 elapsed_ms=elapsed_ms(),
             )
 
-        # Sample multiple candidates rather than flipping the whole check on
-        # one random pick. Orphan hash entries can exist for legitimate reasons
-        # — operator-issued probes that failed schema validation but still
-        # generated a hash table row, or soft-deleted data records. We report
-        # an aggregate hash↔data match rate and only red if a strong majority
-        # are orphaned, which would indicate real corruption.
-        sample_size = min(10, len(anchored))
-        picks = random.sample(anchored, sample_size)
-        # Single batched query: match all sampled EIds at once.
-        eids = [p["EId"] for p in picks]
-        try:
-            result = await ctx.walacor_client.query_complex(
-                settings.walacor_executions_etid,
-                [{"$match": {"EId": {"$in": eids}}}, {"$project": {"EId": 1, "execution_id": 1}}],
-            )
-        except Exception as exc:
-            return CheckResult(
-                status="red",
-                detail=f"Walacor data-record round-trip failed: {exc}",
-                remediation="Hashes endpoint reachable but /query/getcomplex isn't — partial outage",
-                evidence={"sample": sample_size},
-                elapsed_ms=elapsed_ms(),
-            )
-
-        matched_eids = {r.get("EId") for r in result if r.get("EId")}
-        matched = sum(1 for p in picks if p["EId"] in matched_eids)
-        pct = matched / sample_size
-        if pct >= 0.9:
-            status = "green"
-        elif pct >= 0.5:
-            status = "amber"
-        else:
-            status = "red"
-        detail = f"{matched}/{sample_size} sampled anchors have matching data records ({pct:.0%})"
-        if matched < sample_size:
-            detail += " — orphans likely from failed-validation probes"
         return CheckResult(
-            status=status,
-            detail=detail,
-            remediation=None if status == "green" else (
-                "Many DH anchors lack matching data records — check Walacor data-table integrity "
-                "and review recent submits for schema validation failures"
+            status="red",
+            detail=f"0/{len(recent)} recent gateway records have a DH anchor — round-trip broken",
+            remediation=(
+                "Recent gateway writes succeeded but no matching DH appears on the hashes "
+                "endpoint. Check Walacor OCM worker — anchoring may be paused or behind."
             ),
-            evidence={"sampled": sample_size, "matched": matched, "match_pct": round(pct, 2)},
+            evidence={"sampled": len(recent)},
             elapsed_ms=elapsed_ms(),
         )
 
