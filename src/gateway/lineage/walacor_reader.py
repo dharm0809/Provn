@@ -89,6 +89,21 @@ class WalacorLineageReader:
         self._att_etid = attempts_etid
         self._tool_etid = tool_events_etid
 
+    async def _build_hash_lookup(self, etid: int) -> dict[str, dict[str, Any]]:
+        """Fetch /envelopes/hashes for `etid` and return an {EId: hash_rec} map.
+
+        Used by every read path that returns DH/anchor state to the caller.
+        Failure-tolerant: on any error (auth, transport, parse) returns an
+        empty dict so the caller sees walacor_dh=None instead of erroring.
+        Anchor state should never be a hard dependency for displaying data.
+        """
+        try:
+            hashes = await self._client.list_envelope_hashes(etid)
+        except Exception as exc:
+            logger.warning("WalacorLineageReader hash lookup failed for etid=%d: %s", etid, exc)
+            return {}
+        return {h["EId"]: h for h in hashes if isinstance(h, dict) and h.get("EId")}
+
     # ── Sessions ──────────────────────────────────────────────────────────
 
     async def list_sessions(
@@ -329,11 +344,13 @@ class WalacorLineageReader:
             "as": "env",
         }})
         rows = await self._client.query_complex(self._exec_etid, pipeline)
+        # Fetch the OCM hashes once for this ETId; join per-record below.
+        hash_lookup = await self._build_hash_lookup(self._exec_etid)
         results = []
         for r in rows:
             _deserialize_record(r)
             r["_walacor_eid"] = r.get("EId")
-            _normalize_record(r)
+            _normalize_record(r, hash_lookup=hash_lookup)
             results.append(r)
         return results
 
@@ -356,7 +373,14 @@ class WalacorLineageReader:
         r = rows[0]
         _deserialize_record(r)
         r["_walacor_eid"] = r.get("EId")
-        _normalize_record(r)
+        # Single-record fetch: cheaper to ask for just this EId's hash.
+        try:
+            single_hash = await self._client.get_envelope_hash(self._exec_etid, r.get("EId") or "")
+        except Exception as exc:
+            logger.warning("get_envelope_hash failed for %s: %s", execution_id, exc)
+            single_hash = None
+        hash_lookup = {r["EId"]: single_hash} if single_hash and r.get("EId") else {}
+        _normalize_record(r, hash_lookup=hash_lookup)
         return r
 
     async def get_tool_events(self, execution_id: str) -> list[dict]:

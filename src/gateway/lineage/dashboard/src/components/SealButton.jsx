@@ -55,14 +55,25 @@ export default function SealButton({ state, isOpen, onToggle }) {
  * Compute the seal-button state for a record. Exposed as a named
  * helper so Timeline can decide whether to render the button AND
  * whether the drawer is allowed to open for this record.
+ *
+ * Anchor proof on Walacor:
+ *   DH (DataHash) is the primary tamper-evidence anchor — populated
+ *     immediately by OCM when the envelope is submitted. A non-null DH
+ *     means the record is cryptographically anchored.
+ *   BlockId / TransId are the secondary public-blockchain commit ids,
+ *     written when OCM batches a chain transaction. They may lag DH by
+ *     minutes-to-hours depending on backend batching policy; their
+ *     absence does NOT mean the record is unsealed.
+ *
+ * Previously this function required BlockId/TransId/DH together, which
+ * left every record stuck at "pending" because that backend batches
+ * the chain commit asynchronously. Treat DH as the source of truth.
  */
 export function sealState(r) {
   if (!r) return 'hidden';
-  const anchored = r.walacor_block_id && r.walacor_trans_id && r.walacor_dh;
-  if (anchored) return 'sealed';
-  // Record exists but anchor fields aren't populated yet. We show the
-  // pending state when there's any signal that anchoring was expected:
-  // a Walacor EId hint, a legacy envelope blob, or an explicit flag.
+  if (r.walacor_dh) return 'sealed';
+  // No DH yet. Show pending iff there's any signal that anchoring was
+  // expected: a Walacor EId hint, a legacy envelope blob, or an explicit flag.
   const expected = r._walacor_eid || r.EId || r._envelope || r.walacor_storage_enabled;
   if (expected) return 'pending';
   return 'hidden';

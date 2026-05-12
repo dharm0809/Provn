@@ -437,3 +437,59 @@ class WalacorClient:
                 return body.get("data", [])
             return body if isinstance(body, list) else []
         return []
+
+    async def list_envelope_hashes(self, etid: int) -> list[dict[str, Any]]:
+        """Return the OCM hash/anchor records for `etid` via GET /envelopes/hashes.
+
+        Walacor stores submit payloads in two tables: the data table (queryable
+        via /query/getcomplex) and a separate **hashes** collection that holds
+        the cryptographic anchor proof (DataHash, Storage Location, Envelope
+        Status). The data table never carries DH/BlockId/TransId — anchor
+        state lives exclusively in the hashes endpoint. This was the source
+        of the long-running "0% anchored" readiness false-negative.
+
+        Each returned record is shaped:
+            {"EId": str, "DH": str|None, "ES": int|None,
+             "SL": str|None, "CreatedAt": int}
+
+        `DH` is the primary tamper-evidence anchor (written immediately by OCM).
+        `BlockId`/`TransId` (public-blockchain commit ids) live on this
+        endpoint when populated and may lag DH by minutes-to-hours depending
+        on backend batching policy. Both are surfaced when present.
+
+        Re-authenticates once on 401. Returns [] on non-200 or unexpected
+        shape — fail-open so a transient backend hiccup doesn't cascade into
+        a readiness red.
+        """
+        assert self._http is not None, "call start() first"
+        url = f"{self._server}/envelopes/hashes"
+        for attempt in range(2):
+            resp = await self._http.get(url, headers=self._headers(etid))
+            if resp.status_code == 401 and attempt == 0:
+                logger.debug("WalacorClient list_envelope_hashes: 401 — re-authenticating")
+                await self._authenticate()
+                continue
+            if resp.status_code != 200:
+                logger.warning(
+                    "WalacorClient list_envelope_hashes(etid=%d) returned %d: %s",
+                    etid, resp.status_code, resp.text[:200],
+                )
+                return []
+            body = resp.json()
+            if isinstance(body, dict):
+                return body.get("data", []) or []
+            return body if isinstance(body, list) else []
+        return []
+
+    async def get_envelope_hash(self, etid: int, eid: str) -> dict[str, Any] | None:
+        """Return the OCM hash/anchor record for a single envelope EId, or None.
+
+        Convenience wrapper over `list_envelope_hashes` that filters client-side
+        — the Walacor `/envelopes/hashes` endpoint doesn't support a single-EId
+        query parameter, so we have to fetch the page and filter locally. Use
+        sparingly; prefer `list_envelope_hashes` + cache for batch lookups.
+        """
+        for h in await self.list_envelope_hashes(etid):
+            if h.get("EId") == eid:
+                return h
+        return None

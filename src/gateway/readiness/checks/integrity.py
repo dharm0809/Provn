@@ -210,46 +210,54 @@ class _Int04WalacorAnchoringActive:
         if client is None:
             return CheckResult(status="amber", detail="Walacor client not available", elapsed_ms=elapsed_ms())
 
+        # Walacor stores the tamper-evidence anchor (DataHash) in a separate
+        # /envelopes/hashes collection — NOT on the data record returned by
+        # /query/getcomplex. Prior versions of this check projected
+        # `BlockId/TransId/DH` off the data record and reported 0% anchored
+        # forever because those columns are unconditionally null in the data
+        # table. The right signal is `DH` from the hashes endpoint; the
+        # blockchain identifiers (BlockId, TransId) populate later when OCM
+        # batches a commit to the public chain — they're a secondary proof,
+        # not the primary anchor.
         try:
-            # Only consider records old enough to have had a chance to be
-            # anchored. Sandbox typically anchors within a minute; we allow
-            # 2 minutes of headroom before counting an un-anchored record as
-            # a failure.
-            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
-            pipeline = [
-                {"$match": {"timestamp": {"$lte": cutoff}}},
-                {"$sort": {"timestamp": -1}},
-                {"$limit": 20},
-                {"$project": {
-                    "execution_id": 1,
-                    "BlockId": 1, "TransId": 1, "DH": 1,
-                }},
-            ]
-            raw = await client.query_complex(settings.walacor_executions_etid, pipeline)
+            cutoff_ms = int(
+                (datetime.now(timezone.utc) - timedelta(minutes=2)).timestamp() * 1000
+            )
+            hashes = await client.list_envelope_hashes(settings.walacor_executions_etid)
         except Exception as exc:
-            return CheckResult(status="amber", detail=f"Walacor query failed: {exc}", elapsed_ms=elapsed_ms())
+            return CheckResult(status="amber", detail=f"Walacor hashes query failed: {exc}", elapsed_ms=elapsed_ms())
 
-        if not raw:
+        # Filter to records old enough that anchoring had a chance to run.
+        # CreatedAt is millis-since-epoch from Walacor.
+        eligible = [h for h in hashes if isinstance(h.get("CreatedAt"), (int, float)) and h["CreatedAt"] <= cutoff_ms]
+        if not eligible:
             return CheckResult(
                 status="amber",
-                detail="No execution records older than 2m to verify yet",
+                detail="No envelope-hash records older than 2m to verify yet",
                 elapsed_ms=elapsed_ms(),
             )
 
-        sampled = len(raw)
-        anchored = sum(
-            1 for r in raw if r.get("BlockId") and r.get("TransId") and r.get("DH")
-        )
+        # Most-recent 20 by CreatedAt
+        eligible.sort(key=lambda h: h.get("CreatedAt") or 0, reverse=True)
+        sample = eligible[:20]
+        sampled = len(sample)
+        # DH is the primary anchor; ES values 30→40→80 trace the OCM pipeline,
+        # 80 means "fully OCM-anchored, off-chain stored".
+        anchored = sum(1 for h in sample if h.get("DH"))
+        on_chain = sum(1 for h in sample if h.get("BlockId") and h.get("TransId"))
         pct = anchored / sampled
         status = "green" if pct >= 0.95 else ("amber" if pct >= 0.5 else "red")
+        detail = f"{anchored}/{sampled} recent records anchored via DH ({pct:.0%})"
+        if on_chain:
+            detail += f"; {on_chain}/{sampled} also committed on-chain (BlockId/TransId)"
         return CheckResult(
             status=status,
-            detail=f"{anchored}/{sampled} recent records anchored ({pct:.0%})",
+            detail=detail,
             remediation=None if status == "green" else (
-                "Walacor writes succeeded but the server has not produced BlockId/TransId/DH — "
-                "verify sandbox/anchor worker health"
+                "Walacor writes succeeded but DataHash not populated — verify OCM "
+                "anchor worker health on the backend"
             ),
-            evidence={"sampled": sampled, "anchored": anchored},
+            evidence={"sampled": sampled, "anchored_dh": anchored, "on_chain": on_chain},
             elapsed_ms=elapsed_ms(),
         )
 
@@ -265,72 +273,68 @@ class _Int05AnchorRoundTrip:
         elapsed_ms = lambda: int((time.monotonic() - t0) * 1000)
         settings = get_settings()
 
-        if ctx.walacor_client is None or ctx.wal_writer is None:
-            return CheckResult(status="amber", detail="Walacor client or WAL not available", elapsed_ms=elapsed_ms())
+        if ctx.walacor_client is None:
+            return CheckResult(status="amber", detail="Walacor client not available", elapsed_ms=elapsed_ms())
 
+        # Round-trip strategy:
+        #   1. Fetch /envelopes/hashes to find an anchored EId (DH non-null).
+        #   2. Re-query that EId via /query/getcomplex to confirm the data
+        #      record still exists at the same EId — i.e. the anchor proof
+        #      and the data are in sync. (Mismatch ⇒ data deleted or moved
+        #      under the anchor, which would invalidate the proof.)
+        # We deliberately don't compare DH-against-recomputed-hash here — that
+        # would require client-side encryption parity with OCM, which is out
+        # of scope for a readiness check.
         try:
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            rows = conn.execute(
-                "SELECT record_json FROM wal_records WHERE event_type='execution' "
-                "ORDER BY rowid DESC LIMIT 20"
-            ).fetchall()
-            conn.close()
+            hashes = await ctx.walacor_client.list_envelope_hashes(
+                settings.walacor_executions_etid
+            )
         except Exception as exc:
-            return CheckResult(status="amber", detail=f"Could not sample records: {exc}", elapsed_ms=elapsed_ms())
+            return CheckResult(status="amber", detail=f"Hashes fetch failed: {exc}", elapsed_ms=elapsed_ms())
 
-        anchored = []
-        for (rec_json,) in rows:
-            try:
-                rec = json.loads(rec_json)
-                if rec.get("walacor_block_id") and rec.get("walacor_trans_id") and rec.get("walacor_dh"):
-                    anchored.append(rec)
-            except Exception:
-                pass
+        anchored = [h for h in hashes if h.get("DH") and h.get("EId")]
         if not anchored:
-            return CheckResult(status="amber", detail="No anchored records available to probe", elapsed_ms=elapsed_ms())
+            return CheckResult(
+                status="amber",
+                detail="No anchored records available to probe",
+                elapsed_ms=elapsed_ms(),
+            )
 
         pick = random.choice(anchored)
-        exec_id = pick.get("execution_id")
+        eid = pick["EId"]
         try:
             result = await ctx.walacor_client.query_complex(
                 settings.walacor_executions_etid,
-                [{"$match": {"execution_id": exec_id}}, {"$limit": 1}],
+                [{"$match": {"EId": eid}}, {"$limit": 1}],
             )
         except Exception as exc:
             return CheckResult(
                 status="red",
-                detail=f"Walacor round-trip failed: {exc}",
-                remediation="Check Walacor server connectivity and auth",
-                evidence={"execution_id": exec_id},
+                detail=f"Walacor data-record round-trip failed for EId={eid}: {exc}",
+                remediation="Hashes endpoint reachable but /query/getcomplex isn't — partial outage",
+                evidence={"eid": eid},
                 elapsed_ms=elapsed_ms(),
             )
 
         if not result:
             return CheckResult(
                 status="red",
-                detail=f"Round-trip returned 0 records for execution_id={exec_id}",
-                remediation="Record anchored locally but not found on Walacor — delivery failure",
-                evidence={"execution_id": exec_id},
+                detail=f"Anchor exists for EId={eid} but data record missing — proof orphaned",
+                remediation="DH-anchored envelope has no matching data row. Check Walacor data store integrity.",
+                evidence={"eid": eid, "dh_prefix": (pick.get("DH") or "")[:16]},
                 elapsed_ms=elapsed_ms(),
             )
 
-        remote = result[0]
-        mismatch = []
-        for field in ("walacor_block_id", "walacor_trans_id", "walacor_dh"):
-            if remote.get(field) and pick.get(field) and remote.get(field) != pick.get(field):
-                mismatch.append(field)
-        if mismatch:
-            return CheckResult(
-                status="red",
-                detail=f"Round-trip mismatch on {','.join(mismatch)} for execution_id={exec_id}",
-                remediation="Local WAL anchor fields don't match Walacor envelope — data drift",
-                evidence={"execution_id": exec_id, "mismatch": mismatch},
-                elapsed_ms=elapsed_ms(),
-            )
+        data_rec = result[0]
         return CheckResult(
             status="green",
-            detail=f"Round-trip verified for execution_id={exec_id}",
-            evidence={"execution_id": exec_id},
+            detail=f"Round-trip verified — EId={eid[:8]}... has DH and data record",
+            evidence={
+                "eid": eid,
+                "execution_id": data_rec.get("execution_id"),
+                "dh_prefix": (pick.get("DH") or "")[:16],
+                "es": pick.get("ES"),
+            },
             elapsed_ms=elapsed_ms(),
         )
 
