@@ -118,6 +118,8 @@ and rotation cheap, use this naming convention:
 scripts/rotate-key.sh walacor              # rotates the team key in place
 scripts/rotate-key.sh acme-corp            # mints a 256-bit external key for acme-corp
 scripts/rotate-key.sh acme-corp --revoke   # removes all keys owned by acme-corp
+scripts/rotate-key.sh --revoke-bootstrap   # drops the auto-generated wgk-<32hex> bootstrap keys
+                                           # (refuses if no managed key would remain)
 ```
 The script edits `.env`, updates `.keys-registry.yaml` (owner / purpose /
 created_at), and `docker compose up -d gateway` so the change is live in

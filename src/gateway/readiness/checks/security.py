@@ -19,6 +19,19 @@ def _is_prod_host(settings) -> bool:
     return host not in ("", "127.0.0.1", "localhost", "::1")
 
 
+def _is_managed_key(key: str) -> bool:
+    """True if a key follows the managed `wgk-<label>-<entropy>` convention.
+
+    The auto-generated bootstrap key has only one dash separator
+    (`wgk-<32 hex>`); a managed key minted by scripts/rotate-key.sh
+    embeds an owner label (`wgk-walacor-<entropy>`,
+    `wgk-acme-corp-<entropy>`) and therefore has at least two dashes.
+    This lets the check recognize the rotate-key.sh flow without needing
+    the host-side .keys-registry.yaml inside the container.
+    """
+    return key.startswith("wgk-") and key.count("-") >= 2
+
+
 class _Sec01ApiKeyEnforced:
     id = "SEC-01"
     name = "API key enforced"
@@ -38,30 +51,61 @@ class _Sec01ApiKeyEnforced:
                 evidence={"key_count": 0},
                 elapsed_ms=elapsed,
             )
-        auto_generated = [k for k in keys if k.startswith("wgk-")]
-        if len(auto_generated) == len(keys):
+        # Distinguish managed keys (rotated through scripts/rotate-key.sh,
+        # named `wgk-<owner>-<entropy>`) from bootstrap keys auto-generated
+        # at boot when none are configured (named `wgk-<32-hex>`). All
+        # managed → green. Any bootstrap present → amber prompting rotation.
+        managed = [k for k in keys if _is_managed_key(k)]
+        bootstrap = [k for k in keys if k.startswith("wgk-") and not _is_managed_key(k)]
+        external = [k for k in keys if not k.startswith("wgk-")]
+        if bootstrap and not managed and not external:
             from gateway.auth.bootstrap_key import bootstrap_key_stable
             stable = bootstrap_key_stable(settings.wal_path)
             detail = (
-                f"{len(keys)} auto-generated wgk-* key(s) in use — "
-                + ("recommend moving to a secret store" if stable
+                f"{len(keys)} auto-generated bootstrap key(s) in use — "
+                + ("rotate via scripts/rotate-key.sh" if stable
                    else "key rotating on every restart (persistence failed)")
             )
             return CheckResult(
                 status="amber",
                 detail=detail,
-                remediation="Replace auto-generated keys with stable credentials from your secret manager",
+                remediation="Run scripts/rotate-key.sh <owner> to mint a managed key, then revoke the bootstrap keys",
                 evidence={
                     "key_count": len(keys),
-                    "auto_generated": len(auto_generated),
+                    "bootstrap": len(bootstrap),
                     "bootstrap_key_stable": stable,
+                },
+                elapsed_ms=elapsed,
+            )
+        if bootstrap:
+            # Mixed state — managed keys present but legacy bootstrap keys
+            # still active. Amber so the operator finishes the migration.
+            return CheckResult(
+                status="amber",
+                detail=(
+                    f"{len(managed)} managed key(s) + {len(bootstrap)} legacy "
+                    "bootstrap key(s) — revoke the legacy ones to go green"
+                ),
+                remediation="Run scripts/rotate-key.sh --revoke-bootstrap to drop auto-gen keys",
+                evidence={
+                    "key_count": len(keys),
+                    "managed": len(managed),
+                    "bootstrap": len(bootstrap),
                 },
                 elapsed_ms=elapsed,
             )
         return CheckResult(
             status="green",
-            detail=f"{len(keys)} API key(s) configured",
-            evidence={"key_count": len(keys)},
+            detail=(
+                f"{len(keys)} API key(s) configured "
+                f"({len(managed)} managed, {len(external)} external)"
+                if managed else f"{len(keys)} API key(s) configured"
+            ),
+            evidence={
+                "key_count": len(keys),
+                "managed": len(managed),
+                "external": len(external),
+            },
             elapsed_ms=elapsed,
         )
 

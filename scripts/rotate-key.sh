@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-LABEL="${1:?usage: rotate-key.sh <label> [--revoke]}"
+LABEL="${1:?usage: rotate-key.sh <label> [--revoke] | rotate-key.sh --revoke-bootstrap}"
 ACTION="${2:-rotate}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +28,67 @@ ENV_FILE="$REPO_ROOT/.env"
 REGISTRY="$REPO_ROOT/.keys-registry.yaml"
 
 [ -f "$ENV_FILE" ] || { echo "ERROR: $ENV_FILE not found" >&2; exit 2; }
+
+# ── Bootstrap revoke path ──────────────────────────────────────────────────
+# Removes every key matching the auto-generated bootstrap pattern
+# `wgk-<32 hex>` (one dash after the prefix). Managed keys
+# (`wgk-<label>-<entropy>` — two+ dashes) are preserved.
+#
+# Refuses to run if it would leave WALACOR_GATEWAY_API_KEYS empty, since
+# that would lock the gateway out — at least one managed key must be in
+# place first.
+if [[ "$LABEL" == "--revoke-bootstrap" ]]; then
+    current_line=$(grep -E '^WALACOR_GATEWAY_API_KEYS=' "$ENV_FILE" | head -1)
+    current_keys=${current_line#WALACOR_GATEWAY_API_KEYS=}
+    IFS=',' read -ra keys <<< "$current_keys"
+    new_keys=()
+    revoked=()
+    for k in "${keys[@]}"; do
+        # bootstrap pattern: wgk-<32 hex>, exactly one dash. Use word count
+        # of dash-separated segments rather than regex to keep this portable.
+        dash_count=$(awk -F- '{print NF-1}' <<< "$k")
+        if [[ "$k" == wgk-* ]] && [[ "$dash_count" -eq 1 ]]; then
+            revoked+=("$k")
+        else
+            new_keys+=("$k")
+        fi
+    done
+    if [[ ${#revoked[@]} -eq 0 ]]; then
+        echo "no bootstrap-format keys found — nothing to revoke"; exit 0
+    fi
+    if [[ ${#new_keys[@]} -eq 0 ]]; then
+        echo "ERROR: refusing to revoke — no managed keys would remain." >&2
+        echo "  Mint a managed key first: scripts/rotate-key.sh <owner>" >&2
+        exit 3
+    fi
+    cp "$ENV_FILE" "$ENV_FILE.bak.$(date +%s)"
+    sed -i.tmp -E "s|^WALACOR_GATEWAY_API_KEYS=.*$|WALACOR_GATEWAY_API_KEYS=$(IFS=','; echo "${new_keys[*]}")|" "$ENV_FILE"
+    rm -f "$ENV_FILE.tmp"
+    # Drop matching registry entries
+    if [[ -f "$REGISTRY" ]]; then
+        for rk in "${revoked[@]}"; do
+            python3 - "$REGISTRY" "$rk" <<'PY'
+import re, sys
+path, key = sys.argv[1], sys.argv[2]
+with open(path) as f: lines = f.readlines()
+out, skip = [], False
+for line in lines:
+    if line.strip() == f"- key: {key}":
+        skip = True
+        continue
+    if skip and (line.startswith("    ") or line.startswith("\t")):
+        continue
+    skip = False
+    out.append(line)
+with open(path, "w") as f: f.writelines(out)
+PY
+        done
+    fi
+    echo "revoked ${#revoked[@]} bootstrap key(s); ${#new_keys[@]} managed key(s) remain"
+    cd "$REPO_ROOT" && docker compose up -d gateway >/dev/null 2>&1
+    echo "gateway recreated"
+    exit 0
+fi
 
 # ── Validate label ──────────────────────────────────────────────────────────
 if [[ ! "$LABEL" =~ ^[a-z0-9-]+$ ]]; then
