@@ -292,22 +292,25 @@ class _Int05AnchorRoundTrip:
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Hashes fetch failed: {exc}", elapsed_ms=elapsed_ms())
 
-        # Match INT-04's eligibility window: a record's anchor proof and data
-        # row are written by separate OCM stages, and the hashes endpoint can
-        # be a few seconds ahead of the data table. Only probe records old
-        # enough (2 minutes) that any consistency window has closed.
-        cutoff_ms = int(
-            (datetime.now(timezone.utc) - timedelta(minutes=2)).timestamp() * 1000
-        )
+        # Eligibility window: hashes between 2 minutes (consistency cutoff)
+        # and 1 hour old. The upper bound excludes long-stale orphan entries
+        # left over from operator probes / failed-validation submits that
+        # legitimately have no data record. The check focuses on current
+        # gateway traffic — the signal we actually want is "is anchoring
+        # functional right now," not "is the historical hash table clean."
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        upper_cutoff = int(now_ms - 2 * 60 * 1000)            # 2 minutes ago
+        lower_cutoff = int(now_ms - 60 * 60 * 1000)           # 1 hour ago
         anchored = [
             h for h in hashes
             if h.get("DH") and h.get("EId")
-            and isinstance(h.get("CreatedAt"), (int, float)) and h["CreatedAt"] <= cutoff_ms
+            and isinstance(h.get("CreatedAt"), (int, float))
+            and lower_cutoff <= h["CreatedAt"] <= upper_cutoff
         ]
         if not anchored:
             return CheckResult(
                 status="amber",
-                detail="No anchored records older than 2m available to probe",
+                detail="No anchored records in the 2m-60m fresh-traffic window to probe",
                 elapsed_ms=elapsed_ms(),
             )
 
