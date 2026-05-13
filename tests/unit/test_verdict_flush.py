@@ -61,6 +61,41 @@ async def test_flush_respects_batch_size(tmp_path):
     assert count == 25
 
 
+async def test_flush_persists_divergence_signal(tmp_path):
+    """divergence_signal + divergence_source must reach SQLite.
+
+    Regression: the INSERT statement previously omitted these columns,
+    so the heuristic teacher signal computed by the mapper was dropped
+    on the floor and the distillation dataset builder had nothing to
+    train on (`WHERE divergence_signal IS NOT NULL` matched 0 rows).
+    """
+    db = IntelligenceDB(str(tmp_path / "int.db"))
+    db.init_schema()
+    buf = VerdictBuffer(max_size=10)
+    buf.record(
+        ModelVerdict(
+            model_name="schema_mapper",
+            input_hash="abc123",
+            input_features_json='{"feature_vector": [0.0], "field_path": "usage.cached_tokens"}',
+            prediction="UNKNOWN",
+            confidence=0.4,
+            request_id="req-1",
+            divergence_signal="cached_tokens",
+            divergence_source="schema_mapper_heuristic",
+        )
+    )
+    worker = VerdictFlushWorker(buf, db, flush_interval_s=0.01, batch_size=10)
+    task = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.1)
+    worker.stop()
+    await task
+    with sqlite3.connect(db.path) as conn:
+        row = conn.execute(
+            "SELECT divergence_signal, divergence_source FROM onnx_verdicts LIMIT 1"
+        ).fetchone()
+    assert row == ("cached_tokens", "schema_mapper_heuristic")
+
+
 async def test_flush_persists_iso8601_timestamp(tmp_path):
     db = IntelligenceDB(str(tmp_path / "int.db"))
     db.init_schema()

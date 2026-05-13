@@ -11,11 +11,19 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 # Native libs for WeasyPrint (PDF compliance export). Without these the
 # /v1/compliance/export?format=pdf endpoint returns 501 at runtime.
+# `locales` + `en_US.UTF-8` are required by the intent ONNX model — its
+# StringNormalizer op calls std::locale("en_US.UTF-8") on load; without
+# the locale generated, the InferenceSession fails to initialize and
+# IntentClassifier silently falls back to a 0.5-confidence default.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         libpango-1.0-0 libpangoft2-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
-        libharfbuzz0b libffi8 shared-mime-info && \
+        libharfbuzz0b libffi8 shared-mime-info \
+        locales && \
+    sed -i '/^# en_US.UTF-8/s/^# //' /etc/locale.gen && \
+    locale-gen && \
     rm -rf /var/lib/apt/lists/*
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 RUN useradd --create-home --uid 1000 app
 COPY --from=builder /wheels /wheels
 # Compliance PDF (jinja2 + weasyprint) is bundled because the Pango/Cairo
