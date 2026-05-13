@@ -84,4 +84,28 @@ walacor-gateway = "gateway.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-gateway = ["lineage/static/**"]
+# Every non-Python data file the gateway loads at runtime. Bundling these
+# in the wheel is what lets a fresh container start without pre-populated
+# volume state — without these globs the SafetyClassifier, SchemaMapper,
+# IntentClassifier, sanity runner, and compliance template loader all
+# fail at boot trying to open files that aren't on disk.
+gateway = [
+  "lineage/static/**",
+  # Safety classifier: ONNX model + TF-IDF vocab/IDF + SVD components + labels.
+  # Missing any of these → 200-d feature vector can't be computed → ONNX
+  # raises INVALID_ARGUMENT and the analyzer fails-open on every request.
+  "content/*.json",
+  "content/*.npy",
+  "content/*.onnx",
+  # Schema mapper: 139-d ONNX + label list. Without these the mapper can't
+  # bootstrap and per-field verdict capture is empty.
+  "schema/*.json",
+  "schema/*.onnx",
+  # Intent classifier: ONNX + label list + threshold params.
+  "classifier/*.json",
+  "classifier/*.onnx",
+  # Sanity tests run pre-promotion on candidate models.
+  "intelligence/sanity_tests/*.json",
+  # Compliance/policy templates (SOC2, HIPAA, OWASP-LLM-Top-10, EU AI Act).
+  "control/templates/*.json",
+]
