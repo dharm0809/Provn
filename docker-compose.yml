@@ -2,7 +2,7 @@
 #
 #   docker compose up
 #
-# Starts Gateway + Ollama + OpenWebUI
+# Starts Gateway + OpenWebUI
 # OpenWebUI: http://localhost:3000          (override with OPENWEBUI_PORT)
 # Gateway health: http://localhost:8002/health
 # Gateway lineage: http://localhost:8002/lineage/
@@ -22,29 +22,19 @@
 # The .env.gateway.example is also the source of truth for the
 # test_env_propagation.py CI check.
 #
-# Why deployment-shape constants (WALACOR_PROVIDER_OLLAMA_URL,
-# OPENAI_API_BASE_URL, WALACOR_WAL_PATH) live in `environment:` rather
-# than env files: they reference docker-network hostnames and container
-# paths, not user-overridable config. They change when the deployment
-# shape changes (e.g. moving to k8s), not when the user changes a key.
+# Why deployment-shape constants (OPENAI_API_BASE_URL, WALACOR_WAL_PATH)
+# live in `environment:` rather than env files: they reference
+# docker-network hostnames and container paths, not user-overridable
+# config. They change when the deployment shape changes (e.g. moving to
+# k8s), not when the user changes a key.
+#
+# Ollama is intentionally not bundled. The CPU instances we deploy on
+# (m6a.xlarge, no GPU) can't run local models at useful latency, and the
+# native daemon used to bind 0.0.0.0:11434 which created a governance
+# bypass. Local-model traffic should go through an external Ollama / vLLM
+# endpoint pointed at via WALACOR_PROVIDER_OLLAMA_URL in .env.gateway.
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: gateway-ollama
-    environment:
-      - OLLAMA_KEEP_ALIVE=24h
-      - OLLAMA_NUM_PARALLEL=2
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 15s
-      timeout: 5s
-      start_period: 20s
-      retries: 5
-
   gateway:
     image: ${GATEWAY_IMAGE:-}
     container_name: gateway-app
@@ -56,17 +46,11 @@ services:
       # below). Default 8002 keeps existing local-dev / CI scripts working.
       - "${GATEWAY_PORT:-8002}:8000"
     environment:
-      # Deployment-shape constants. The values reference compose-internal
-      # hostnames / volume paths and never come from user-managed .env.
-      - WALACOR_PROVIDER_OLLAMA_URL=http://ollama:11434
       - WALACOR_WAL_PATH=/var/walacor/wal
     env_file:
       - .env.gateway
     volumes:
       - gateway-wal:/var/walacor/wal
-    depends_on:
-      ollama:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -100,5 +84,4 @@ services:
 
 volumes:
   gateway-wal: {}
-  ollama_data: {}
   webui-data: {}
