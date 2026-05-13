@@ -21,8 +21,9 @@ RUN useradd --create-home --uid 1000 app
 COPY --from=builder /wheels /wheels
 # Compliance PDF (jinja2 + weasyprint) is bundled because the Pango/Cairo
 # system libs installed above are useless without it — /v1/compliance/export
-# returns 501 otherwise.
-RUN pip install --no-cache-dir /wheels/*.whl 'jinja2>=3.1' 'weasyprint>=62.0' && rm -rf /wheels
+# returns 501 otherwise. cryptography is bundled because Ed25519 record signing
+# (WALACOR_RECORD_SIGNING_ENABLED) lives in src/gateway/crypto/signing.py.
+RUN pip install --no-cache-dir /wheels/*.whl 'jinja2>=3.1' 'weasyprint>=62.0' 'cryptography>=42.0' && rm -rf /wheels
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=2 \

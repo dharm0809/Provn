@@ -21,7 +21,10 @@ COPY --from=builder /wheels /wheels
 # Compliance PDF (jinja2 + weasyprint) is bundled because the Pango/Cairo
 # system libs installed above are useless without it — /v1/compliance/export
 # returns 501 otherwise. duckduckgo-search powers the built-in web tool.
-RUN pip install --no-cache-dir /wheels/*.whl duckduckgo-search 'jinja2>=3.1' 'weasyprint>=62.0' && rm -rf /wheels
+# cryptography is bundled because Ed25519 record signing (gated by
+# WALACOR_RECORD_SIGNING_ENABLED) lives in src/gateway/crypto/signing.py —
+# without it the gateway can't sign records even when the flag is on.
+RUN pip install --no-cache-dir /wheels/*.whl duckduckgo-search 'jinja2>=3.1' 'weasyprint>=62.0' 'cryptography>=42.0' && rm -rf /wheels
 RUN mkdir -p /var/walacor/wal && chown app:app /var/walacor/wal
 USER app
 EXPOSE 8000
