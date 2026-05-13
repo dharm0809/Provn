@@ -695,6 +695,30 @@ class Settings(BaseSettings):
     # ── Phase 25: Intelligence / ONNX Self-Learning ──────────────────────────
     intelligence_enabled: bool = Field(default=True, description="Enable ONNX intelligence layer (intent, schema, safety verdict capture and distillation)")
     intelligence_db_path: str = Field(default="", description="SQLite path for intelligence verdict store. Empty defaults to {wal_path}/intelligence.db")
+    # Judge URL/model/key for the distillation worker — replaces the
+    # historical Ollama dependency. Default is gateway self-loopback so
+    # judge traffic flows through the gateway's own governance + audit,
+    # billed against the first WALACOR_GATEWAY_API_KEYS entry.
+    intelligence_judge_url: str = Field(
+        default="http://localhost:8000/v1",
+        description=(
+            "Judge endpoint for distillation. OpenAI-compatible if URL ends "
+            "in /v1 (uses /chat/completions); else falls back to Ollama "
+            "/api/chat. Default is gateway self-loopback."
+        ),
+    )
+    intelligence_judge_model: str = Field(
+        default="claude-haiku-4-5",
+        description="Model used as judge for distillation labels. Must be attested in the control plane.",
+    )
+    intelligence_judge_api_key: str = Field(
+        default="",
+        description=(
+            "API key for the judge endpoint. Empty defaults to the first "
+            "WALACOR_GATEWAY_API_KEYS entry (self-loopback). Set explicitly "
+            "when the judge URL points at an external provider."
+        ),
+    )
     # TODO(#47): not yet implemented. When set, CapabilityRegistry would persist
     # cross-worker capability state (supports_tools, observed latencies) at this
     # path so a fresh uvicorn worker doesn't pay one extra retry-cycle on first
