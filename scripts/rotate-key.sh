@@ -6,16 +6,20 @@
 #   bash scripts/rotate-key.sh new-key --append              # add alongside old key
 #
 # Why this script exists: Docker bakes env vars into containers at *creation*
-# time. Changing WALACOR_GATEWAY_API_KEYS in .env and then running
-# `docker restart` leaves the old key in the running OpenWebUI container's env,
-# so OWUI keeps sending the stale key and the gateway returns 401. This script
-# uses `docker compose up -d --force-recreate` for every container that bakes
-# the gateway key — currently `gateway` and `openwebui` — so the env actually
-# propagates.
+# time. Changing the key in a file and running `docker restart` leaves the old
+# key in the running container's env. This script edits the right files AND
+# does `docker compose up -d --force-recreate` for both services so the new
+# value actually propagates.
+#
+# Files updated:
+#   .env.gateway      → WALACOR_GATEWAY_API_KEYS (the gateway's allowlist)
+#   .env.openwebui    → OPENAI_API_KEY (OWUI's client credential when calling
+#                       the gateway; pinned to the NEW key, not the comma-list)
 
 set -euo pipefail
 
-ENV_FILE="${ENV_FILE:-./.env}"
+GATEWAY_ENV="${GATEWAY_ENV:-./.env.gateway}"
+OWUI_ENV="${OWUI_ENV:-./.env.openwebui}"
 COMPOSE_FILE="${COMPOSE_FILE:-./docker-compose.yml}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:8002/health}"
 
@@ -24,11 +28,13 @@ usage() {
 Usage: bash scripts/rotate-key.sh NEW_KEY [--append]
 
   NEW_KEY     The new wgk-* key to install.
-  --append    Keep the existing key(s) alongside the new one (cut-over window).
-              Without --append the old keys are replaced entirely.
+  --append    Keep the existing key(s) in the gateway allowlist alongside the
+              new one (cut-over window). Without --append the old keys are
+              replaced entirely. OWUI is always pinned to the new key.
 
 Env overrides:
-  ENV_FILE      (default: ./.env)
+  GATEWAY_ENV   (default: ./.env.gateway)   path to gateway env file
+  OWUI_ENV      (default: ./.env.openwebui) path to OpenWebUI env file
   COMPOSE_FILE  (default: ./docker-compose.yml)
   HEALTH_URL    (default: http://localhost:8002/health)
 EOF
@@ -45,44 +51,48 @@ case "${1:-}" in
     *)        usage ;;
 esac
 
-if [ ! -f "$ENV_FILE" ]; then
-    echo "ERROR: $ENV_FILE not found" >&2
-    exit 1
-fi
-if [ ! -f "$COMPOSE_FILE" ]; then
-    echo "ERROR: $COMPOSE_FILE not found" >&2
-    exit 1
-fi
+for f in "$GATEWAY_ENV" "$OWUI_ENV" "$COMPOSE_FILE"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: $f not found" >&2
+        exit 1
+    fi
+done
 
 echo "=== Gateway API key rotation ==="
-echo "  env file:     $ENV_FILE"
-echo "  compose file: $COMPOSE_FILE"
-echo "  mode:         $([ "$APPEND" -eq 1 ] && echo append || echo replace)"
+echo "  gateway env: $GATEWAY_ENV"
+echo "  owui env:    $OWUI_ENV"
+echo "  compose:     $COMPOSE_FILE"
+echo "  mode:        $([ "$APPEND" -eq 1 ] && echo append || echo replace)"
 echo
 
-# Compute the new value for WALACOR_GATEWAY_API_KEYS.
-EXISTING="$(grep -E '^WALACOR_GATEWAY_API_KEYS=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+# ── .env.gateway: WALACOR_GATEWAY_API_KEYS ──────────────────────────────
+EXISTING="$(grep -E '^WALACOR_GATEWAY_API_KEYS=' "$GATEWAY_ENV" | head -1 | cut -d= -f2- || true)"
 if [ "$APPEND" -eq 1 ] && [ -n "$EXISTING" ]; then
     UPDATED="$EXISTING,$NEW_KEY"
 else
     UPDATED="$NEW_KEY"
 fi
 
-# Atomic .env update — sed -i in place isn't atomic on cross-FS targets.
-TMP="$(mktemp "${ENV_FILE}.XXXXXX")"
-trap 'rm -f "$TMP"' EXIT
-grep -vE '^WALACOR_GATEWAY_API_KEYS=' "$ENV_FILE" > "$TMP"
-echo "WALACOR_GATEWAY_API_KEYS=$UPDATED" >> "$TMP"
-# Pin the single OWUI-facing key to the *new* key so OpenWebUI always uses one
-# value, not the comma-list.
-grep -vE '^WEBUI_GATEWAY_API_KEY=' "$TMP" > "$TMP.2"
-mv "$TMP.2" "$TMP"
-echo "WEBUI_GATEWAY_API_KEY=$NEW_KEY" >> "$TMP"
-mv "$TMP" "$ENV_FILE"
+# Atomic write: rewrite the file with the key replaced, then mv into place.
+TMP_GW="$(mktemp "${GATEWAY_ENV}.XXXXXX")"
+trap 'rm -f "$TMP_GW" "$TMP_OWUI"' EXIT
+grep -vE '^WALACOR_GATEWAY_API_KEYS=' "$GATEWAY_ENV" > "$TMP_GW"
+echo "WALACOR_GATEWAY_API_KEYS=$UPDATED" >> "$TMP_GW"
+mv "$TMP_GW" "$GATEWAY_ENV"
+
+# ── .env.openwebui: OPENAI_API_KEY pinned to the new key ───────────────
+# OWUI ships this as `Authorization: Bearer …` to the gateway; we want one
+# value, not the comma-list, so cut-over windows still leave OWUI on a
+# single deterministic key.
+TMP_OWUI="$(mktemp "${OWUI_ENV}.XXXXXX")"
+grep -vE '^OPENAI_API_KEY=' "$OWUI_ENV" > "$TMP_OWUI"
+echo "OPENAI_API_KEY=$NEW_KEY" >> "$TMP_OWUI"
+mv "$TMP_OWUI" "$OWUI_ENV"
 trap - EXIT
 
-echo "[1/3] .env updated."
-grep -E '^(WALACOR_GATEWAY_API_KEYS|WEBUI_GATEWAY_API_KEY)=' "$ENV_FILE" | sed 's/=.*/=***redacted***/'
+echo "[1/3] env files updated."
+grep -E '^WALACOR_GATEWAY_API_KEYS=' "$GATEWAY_ENV" | sed 's/=.*/=***redacted***/'
+grep -E '^OPENAI_API_KEY='            "$OWUI_ENV"    | sed 's/=.*/=***redacted***/'
 
 echo
 echo "[2/3] Force-recreating gateway + openwebui so the new env is picked up..."

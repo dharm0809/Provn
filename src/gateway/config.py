@@ -303,9 +303,21 @@ class Settings(BaseSettings):
 
     # Provider URLs and keys
     provider_openai_url: str = Field(default="https://api.openai.com", description="OpenAI API base URL")
-    provider_openai_key: str = Field(default="", description="API key for OpenAI forwarding")
+    # Also accept the industry-standard OPENAI_API_KEY so an operator can drop
+    # their existing env var straight into .env.gateway without renaming. The
+    # WALACOR_-prefixed name remains canonical for documentation; the alias is
+    # the convenience door. Same rationale for Anthropic below.
+    provider_openai_key: str = Field(
+        default="",
+        description="API key for OpenAI forwarding",
+        validation_alias=AliasChoices("WALACOR_PROVIDER_OPENAI_KEY", "OPENAI_API_KEY", "provider_openai_key"),
+    )
     provider_anthropic_url: str = Field(default="https://api.anthropic.com", description="Anthropic API base URL")
-    provider_anthropic_key: str = Field(default="", description="API key for Anthropic")
+    provider_anthropic_key: str = Field(
+        default="",
+        description="API key for Anthropic",
+        validation_alias=AliasChoices("WALACOR_PROVIDER_ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "provider_anthropic_key"),
+    )
     provider_anthropic_beta_headers: str = Field(
         default="",
         description=(
