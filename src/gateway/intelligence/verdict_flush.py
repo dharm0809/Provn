@@ -136,8 +136,9 @@ class VerdictFlushWorker:
             conn.executemany(
                 "INSERT INTO onnx_verdicts "
                 "(model_name, input_hash, input_features_json, prediction, "
-                "confidence, request_id, timestamp, version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "confidence, request_id, timestamp, version, "
+                "divergence_signal, divergence_source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         v.model_name,
@@ -148,6 +149,8 @@ class VerdictFlushWorker:
                         v.request_id,
                         v.timestamp,
                         v.version,
+                        v.divergence_signal,
+                        v.divergence_source,
                     )
                     for v in verdicts
                 ],
