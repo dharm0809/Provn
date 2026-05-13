@@ -9,6 +9,12 @@ on:
 
 env:
   ECR_REPOSITORY: provn-gateway
+  # Opt every JS-based action into Node 24. GitHub will force this default
+  # on June 2nd 2026; setting it explicitly now silences the deprecation
+  # warnings on actions/checkout@v4, actions/setup-python@v5, etc., and
+  # avoids the inevitable surprise breakage on the day the flip happens.
+  # Reference: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   test:
