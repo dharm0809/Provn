@@ -512,6 +512,24 @@ class Settings(BaseSettings):
 
     # Resilience tuning
     delivery_batch_size: int = Field(default=50, description="WAL delivery batch size per cycle")
+    wal_delivery_max_retries: int = Field(
+        default=10,
+        description=(
+            "Per-record retry budget before a WAL record is moved to the "
+            "dead-letter queue. One bad envelope no longer starves every "
+            "later record — the worker increments the attempt counter on "
+            "each 5xx/transport error and promotes the record to DLQ once "
+            "the budget is exhausted."
+        ),
+    )
+    wal_delivery_batch_error_budget: int = Field(
+        default=5,
+        description=(
+            "How many transport/5xx failures within a single batch trigger "
+            "the worker to back off (sleep _backoff seconds) rather than "
+            "keep hammering an obviously unhealthy aggregator."
+        ),
+    )
     circuit_breaker_fail_max: int = Field(default=5, description="Failures before circuit opens")
     circuit_breaker_reset_timeout: float = Field(default=30.0, description="Seconds before circuit half-open retry")
     retry_max_attempts: int = Field(default=3, description="Max forward retry attempts on transient errors")

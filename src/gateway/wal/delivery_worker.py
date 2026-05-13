@@ -25,6 +25,8 @@ class DeliveryWorker:
     _INITIAL_BACKOFF = 1.0
     _MAX_BACKOFF = 60.0
     _DEFAULT_BATCH_SIZE = 50
+    _DEFAULT_MAX_RETRIES = 10
+    _DEFAULT_BATCH_ERROR_BUDGET = 5
 
     @staticmethod
     def _resolve_batch_size() -> int:
@@ -35,12 +37,32 @@ class DeliveryWorker:
         except Exception:
             return DeliveryWorker._DEFAULT_BATCH_SIZE
 
+    @staticmethod
+    def _resolve_max_retries() -> int:
+        try:
+            s = get_settings()
+            v = getattr(s, "wal_delivery_max_retries", None)
+            return v if isinstance(v, int) and v >= 0 else DeliveryWorker._DEFAULT_MAX_RETRIES
+        except Exception:
+            return DeliveryWorker._DEFAULT_MAX_RETRIES
+
+    @staticmethod
+    def _resolve_batch_error_budget() -> int:
+        try:
+            s = get_settings()
+            v = getattr(s, "wal_delivery_batch_error_budget", None)
+            return v if isinstance(v, int) and v >= 1 else DeliveryWorker._DEFAULT_BATCH_ERROR_BUDGET
+        except Exception:
+            return DeliveryWorker._DEFAULT_BATCH_ERROR_BUDGET
+
     def __init__(self, wal: WALWriter) -> None:
         self._wal = wal
         self._running = False
         self._task: asyncio.Task | None = None
         self._interval = 1.0
         self._batch_size = self._resolve_batch_size()
+        self._max_retries = self._resolve_max_retries()
+        self._batch_error_budget = self._resolve_batch_error_budget()
         self._backoff = self._INITIAL_BACKOFF
         self._max_backoff = self._MAX_BACKOFF
         self._cycles = 0
@@ -50,6 +72,19 @@ class DeliveryWorker:
         # on-call) every time a new DLQ entry is written, plus a periodic
         # rollup so dashboards can scrape from logs if they need to.
         self._dlq_count = 0
+        # Per-record retry counter (in-memory, process-local). Once a
+        # record exceeds ``_max_retries`` it is parked in the WAL DLQ so
+        # later records aren't starved by one poisoned envelope. The map
+        # is pruned by removing the key on delivery / DLQ promotion.
+        # Bounded by ``batch_size`` × pending count — never grows beyond
+        # the live undelivered set.
+        # Alternative considered (and rejected): persist the attempt count
+        # in a new WAL column so retries survive process restarts. The
+        # current behaviour (reset on restart) is acceptable because a
+        # restart already implies operator intervention, and adding a
+        # column would force a schema migration on every existing
+        # deployment for a marginal benefit.
+        self._attempt_counts: dict[str, int] = {}
 
     def start(self) -> None:
         if self._running:
@@ -78,8 +113,16 @@ class DeliveryWorker:
     async def _loop(self) -> None:
         while self._running:
             try:
-                await self._deliver_batch()
-                self._backoff = self._INITIAL_BACKOFF
+                batch_unhealthy = await self._deliver_batch()
+                if batch_unhealthy:
+                    # Aggregator returned failures up to the batch error
+                    # budget. Sleep with exponential backoff before the
+                    # next cycle instead of pinning the CPU on a clearly
+                    # broken endpoint.
+                    await asyncio.sleep(self._backoff)
+                    self._backoff = min(self._backoff * 2, self._max_backoff)
+                else:
+                    self._backoff = self._INITIAL_BACKOFF
                 self._cycles += 1
                 if self._cycles % self._PURGE_CYCLE == 0:
                     settings = get_settings()
@@ -110,13 +153,67 @@ class DeliveryWorker:
             headers["Authorization"] = f"Bearer {key}"
         return headers
 
-    async def _deliver_batch(self) -> None:
+    def _record_transient_failure(
+        self, execution_id: str, reason: str
+    ) -> bool:
+        """Bump the in-memory retry counter; promote to DLQ if exhausted.
+
+        Returns True iff the record was promoted to the DLQ.  When True
+        the caller should continue to the next record in the batch — the
+        WAL row will no longer appear in subsequent ``get_undelivered``
+        results.
+        """
+        attempts = self._attempt_counts.get(execution_id, 0) + 1
+        self._attempt_counts[execution_id] = attempts
+        if attempts < self._max_retries:
+            return False
+        # Exhausted — park in DLQ so the batch isn't starved indefinitely.
+        try:
+            self._wal.mark_dead_lettered(
+                execution_id,
+                f"retries exhausted ({attempts}/{self._max_retries}): {reason}"[:512],
+            )
+        except Exception:
+            logger.warning(
+                "DLQ promotion failed for execution_id=%s after %d retries",
+                execution_id,
+                attempts,
+                exc_info=True,
+            )
+            return False
+        self._attempt_counts.pop(execution_id, None)
+        self._dlq_count += 1
+        delivery_total.labels(result="dead_letter").inc()
+        logger.warning(
+            "Delivery dead-lettered after %d retries execution_id=%s reason=%s dlq_total=%d",
+            attempts,
+            execution_id,
+            reason,
+            self._dlq_count,
+        )
+        return True
+
+    async def _deliver_batch(self) -> bool:
+        """Drain a batch of undelivered records.
+
+        Returns True iff the batch ended unhealthy (the per-batch error
+        budget was exhausted), so ``_loop`` knows to back off. Returning
+        False — including when there are no rows — keeps the loop at its
+        initial polling interval.
+        """
         settings = get_settings()
         base = settings.control_plane_url.rstrip("/")
         headers = self._control_plane_headers()
         batch_size = self._batch_size
         rows = self._wal.get_undelivered(limit=batch_size)
         client = await self._get_client()
+        # Cap the number of failures we will tolerate within a single
+        # batch before backing off the whole loop. A poisoned envelope
+        # no longer starves later records (`continue` per-record), but a
+        # genuinely down aggregator should still trigger the exponential
+        # backoff in `_loop` rather than hammer the same dead URL once
+        # per record at full speed.
+        batch_errors = 0
         for execution_id, record_json, _ in rows:
             try:
                 body = json.loads(record_json)
@@ -128,9 +225,11 @@ class DeliveryWorker:
                 if r.status_code in (200, 201):
                     delivery_total.labels(result="success").inc()
                     self._wal.mark_delivered(execution_id)
+                    self._attempt_counts.pop(execution_id, None)
                 elif r.status_code == 409:
                     delivery_total.labels(result="duplicate").inc()
                     self._wal.mark_delivered(execution_id)
+                    self._attempt_counts.pop(execution_id, None)
                 elif 400 <= r.status_code < 500:
                     # 4xx is non-retryable: the control plane explicitly
                     # rejected the body.  Park the record in the DLQ
@@ -140,18 +239,83 @@ class DeliveryWorker:
                     delivery_total.labels(result="dead_letter").inc()
                     reason = f"HTTP {r.status_code}: {r.text[:200] if r.text else ''}"
                     self._wal.mark_dead_lettered(execution_id, reason)
+                    self._attempt_counts.pop(execution_id, None)
                     self._dlq_count += 1
                     logger.warning(
                         "Delivery dead-lettered execution_id=%s status=%s dlq_total=%d",
                         execution_id, r.status_code, self._dlq_count,
                     )
                 else:
+                    # 5xx — retryable. Don't `break`: a single stuck
+                    # record would starve the entire queue forever. Bump
+                    # the per-record retry counter, promote to DLQ when
+                    # exhausted, then `continue` to the next record.
                     delivery_total.labels(result="error").inc()
-                    logger.warning("Delivery server error for %s: HTTP %s — will retry next cycle", execution_id, r.status_code)
-                    break  # retry entire batch next cycle, don't block remaining records
+                    promoted = self._record_transient_failure(
+                        execution_id, f"HTTP {r.status_code}"
+                    )
+                    if not promoted:
+                        logger.warning(
+                            "Delivery server error for %s: HTTP %s — retry %d/%d",
+                            execution_id,
+                            r.status_code,
+                            self._attempt_counts.get(execution_id, 0),
+                            self._max_retries,
+                        )
+                    batch_errors += 1
+                    if batch_errors >= self._batch_error_budget:
+                        # Aggregator clearly impaired; let _loop back off
+                        # before churning through the rest of the batch.
+                        logger.warning(
+                            "Delivery batch error budget exhausted (%d errors) — backing off",
+                            batch_errors,
+                        )
+                        break
+                    continue
             except asyncio.CancelledError:
                 raise  # let cancellation propagate
             except Exception as e:
+                # Transport-level failure (connect refused, timeout, …).
+                # Same per-record retry policy as 5xx — `continue`, not
+                # `break`, so one bad record can't starve the queue.
                 delivery_total.labels(result="error").inc()
-                logger.warning("Delivery failed for %s: %s — will retry next cycle", execution_id, e)
-                break  # retry next cycle instead of aborting the loop
+                promoted = self._record_transient_failure(execution_id, str(e))
+                if not promoted:
+                    logger.warning(
+                        "Delivery failed for %s: %s — retry %d/%d",
+                        execution_id,
+                        e,
+                        self._attempt_counts.get(execution_id, 0),
+                        self._max_retries,
+                    )
+                batch_errors += 1
+                if batch_errors >= self._batch_error_budget:
+                    logger.warning(
+                        "Delivery batch error budget exhausted (%d transport errors) — backing off",
+                        batch_errors,
+                    )
+                    break
+                continue
+        return batch_errors >= self._batch_error_budget
+
+    async def drain(self, timeout: float = 5.0) -> None:
+        """Best-effort drain of pending writes before shutdown.
+
+        Issues a single ``_deliver_batch`` so freshly-written records get
+        one chance to flush before the writer thread is torn down. Bounded
+        by ``timeout`` so shutdown never hangs on a stuck aggregator.
+
+        Mirrors ``completeness_middleware._drain_pending_attempt_writes``
+        — both shutdown drains have the same shape (asyncio.wait_for with
+        a tight ceiling, swallow on timeout) so on_shutdown can call them
+        symmetrically.
+        """
+        try:
+            await asyncio.wait_for(self._deliver_batch(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "DeliveryWorker.drain timed out after %.1fs — pending records will retry on next start",
+                timeout,
+            )
+        except Exception:
+            logger.warning("DeliveryWorker.drain failed", exc_info=True)
