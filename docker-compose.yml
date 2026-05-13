@@ -31,7 +31,9 @@ services:
     #   context: .
     #   dockerfile: deploy/Dockerfile
     ports:
-      - "8002:8000"
+      # Host port overridable via GATEWAY_PORT in .env (matches the OPENWEBUI_PORT
+      # pattern below). Default 8002 keeps existing local-dev / CI scripts working.
+      - "${GATEWAY_PORT:-8002}:8000"
     environment:
       - WALACOR_GATEWAY_TENANT_ID=${WALACOR_GATEWAY_TENANT_ID:-dev-tenant}
       - WALACOR_PROVIDER_OLLAMA_URL=http://ollama:11434
