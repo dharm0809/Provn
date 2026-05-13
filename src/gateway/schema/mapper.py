@@ -122,6 +122,56 @@ _PATH_FALLBACK_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
 )
 
 
+# Provider-deterministic path map — runs BEFORE the ONNX classifier.
+#
+# Why this exists: the ONNX GradientBoosting was trained on shallow shapes and
+# confidently misclassifies nested ``*_details`` sub-objects. e.g. for OpenAI's
+# ``usage.prompt_tokens_details.cached_tokens`` (an int whose path contains
+# "prompt"), the model emits ``prompt_tokens`` with p=1.0. Because the label
+# isn't UNKNOWN, ``_apply_path_fallbacks`` cannot rescue it; the field then
+# collides with the real ``usage.prompt_tokens`` slot during assembly. Audit
+# records end up with corrupted token counts (verified end-to-end against
+# Walacor backend).
+#
+# Provider response shapes are stable and documented. Encoding them here as
+# exact-path rules makes the canonical mapping 100% precise for the known
+# providers (OpenAI, Anthropic, Ollama) while the ONNX model continues to
+# serve as a fallback for novel/custom adapters whose paths aren't covered.
+#
+# Each entry: ``"exact.dotted.path" -> canonical_label``. ``UNKNOWN`` is the
+# explicit "no canonical class for this field" verdict that wins over the
+# ONNX prediction — preventing the silent slot collision described above.
+# When iterating sequences, the path uses ``.0.``, ``.1.``, etc. (matching
+# ``flatten_json`` output).
+_PROVIDER_PATH_MAP: dict[str, str] = {
+    # ── OpenAI chat completions ─────────────────────────────────
+    "usage.prompt_tokens": "prompt_tokens",
+    "usage.completion_tokens": "completion_tokens",
+    "usage.total_tokens": "total_tokens",
+    "usage.prompt_tokens_details.cached_tokens": "cached_tokens",
+    "usage.prompt_tokens_details.audio_tokens": "UNKNOWN",
+    "usage.completion_tokens_details.reasoning_tokens": "reasoning_tokens",
+    "usage.completion_tokens_details.audio_tokens": "UNKNOWN",
+    "usage.completion_tokens_details.accepted_prediction_tokens": "UNKNOWN",
+    "usage.completion_tokens_details.rejected_prediction_tokens": "UNKNOWN",
+    # ── Anthropic /v1/messages ──────────────────────────────────
+    "usage.input_tokens": "prompt_tokens",
+    "usage.output_tokens": "completion_tokens",
+    "usage.cache_creation_input_tokens": "cache_creation_tokens",
+    "usage.cache_read_input_tokens": "cached_tokens",
+    # Anthropic 5m/1h cache buckets (Sonnet 4.5+)
+    "usage.cache_creation.ephemeral_5m_input_tokens": "cache_creation_tokens",
+    "usage.cache_creation.ephemeral_1h_input_tokens": "cache_creation_tokens",
+    # ── Ollama /api/chat top-level fields ───────────────────────
+    "prompt_eval_count": "prompt_tokens",
+    "eval_count": "completion_tokens",
+    "prompt_eval_duration": "timing_value",
+    "eval_duration": "timing_value",
+    "load_duration": "timing_value",
+    "total_duration": "timing_value",
+}
+
+
 def _is_envelope_field(key: str, path: str) -> bool:
     """Should ``(key, path)`` be tagged as ENVELOPE rather than UNKNOWN?
 
@@ -449,24 +499,59 @@ class SchemaMapper:
         return result
 
     def _classify_fields(self, fields: list[FlatField]) -> list[tuple[str, float]]:
-        """Classify each field using ONNX model or heuristic fallback.
+        """Classify each field via deterministic provider map first, ONNX/heuristic
+        fallback for everything else.
 
-        Returns list of (label, confidence) tuples.
+        Architecture: ``_PROVIDER_PATH_MAP`` holds exact-path rules for the
+        stable provider response shapes (OpenAI, Anthropic, Ollama). When a
+        field's path is in the map it is assigned with confidence=1.0 and the
+        ONNX classifier is skipped for that field. This is the fix for the
+        nested-field misclassification bug — ONNX confidently misclassifies
+        ``usage.prompt_tokens_details.cached_tokens`` as ``prompt_tokens``
+        (p=1.0) because the path contains the substring "prompt", which then
+        collides with the real ``usage.prompt_tokens`` slot and corrupts the
+        canonical record. Deterministic-first eliminates the corruption for
+        known providers; ONNX still serves as the fallback for novel paths.
+
+        Returns list of (label, confidence) tuples — one per input field, in
+        input order.
         """
-        if self._session:
-            from gateway.intelligence._inference_timeout import InferenceTimeout
-            try:
-                return self._classify_onnx(fields)
-            except InferenceTimeout as e:
-                # D7: per-instance counter for the connections-tile surface.
-                # The Prometheus counter is already bumped inside
-                # `_inference_timeout.run_with_timeout`; here we keep an
-                # in-process rolling window so /v1/connections can report
-                # `schema_mapper_timeouts_60s` without a Prom roundtrip.
-                self._record_timeout()
-                logger.warning("schema-mapper ONNX timed out, using heuristic: %s", e)
-                return self._classify_heuristic(fields)
-        return self._classify_heuristic(fields)
+        # Phase 1: deterministic provider-map lookup
+        deterministic: dict[int, tuple[str, float]] = {}
+        unresolved_indices: list[int] = []
+        unresolved_fields: list[FlatField] = []
+        for i, f in enumerate(fields):
+            label = _PROVIDER_PATH_MAP.get(f.path)
+            if label is not None:
+                deterministic[i] = (label, 1.0)
+            else:
+                unresolved_indices.append(i)
+                unresolved_fields.append(f)
+
+        # Phase 2: ONNX (or heuristic fallback) on fields the provider map
+        # didn't claim. If the provider map covered everything, skip the model
+        # call entirely.
+        if unresolved_fields:
+            if self._session:
+                from gateway.intelligence._inference_timeout import InferenceTimeout
+                try:
+                    unresolved_results = self._classify_onnx(unresolved_fields)
+                except InferenceTimeout as e:
+                    self._record_timeout()
+                    logger.warning("schema-mapper ONNX timed out, using heuristic: %s", e)
+                    unresolved_results = self._classify_heuristic(unresolved_fields)
+            else:
+                unresolved_results = self._classify_heuristic(unresolved_fields)
+        else:
+            unresolved_results = []
+
+        # Merge: re-stitch deterministic + ONNX results into original field order.
+        merged: list[tuple[str, float]] = [("UNKNOWN", 0.0)] * len(fields)
+        for i, result in deterministic.items():
+            merged[i] = result
+        for slot_i, result in zip(unresolved_indices, unresolved_results):
+            merged[slot_i] = result
+        return merged
 
     def _classify_onnx(self, fields: list[FlatField]) -> list[tuple[str, float]]:
         """Batch ONNX inference on all fields.
@@ -735,17 +820,39 @@ class SchemaMapper:
                     continue
                 unmapped.append(f.path)
                 continue
+            # Structural containers (object/array) that the classifier labeled
+            # with a canonical class are still traversal aids — their *leaves*
+            # carry the actual value. Adding them to ``field_map`` lets the
+            # shortest-path tiebreaker in ``_best`` accidentally pick a parent
+            # container over a leaf (e.g. Gemini's ``candidates.0.content``
+            # object beating ``candidates.0.content.parts.0.text``). Skip them
+            # for canonical-slot assignment but still count them as "mapped"
+            # for operator metrics so the coverage number stays honest.
             mapped.append(f.path)
+            if f.value_type in ("object", "array"):
+                continue
             if label not in field_map:
                 field_map[label] = []
             field_map[label].append((f, conf))
 
-        # ── Assign singleton fields (pick highest confidence) ────────
+        # ── Assign singleton fields ────────────────────────────────────
+        #
+        # Selection: prefer the field with the SHORTEST path, then the
+        # highest confidence. Shortest-path-wins resolves collisions where
+        # the same canonical label was assigned to a top-level field AND a
+        # nested sub-field (e.g. OpenAI's real ``usage.completion_tokens=4``
+        # vs the nested ``usage.completion_tokens_details.audio_tokens=11``
+        # that ONNX confidently mislabeled as ``completion_tokens``).
+        # Top-level provider fields are authoritative; nested fields under
+        # ``*_details`` sub-objects should never overwrite them. Highest-
+        # confidence remains the secondary criterion for the common case
+        # where two fields legitimately share a canonical class (multiple
+        # tool_call entries, multi-choice responses).
         def _best(label: str) -> tuple[FlatField, float] | None:
             entries = field_map.get(label, [])
             if not entries:
                 return None
-            return max(entries, key=lambda x: x[1])
+            return min(entries, key=lambda fc: (fc[0].path.count("."), -fc[1]))
 
         best = _best("content")
         if best:
