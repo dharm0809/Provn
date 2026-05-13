@@ -356,23 +356,29 @@ class Settings(BaseSettings):
         description="Walacor backend password",
         validation_alias=AliasChoices("WALACOR_PASSWORD", "walacor_password"),
     )
+    # ETIds 9000031/32/33 match what `scripts/setup_walacor_schemas.py` creates
+    # and what the production Walacor backend at http://32.196.5.38/api serves.
+    # The earlier 9000021/22/23/24 defaults predated the chain-aware schema and
+    # are no longer registered on any live Walacor — pointing at them produces
+    # `dbError: Invalid ETId` 400s from /api/query/getcomplex, which break every
+    # lineage/compliance read in the dashboard.
     walacor_executions_etid: int = Field(
-        default=9000021,
-        description="Walacor ETId for gateway execution records table (v2 schema with chain+tool fields)",
+        default=9000031,
+        description="Walacor ETId for gateway execution records (chain-aware schema; see setup_walacor_schemas.py)",
         validation_alias=AliasChoices("WALACOR_EXECUTIONS_ETID", "walacor_executions_etid"),
     )
     walacor_attempts_etid: int = Field(
-        default=9000022,
+        default=9000032,
         description="Walacor ETId for gateway attempts table",
         validation_alias=AliasChoices("WALACOR_ATTEMPTS_ETID", "walacor_attempts_etid"),
     )
     walacor_tool_events_etid: int = Field(
-        default=9000023,
-        description="Walacor ETId for gateway tool events table (v2 schema with sources+prompt_id)",
+        default=9000033,
+        description="Walacor ETId for gateway tool events table",
         validation_alias=AliasChoices("WALACOR_TOOL_EVENTS_ETID", "walacor_tool_events_etid"),
     )
     walacor_lifecycle_events_etid: int = Field(
-        default=9000024,
+        default=9000034,
         description="Walacor ETId for ONNX lifecycle event records (training fingerprint, candidate, shadow, promote, reject)",
         validation_alias=AliasChoices("WALACOR_LIFECYCLE_EVENTS_ETID", "walacor_lifecycle_events_etid"),
     )

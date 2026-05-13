@@ -51,6 +51,15 @@ services:
       - WALACOR_SERVER=${WALACOR_SERVER:-}
       - WALACOR_USERNAME=${WALACOR_USERNAME:-}
       - WALACOR_PASSWORD=${WALACOR_PASSWORD:-}
+      # ETIds for the records written/read against the Walacor backend.
+      # Default 9000031/32/33/34 match what scripts/setup_walacor_schemas.py
+      # creates. If .env overrides are missing the container still reads the
+      # correct values via config.py defaults — but operators who override
+      # in .env get those values picked up here.
+      - WALACOR_EXECUTIONS_ETID=${WALACOR_EXECUTIONS_ETID:-9000031}
+      - WALACOR_ATTEMPTS_ETID=${WALACOR_ATTEMPTS_ETID:-9000032}
+      - WALACOR_TOOL_EVENTS_ETID=${WALACOR_TOOL_EVENTS_ETID:-9000033}
+      - WALACOR_LIFECYCLE_EVENTS_ETID=${WALACOR_LIFECYCLE_EVENTS_ETID:-9000034}
       - WALACOR_PROVIDER_OPENAI_KEY=${OPENAI_API_KEY:-}
       - WALACOR_PROVIDER_ANTHROPIC_KEY=${ANTHROPIC_API_KEY:-}
       # fnmatch routes (checked before path-based routing): without this the
