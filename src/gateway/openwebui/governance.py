@@ -6,22 +6,34 @@ the LLM response already happened).
 
 Only **outlet** events run the full pipeline.  Inlet events get attestation +
 policy evaluation and a lightweight audit record.
+
+Source-of-truth note: the chain section MUST stay in lock-step with the proxy
+orchestrator. The bit-for-bit copy of ``_apply_session_chain`` that used to
+live in this module has been deleted in favour of
+``gateway.pipeline.chain_helpers``. Similarly, ``evaluate_pre_inference`` is
+called via ``run_pre_inference`` so a future arity change breaks both call
+sites at the same line (the pre-fix code unpacked 4 values from a 5-tuple,
+raising ``ValueError`` whenever the policy cache was wired up — see C1).
 """
 
 from __future__ import annotations
 
 import fnmatch
 import logging
-import uuid
 from datetime import datetime, timezone
 
 from gateway.adapters.base import ModelCall, ModelResponse
 from gateway.cache.attestation_cache import CachedAttestation
 from gateway.config import get_settings
+from gateway.pipeline.chain_helpers import (
+    advance_session_chain,
+    apply_session_chain,
+    run_pre_inference,
+    session_chain_critical_section,
+)
 from gateway.pipeline.context import get_pipeline_context
 from gateway.pipeline.hasher import build_execution_record
 from gateway.pipeline.model_resolver import resolve_attestation
-from gateway.pipeline.policy_evaluator import evaluate_pre_inference
 
 logger = logging.getLogger(__name__)
 
@@ -82,36 +94,53 @@ def _build_model_call(event: dict, provider: str) -> ModelCall:
     )
 
 
-def _build_model_response(event: dict) -> ModelResponse:
-    """Construct a ``ModelResponse`` from an outlet event."""
+def _build_model_response(event: dict) -> tuple[ModelResponse, bool]:
+    """Construct a ``ModelResponse`` from an outlet event.
+
+    Returns ``(response, tokens_were_estimated)``. The boolean is plumbed up
+    to the execution record as the TOP-LEVEL ``tokens_estimated`` field (C8).
+    The previous design only marked it inside ``metadata.token_source`` which
+    Walacor's metadata-keep filter drops on long prompts — meaning auditors
+    couldn't tell whether the token counts came from the provider or from a
+    rough heuristic.
+    """
     data = event.get("data") or {}
     governance = data.get("governance") or {}
     assistant_response = data.get("assistant_response") or ""
     response_length = data.get("response_length") or len(assistant_response)
 
-    # Try to extract token counts from governance headers, else estimate
-    usage = _extract_token_usage(governance, response_length)
+    usage, estimated = _extract_token_usage(governance, response_length)
 
-    return ModelResponse(
-        content=assistant_response,
-        usage=usage,
-        raw_body=b"{}",
-        provider_request_id=governance.get("execution_id") or None,
+    return (
+        ModelResponse(
+            content=assistant_response,
+            usage=usage,
+            raw_body=b"{}",
+            provider_request_id=governance.get("execution_id") or None,
+        ),
+        estimated,
     )
 
 
-def _extract_token_usage(governance: dict, response_length: int) -> dict:
-    """Extract or estimate token usage from governance headers."""
-    # The proxy path doesn't expose token counts in headers directly,
-    # so we estimate.  The estimate is consistent with the orchestrator's
-    # budget check heuristic (len // 4).
+def _extract_token_usage(governance: dict, response_length: int) -> tuple[dict, bool]:
+    """Extract or estimate token usage from governance headers.
+
+    Returns ``(usage_dict, estimated)`` so callers can mark the record's
+    top-level ``tokens_estimated`` field. The proxy path doesn't expose token
+    counts in headers directly, so the heuristic is the same len//4 that the
+    budget check uses — but the audit record needs to make that distinction
+    visible.
+    """
     est_completion = max(response_length // 4, 1)
-    return {
-        "prompt_tokens": 0,
-        "completion_tokens": est_completion,
-        "total_tokens": est_completion,
-        "token_source": "estimated",
-    }
+    return (
+        {
+            "prompt_tokens": 0,
+            "completion_tokens": est_completion,
+            "total_tokens": est_completion,
+            "token_source": "estimated",
+        },
+        True,  # always estimated for plugin events until governance headers carry real counts
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,48 +201,20 @@ async def _auto_attest(ctx, settings, provider: str, model_id: str) -> tuple[str
 # ---------------------------------------------------------------------------
 # Session chain helper
 # ---------------------------------------------------------------------------
-
-async def _apply_session_chain(record: dict, session_id: str | None, ctx, settings) -> bool:
-    """Attach UUIDv7 ID-pointer session chain fields.
-
-    Gateway no longer computes SHA3-512 record_hash — Walacor backend hashes on
-    ingest. Chain integrity is maintained via `record_id` (UUIDv7) +
-    `previous_record_id` pointers. Ed25519 signs the canonical ID string.
-    """
-    if not (session_id and ctx.session_chain and settings.session_chain_enabled):
-        return False
-    try:
-        chain_vals = await ctx.session_chain.next_chain_values(session_id)
-    except Exception:
-        logger.error(
-            "Plugin event session chain failed — skipping chain fields: session_id=%s",
-            session_id, exc_info=True,
-        )
-        return False
-
-    seq_num = chain_vals.sequence_number
-    record["sequence_number"] = seq_num
-    record["previous_record_id"] = chain_vals.previous_record_id
-
-    # Ed25519 signing over canonical ID string (fail-open)
-    try:
-        from gateway.crypto.signing import sign_canonical
-
-        signature = sign_canonical(
-            record_id=record.get("record_id"),
-            previous_record_id=record.get("previous_record_id"),
-            sequence_number=seq_num,
-            execution_id=record["execution_id"],
-            timestamp=record["timestamp"],
-        )
-        if signature:
-            record["record_signature"] = signature
-    except Exception:
-        pass
-
-    return True
-
-    return record_hash_val
+#
+# The plugin governance path used to ship its own copy of `_apply_session_chain`
+# — the same code lived in `pipeline/orchestrator.py`. Two consequences:
+#   1. Concurrent OWUI outlet events for the same chat_id had no per-session
+#      lock here (the orchestrator's `_session_chain_lock` was never imported),
+#      so two events could read the same `last_record_id` and emit records
+#      with duplicate `previous_record_id`. (C4)
+#   2. A signature change to `next_chain_values` would have drifted between
+#      the two copies. (C5)
+#
+# Both issues are fixed by sharing the helper in `gateway.pipeline.chain_helpers`.
+# `session_chain_critical_section` here wraps the same per-session lock the
+# orchestrator uses; `apply_session_chain` + `advance_session_chain` reserve
+# and commit chain state with identical semantics to the proxy path.
 
 
 # ---------------------------------------------------------------------------
@@ -292,17 +293,23 @@ async def process_plugin_event(event: dict) -> dict:
     result["attestation_id"] = att_id
 
     # ── Step 2: Pre-policy ───────────────────────────────────────────────
+    # C1: ``evaluate_pre_inference`` returns 5 values, not 4. The pre-fix code
+    # unpacked 4 and silently raised ``ValueError`` whenever ``policy_cache``
+    # was configured — caught only by the broad ``except Exception`` below,
+    # so the symptom looked like "policy unavailable" rather than a hard bug.
+    # ``run_pre_inference`` returns a typed ``PreInferenceResult`` so a future
+    # arity change surfaces as ``AttributeError`` at the use site instead.
     if ctx.policy_cache:
         try:
-            _, pv, pr, policy_err = evaluate_pre_inference(
-                ctx.policy_cache, call, att_id, att_ctx,
-            )
-            policy_version = pv
-            policy_result = pr
-            if policy_err is not None:
+            pre = run_pre_inference(ctx.policy_cache, call, att_id, att_ctx)
+            policy_version = pre.policy_version
+            policy_result = pre.policy_result
+            if pre.error_response is not None:
                 result["governance_status"] = "blocked_post_facto"
-                result["policy_result"] = pr
-                result["policy_version"] = pv
+                result["policy_result"] = pre.policy_result
+                result["policy_version"] = pre.policy_version
+                if pre.failure_reason:
+                    result["policy_failure_reason"] = pre.failure_reason
                 # Don't return — still write the audit record for outlet events
         except Exception as exc:
             errors.append(f"policy: {exc}")
@@ -321,8 +328,9 @@ async def process_plugin_event(event: dict) -> dict:
 
     # ── Steps 3-7: Outlet-only (full pipeline) ──────────────────────────
 
-    # Build ModelResponse
-    model_response = _build_model_response(event)
+    # Build ModelResponse — `tokens_estimated` is plumbed up to the top-level
+    # execution record field so it survives Walacor metadata truncation (C8).
+    model_response, tokens_estimated = _build_model_response(event)
 
     # Content analysis (post-inference)
     rp_version = 0
@@ -372,27 +380,53 @@ async def process_plugin_event(event: dict) -> dict:
         model_id=model_id,
         provider=provider,
     )
+    # C8: surface "we estimated these counts" at the top level so it survives
+    # Walacor's metadata-keep filter. Dashboard renders an "estimated tokens"
+    # badge on records where this is True. Stays False on records where the
+    # provider reported real counts (proxy path).
+    if tokens_estimated:
+        record["tokens_estimated"] = True
 
     result["execution_id"] = record["execution_id"]
 
-    # Session chain
-    try:
-        await _apply_session_chain(record, session_id, ctx, settings)
-        if "sequence_number" in record:
-            result["sequence_number"] = record["sequence_number"]
-    except Exception as exc:
-        errors.append(f"session_chain: {exc}")
-        logger.warning("Plugin event session chain failed: %s", exc, exc_info=True)
+    # ── Session chain + write (C4 + C5 + C7) ────────────────────────────
+    # The plugin governance path used to call its own copy of
+    # `_apply_session_chain` WITHOUT acquiring `_session_chain_lock` — meaning
+    # two concurrent OWUI outlet events for the same chat_id could read the
+    # same `last_record_id` and emit records with duplicate
+    # `previous_record_id`. The shared helper now owns the lock so neither
+    # call site can forget it.
+    #
+    # Also: tracker advance happens only on successful WRITE, not on
+    # successful sign (C7).
+    async with session_chain_critical_section(ctx, session_id):
+        try:
+            chain_result = await apply_session_chain(record, session_id, ctx, settings)
+            if "sequence_number" in record:
+                result["sequence_number"] = record["sequence_number"]
+        except Exception as exc:
+            errors.append(f"session_chain: {exc}")
+            logger.warning("Plugin event session chain failed: %s", exc, exc_info=True)
+            chain_result = None
 
-    # Dual-write (WAL + Walacor)
-    try:
-        if ctx.storage:
-            write_result = await ctx.storage.write_execution(record)
-            if not write_result.succeeded:
-                errors.append(f"storage: write failed — {write_result.failed}")
-    except Exception as exc:
-        errors.append(f"storage: {exc}")
-        logger.warning("Plugin event storage write failed: %s", exc, exc_info=True)
+        # Dual-write (WAL + Walacor)
+        wrote_ok = False
+        try:
+            if ctx.storage:
+                write_result = await ctx.storage.write_execution(record)
+                if write_result.succeeded:
+                    wrote_ok = True
+                else:
+                    errors.append(f"storage: write failed — {write_result.failed}")
+        except Exception as exc:
+            errors.append(f"storage: {exc}")
+            logger.warning("Plugin event storage write failed: %s", exc, exc_info=True)
+
+        # Advance tracker only on successful write — not gated on signing
+        # success. A signing failure leaves `record_signature` null but the
+        # ID-pointer chain still advances cleanly.
+        if wrote_ok and chain_result is not None:
+            await advance_session_chain(record, session_id, ctx, chain_result)
 
     # Final status
     if result.get("governance_status") == "skipped":

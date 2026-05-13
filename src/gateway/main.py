@@ -1539,12 +1539,26 @@ async def on_startup() -> None:
         # the records it authenticates. Fail-open: if key generation fails
         # (e.g. read-only FS, missing cryptography package), records are
         # written unsigned and verify_chain reports signatures as "absent".
-        from gateway.crypto.signing import ensure_signing_key
+        #
+        # C3: the helper `apply_session_chain` only invokes sign_canonical
+        # when `settings.record_signing_enabled` is True. To make sure the
+        # signing infrastructure is reachable when operators do enable
+        # signing, we still auto-provision the key on every boot — the flag
+        # gates the per-record CALL, not the boot-time setup. If signing is
+        # on but the key can't be loaded, log loudly so deploys see it.
+        from gateway.crypto.signing import ensure_signing_key, signing_key_available
         import os as _os
         _key_path = settings.record_signing_key_path or _os.path.join(
             settings.wal_path, "record-signing.ed25519.pem"
         )
         ensure_signing_key(_key_path)
+        if settings.record_signing_enabled and not signing_key_available():
+            logger.error(
+                "WALACOR_RECORD_SIGNING_ENABLED=true but no Ed25519 key could be loaded from %s "
+                "— records will be written unsigned. Check filesystem permissions and the "
+                "`cryptography` package install.",
+                _key_path,
+            )
 
         # Walacor storage is mode-independent: init before the skip_governance shortcut
         # so completeness attempts are always written when credentials are configured.

@@ -595,18 +595,27 @@
   border-color: rgba(220,38,38,0.35);
   background: var(--red-bg);
 }
+/* "structural" — chain integrity locally confirmed but Walacor round-trip
+   not attempted. Distinct from pass/fail so operators understand they have
+   linkage proof but not seal proof. */
+.ses-verify-banner.warn {
+  border-color: color-mix(in oklab, var(--amber, #c9a227) 35%, var(--border));
+  background: var(--amber-bg);
+}
 .ses-verify-icon {
   font-size: 22px;
   font-weight: 700;
 }
 .ses-verify-banner.pass .ses-verify-icon { color: var(--green); text-shadow: 0 0 8px var(--green); }
 .ses-verify-banner.fail .ses-verify-icon { color: var(--red); }
+.ses-verify-banner.warn .ses-verify-icon { color: var(--amber); }
 .ses-verify-msg {
   font-size: 13px;
   color: var(--text-primary);
   font-weight: 600;
 }
 .ses-verify-banner.fail .ses-verify-msg { color: var(--red); }
+.ses-verify-banner.warn .ses-verify-msg { color: var(--amber); }
 .ses-verify-errs {
   list-style: none;
   margin-top: 4px;
@@ -621,6 +630,7 @@
   color: var(--text-muted);
 }
 .ses-verify-banner.pass .ses-verify-meta { color: var(--green-dim); }
+.ses-verify-banner.warn .ses-verify-meta { color: var(--amber); }
 
 /* ── Chain ────────────────────────────────────────────────── */
 .ses-chain {
