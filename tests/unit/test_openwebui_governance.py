@@ -13,9 +13,12 @@ from gateway.openwebui.governance import (
     _build_model_response,
     _extract_token_usage,
     _auto_attest,
-    _apply_session_chain,
     process_plugin_event,
 )
+# C5: `_apply_session_chain` was extracted into the shared helper module so
+# the proxy path and the plugin governance path share one implementation.
+# Tests that exercised the per-module copy now go through the shared helper.
+from gateway.pipeline.chain_helpers import apply_session_chain as _apply_session_chain
 
 
 @pytest.fixture(params=["asyncio"])
@@ -91,6 +94,10 @@ def _mock_settings(
     s.plugin_event_governance_enabled = plugin_governance
     s.skip_governance = skip_governance
     s.attestation_cache_ttl = 300
+    # C3: helper checks settings.record_signing_enabled to decide whether to
+    # call sign_canonical. Default OFF in tests so signing is never attempted
+    # — matches production default.
+    s.record_signing_enabled = False
     return s
 
 
@@ -130,12 +137,28 @@ def _mock_ctx(
 
     # Session chain
     if has_chain:
+        import asyncio
         from gateway.pipeline.session_chain import ChainValues
-        chain = AsyncMock()
-        chain.next_chain_values.return_value = ChainValues(
+        # The shared chain helper now expects a real asyncio.Lock from
+        # `session_lock(session_id)` so it can `async with` it (C4). An
+        # AsyncMock auto-generates an attribute but returns a coroutine, not
+        # an async-context-manager — explicit lock fixes that.
+        chain = MagicMock()
+        chain.next_chain_values = AsyncMock(return_value=ChainValues(
             sequence_number=0, previous_record_hash="0" * 128, previous_record_id=None,
-        )
+        ))
         chain.update = AsyncMock()
+        # Per-session lock for the (reserve→write→advance) critical section.
+        _session_locks: dict[str, asyncio.Lock] = {}
+
+        def _session_lock(sid: str):
+            lock = _session_locks.get(sid)
+            if lock is None:
+                lock = asyncio.Lock()
+                _session_locks[sid] = lock
+            return lock
+
+        chain.session_lock = _session_lock
         ctx.session_chain = chain
     else:
         ctx.session_chain = None
@@ -217,18 +240,25 @@ def test_build_model_call_empty_messages():
 
 def test_build_model_response():
     event = _outlet_event()
-    resp = _build_model_response(event)
+    # C8: `_build_model_response` now returns `(response, tokens_estimated)`
+    # so callers can stamp the top-level `tokens_estimated` field on the
+    # execution record. The pre-fix signature only returned `response`.
+    resp, estimated = _build_model_response(event)
     assert resp.content == "Hi there!"
     assert resp.provider_request_id == "exec-abc-123"
     assert resp.usage is not None
     assert resp.usage["completion_tokens"] > 0
+    # Plugin events always estimate token counts (provider headers don't
+    # carry usage on the OWUI plugin path).
+    assert estimated is True
 
 
 def test_build_model_response_empty():
     event = {"data": {}}
-    resp = _build_model_response(event)
+    resp, estimated = _build_model_response(event)
     assert resp.content == ""
     assert resp.usage["completion_tokens"] == 1  # max(0//4, 1)
+    assert estimated is True
 
 
 # ---------------------------------------------------------------------------
@@ -236,14 +266,16 @@ def test_build_model_response_empty():
 # ---------------------------------------------------------------------------
 
 def test_extract_token_usage_estimates():
-    usage = _extract_token_usage({}, 400)
+    usage, estimated = _extract_token_usage({}, 400)
     assert usage["completion_tokens"] == 100  # 400 // 4
     assert usage["token_source"] == "estimated"
+    assert estimated is True
 
 
 def test_extract_token_usage_minimum():
-    usage = _extract_token_usage({}, 0)
+    usage, estimated = _extract_token_usage({}, 0)
     assert usage["completion_tokens"] == 1
+    assert estimated is True
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +314,12 @@ async def test_auto_attest_revoked_model():
 
 
 # ---------------------------------------------------------------------------
-# _apply_session_chain
+# apply_session_chain (shared helper, used by both proxy + plugin paths)
 # ---------------------------------------------------------------------------
+# After C5, both call sites import the same helper. These tests now exercise
+# the shared module — they remain in this file because they cover the
+# plugin-event integration shape (owui: prefix sessions, mocked tracker), not
+# the orchestrator's call site.
 
 @pytest.mark.anyio
 async def test_apply_session_chain():
@@ -291,12 +327,13 @@ async def test_apply_session_chain():
     settings = _mock_settings(chain_enabled=True)
     record = {
         "execution_id": "ex-1",
+        "record_id": "01234567-89ab-7cde-f012-345678901234",
         "policy_version": 1,
         "policy_result": "pass",
         "timestamp": "2026-04-10T00:00:00+00:00",
     }
     result = await _apply_session_chain(record, "owui:chat-1", ctx, settings)
-    assert result is True
+    assert result.applied is True
     assert record["sequence_number"] == 0
     assert record["previous_record_id"] is None  # genesis
 
@@ -307,7 +344,7 @@ async def test_apply_session_chain_disabled():
     settings = _mock_settings(chain_enabled=False)
     record = {"execution_id": "ex-1"}
     result = await _apply_session_chain(record, "owui:chat-1", ctx, settings)
-    assert result is False
+    assert result.applied is False
 
 
 @pytest.mark.anyio
@@ -315,12 +352,34 @@ async def test_apply_session_chain_no_session_id():
     ctx = _mock_ctx()
     settings = _mock_settings()
     result = await _apply_session_chain({}, None, ctx, settings)
-    assert result is False
+    assert result.applied is False
 
 
 # ---------------------------------------------------------------------------
 # process_plugin_event — inlet
 # ---------------------------------------------------------------------------
+
+def _ok_pre_result():
+    """Build a PreInferenceResult with the post-fix 5-field shape.
+
+    The pre-fix code (C1) unpacked 4 values from `evaluate_pre_inference`,
+    which actually returns 5 — silently raising ValueError whenever the
+    policy cache was wired up. Tests now mock the typed wrapper instead.
+    """
+    from gateway.pipeline.chain_helpers import PreInferenceResult
+    return PreInferenceResult(
+        blocked=False, policy_version=1, policy_result="pass",
+        error_response=None, failure_reason=None,
+    )
+
+
+def _blocked_pre_result(error_response):
+    from gateway.pipeline.chain_helpers import PreInferenceResult
+    return PreInferenceResult(
+        blocked=True, policy_version=2, policy_result="blocked_by_policy",
+        error_response=error_response, failure_reason="test block",
+    )
+
 
 @pytest.mark.anyio
 async def test_process_inlet_event():
@@ -329,9 +388,8 @@ async def test_process_inlet_event():
     with (
         patch("gateway.openwebui.governance.get_pipeline_context", return_value=ctx),
         patch("gateway.openwebui.governance.get_settings", return_value=settings),
-        patch("gateway.openwebui.governance.evaluate_pre_inference") as mock_policy,
+        patch("gateway.openwebui.governance.run_pre_inference", return_value=_ok_pre_result()),
     ):
-        mock_policy.return_value = (False, 1, "pass", None)
         result = await process_plugin_event(_inlet_event())
 
     assert result["event_type"] == "inlet"
@@ -353,9 +411,8 @@ async def test_process_outlet_event_full_pipeline():
     with (
         patch("gateway.openwebui.governance.get_pipeline_context", return_value=ctx),
         patch("gateway.openwebui.governance.get_settings", return_value=settings),
-        patch("gateway.openwebui.governance.evaluate_pre_inference") as mock_policy,
+        patch("gateway.openwebui.governance.run_pre_inference", return_value=_ok_pre_result()),
     ):
-        mock_policy.return_value = (False, 1, "pass", None)
         result = await process_plugin_event(_outlet_event())
 
     assert result["event_type"] == "outlet"
@@ -370,6 +427,9 @@ async def test_process_outlet_event_full_pipeline():
     assert record["session_id"] == "owui:chat-1"
     assert record["metadata"]["event_source"] == "openwebui_plugin"
     assert record["metadata"]["original_execution_id"] == "exec-abc-123"
+    # C8: plugin records always carry `tokens_estimated=True` at the top
+    # level so Walacor's metadata-truncation filter can't hide the fact.
+    assert record.get("tokens_estimated") is True
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +480,8 @@ async def test_process_event_auto_attest():
     with (
         patch("gateway.openwebui.governance.get_pipeline_context", return_value=ctx),
         patch("gateway.openwebui.governance.get_settings", return_value=settings),
-        patch("gateway.openwebui.governance.evaluate_pre_inference") as mock_policy,
+        patch("gateway.openwebui.governance.run_pre_inference", return_value=_ok_pre_result()),
     ):
-        mock_policy.return_value = (False, 1, "pass", None)
         result = await process_plugin_event(_outlet_event())
 
     assert result["governance_status"] == "pass"
@@ -440,11 +499,9 @@ async def test_process_outlet_policy_blocked():
     with (
         patch("gateway.openwebui.governance.get_pipeline_context", return_value=ctx),
         patch("gateway.openwebui.governance.get_settings", return_value=settings),
-        patch("gateway.openwebui.governance.evaluate_pre_inference") as mock_policy,
+        patch("gateway.openwebui.governance.run_pre_inference",
+              return_value=_blocked_pre_result(MagicMock())),
     ):
-        # Policy returns blocked
-        mock_err = MagicMock()
-        mock_policy.return_value = (True, 2, "blocked_by_policy", mock_err)
         result = await process_plugin_event(_outlet_event())
 
     # Still writes the execution record (audit-only)
@@ -465,9 +522,8 @@ async def test_process_event_attestation_error_fail_open():
         patch("gateway.openwebui.governance.get_pipeline_context", return_value=ctx),
         patch("gateway.openwebui.governance.get_settings", return_value=settings),
         patch("gateway.openwebui.governance.resolve_attestation", side_effect=RuntimeError("boom")),
-        patch("gateway.openwebui.governance.evaluate_pre_inference") as mock_policy,
+        patch("gateway.openwebui.governance.run_pre_inference", return_value=_ok_pre_result()),
     ):
-        mock_policy.return_value = (False, 1, "pass", None)
         result = await process_plugin_event(_outlet_event())
 
     # Should still succeed (fail-open)
@@ -488,9 +544,8 @@ async def test_session_chain_owui_prefix():
     with (
         patch("gateway.openwebui.governance.get_pipeline_context", return_value=ctx),
         patch("gateway.openwebui.governance.get_settings", return_value=settings),
-        patch("gateway.openwebui.governance.evaluate_pre_inference") as mock_policy,
+        patch("gateway.openwebui.governance.run_pre_inference", return_value=_ok_pre_result()),
     ):
-        mock_policy.return_value = (False, 1, "pass", None)
         await process_plugin_event(_outlet_event(chat_id="my-chat-42"))
 
     # Verify session chain was called with owui: prefix

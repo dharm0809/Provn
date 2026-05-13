@@ -577,46 +577,35 @@ async def _session_chain_lock(ctx, session_id: str | None):
         yield
 
 
+# Backward-compatible adapter — delegates to gateway.pipeline.chain_helpers
+# so the proxy path and the OpenWebUI plugin governance path share one
+# implementation. See chain_helpers.py for the long-form design notes.
+#
+# Returns the legacy boolean shape (True = applied & advance-needed,
+# False = skipped) but stashes the structured ChainResult on
+# `_orchestrator_chain_result` so callers that need the typed result (token
+# estimation flags, signature status reporting) can read it without re-running
+# the helper.
 async def _apply_session_chain(record, session_id: str | None, ctx, settings) -> bool:
-    """Attach session chain fields to record. Returns True on success, False if skipped.
+    """DEPRECATED legacy adapter — prefer
+    ``gateway.pipeline.chain_helpers.apply_session_chain`` directly.
 
-    Gateway no longer computes SHA3-512 record_hash; Walacor backend hashes on
-    ingest and returns DH as the tamper-evident checkpoint. Chain integrity is
-    now maintained via UUIDv7 record_id / previous_record_id pointers.
+    Kept because dozens of test cases and a few legacy callers still go
+    through it. Returns True iff the helper applied chain fields and the
+    caller should subsequently invoke `ctx.session_chain.update(...)` (which
+    the orchestrator already does today). Signing is now gated on
+    ``settings.record_signing_enabled``; previously the call ran whenever a
+    key file happened to be loaded, which made the flag meaningless.
 
-    On failure, skips chain fields so the execution record is still written.
+    Alternative considered: delete this wrapper and migrate all tests at the
+    same time. Rejected for blast-radius reasons — the chain helper extraction
+    is meant to be a behavioural-no-op refactor for the proxy path.
     """
-    if not (session_id and ctx.session_chain and settings.session_chain_enabled):
-        return False
-    try:
-        chain_vals = await ctx.session_chain.next_chain_values(session_id)
-    except Exception:
-        logger.error(
-            "Session chain next_chain_values failed — skipping chain fields: session_id=%s",
-            session_id, exc_info=True,
-        )
-        return False
-    seq_num = chain_vals.sequence_number
-    record["sequence_number"] = seq_num
-    record["previous_record_id"] = chain_vals.previous_record_id
+    from gateway.pipeline.chain_helpers import apply_session_chain
 
-    # Ed25519 signing over canonical ID string (fail-open)
-    try:
-        from gateway.crypto.signing import sign_canonical
-
-        signature = sign_canonical(
-            record_id=record.get("record_id"),
-            previous_record_id=record.get("previous_record_id"),
-            sequence_number=seq_num,
-            execution_id=record["execution_id"],
-            timestamp=record["timestamp"],
-        )
-        if signature:
-            record["record_signature"] = signature
-    except Exception:
-        pass  # fail-open: never block record writing
-
-    return True
+    result = await apply_session_chain(record, session_id, ctx, settings)
+    record["_chain_result"] = result  # internal: read by callers needing typed result
+    return result.applied
 
 
 async def _store_execution(record, request: Request, ctx) -> None:
@@ -787,15 +776,26 @@ async def _after_stream_record(
         # concurrent same-session requests can't race and break the
         # ID-pointer chain linkage. The `_session_chain_lock` no-ops when
         # session tracking is off.
+        from gateway.pipeline.chain_helpers import (
+            apply_session_chain as _apply_chain,
+            advance_session_chain as _advance_chain,
+        )
         async with _session_chain_lock(ctx, session_id):
-            record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
+            _chain_res = await _apply_chain(record, session_id, ctx, settings)
+            wrote_ok = False
             if ctx.storage:
                 result = await ctx.storage.write_execution(record)
                 if result.succeeded:
                     execution_id_var.set(record["execution_id"])
+                    wrote_ok = True
             await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
-            if session_id and ctx.session_chain and record_hash_val:
-                await ctx.session_chain.update(session_id, record["sequence_number"], record_id=record.get("record_id"))
+            # C7: advance the tracker on successful WRITE, regardless of whether
+            # signing succeeded. Previously this was gated on the helper's
+            # boolean return, which was False when signing failed — leaving the
+            # tracker stuck on the prior previous_record_id and corrupting the
+            # next request's chain linkage.
+            if wrote_ok:
+                await _advance_chain(record, session_id, ctx, _chain_res)
         # Phase 23: populate governance_meta for SSE event injection
         if governance_meta is not None:
             governance_meta["execution_id"] = record.get("execution_id")
@@ -1627,9 +1627,13 @@ async def _build_and_write_record(
     # consistency/anomaly/overflow steps run inside the lock too
     # because they only mutate `record["metadata"]` (fast, local),
     # never another session's state.
+    from gateway.pipeline.chain_helpers import (
+        apply_session_chain as _apply_chain,
+        advance_session_chain as _advance_chain,
+    )
     async with _session_chain_lock(ctx, session_id):
         t_chain = time.perf_counter()
-        record_hash_val = await _apply_session_chain(record, session_id, ctx, settings)
+        _chain_res = await _apply_chain(record, session_id, ctx, settings)
         if params.timings is not None:
             params.timings["chain_ms"] = round((time.perf_counter() - t_chain) * 1000, 1)
 
@@ -1695,14 +1699,11 @@ async def _build_and_write_record(
         # Expose governance metadata for response headers (Phase 23)
         request.state.walacor_chain_seq = record.get("sequence_number")
         await _write_tool_events(params.tool_interactions, record["execution_id"], call, params.tool_strategy, ctx, settings)
-        if session_id and ctx.session_chain and record_hash_val:
-            try:
-                await ctx.session_chain.update(session_id, record["sequence_number"], record_id=record.get("record_id"))
-            except Exception:
-                logger.error(
-                    "Session chain update failed — chain state may be stale: session_id=%s seq_num=%d",
-                    session_id, record["sequence_number"], exc_info=True,
-                )
+        # C7: advance the in-memory / Redis tracker on successful WRITE,
+        # regardless of whether signing succeeded. `advance_session_chain`
+        # is a no-op when chain tracking is off or when the helper didn't
+        # apply chain fields, so the call is always safe.
+        await _advance_chain(record, session_id, ctx, _chain_res)
 
     # Phase 17: OTel GenAI span (fail-open; emitted after write so execution_id is set)
     if ctx.tracer is not None:

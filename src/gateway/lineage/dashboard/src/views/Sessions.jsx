@@ -337,11 +337,25 @@ function PolicyChip({ result }) {
 }
 
 function VerifyBanner({ result }) {
+  // verification_level can be: "verified" (full round-trip), "structural"
+  // (chain intact but no live Walacor round-trip — e.g. local SQLite reader),
+  // or "unverifiable" (transport error, missing anchors, bad signature).
   if (!result) return null;
   const ok = result.valid;
+  const level = result.verification_level || (ok ? 'verified' : 'unverifiable');
+  // The banner has three visual states. "structural" reads as "chain
+  // integrity confirmed locally but Walacor wasn't round-tripped" — neither
+  // a green check nor a red X.
+  const cls = level === 'verified' ? 'pass' : level === 'structural' ? 'warn' : 'fail';
+  const icon = level === 'verified' ? '◆' : level === 'structural' ? '◐' : '✗';
+  const meta = level === 'verified'
+    ? 'ID chain · ED25519 · Walacor sealed'
+    : level === 'structural'
+    ? 'structural integrity only — no Walacor round-trip'
+    : 'verification failed';
   return (
-    <div className={`ses-verify-banner ${ok ? 'pass' : 'fail'}`}>
-      <div className="ses-verify-icon">{ok ? '◆' : '✗'}</div>
+    <div className={`ses-verify-banner ${cls}`}>
+      <div className="ses-verify-icon">{icon}</div>
       <div className="ses-verify-body">
         <div className="ses-verify-msg">{result.message}</div>
         {!ok && result.errors && (
@@ -350,9 +364,7 @@ function VerifyBanner({ result }) {
           </ul>
         )}
       </div>
-      <div className="ses-verify-meta mono">
-        {ok ? 'ID chain · ED25519 · Walacor sealed' : 'verification failed'}
-      </div>
+      <div className="ses-verify-meta mono">{meta}</div>
     </div>
   );
 }
@@ -490,13 +502,20 @@ function SessionTimelineView({ session, onBack }) {
         await new Promise(r => setTimeout(r, 240));
         setNodeResults(prev => [...prev, results[i]]);
       }
-      const allOk = res?.valid !== false && results.every(Boolean);
-      setVerifyResult(allOk
-        ? { valid: true, message: `Chain verified — ${records.length} records, ID-pointer chain intact, all Ed25519 signatures valid.` }
-        : { valid: false, message: res?.message || `Chain invalid — ${results.filter(x => !x).length} mismatch(es)`, errors: res?.errors || [] }
-      );
+      // verification_level (C2) is the source of truth for the banner. The
+      // server-derived `valid` is True only when level == "verified".
+      // "structural" means chain linkage holds but no live Walacor round-trip
+      // was attempted — banner shows the amber state, not green.
+      const level = res?.verification_level || (res?.valid !== false ? 'verified' : 'unverifiable');
+      const allRecsOk = results.every(Boolean);
+      const banner = level === 'verified' && allRecsOk
+        ? { valid: true, verification_level: 'verified', message: `Chain verified — ${records.length} records, ID-pointer chain intact, all Ed25519 signatures valid, Walacor anchors round-tripped.` }
+        : level === 'structural'
+        ? { valid: false, verification_level: 'structural', message: `Structural integrity confirmed — ${records.length} records linked, but no live Walacor round-trip was performed.`, errors: res?.errors || [] }
+        : { valid: false, verification_level: 'unverifiable', message: res?.message || `Chain unverifiable — ${results.filter(x => !x).length} record(s) failed`, errors: res?.errors || [] };
+      setVerifyResult(banner);
     } catch (e) {
-      setVerifyResult({ valid: false, message: `Verification failed: ${e.message}`, errors: [] });
+      setVerifyResult({ valid: false, verification_level: 'unverifiable', message: `Verification failed: ${e.message}`, errors: [] });
     } finally {
       setVerifying(false);
     }
