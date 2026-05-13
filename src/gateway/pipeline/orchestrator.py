@@ -1046,8 +1046,18 @@ async def _pre_policy_check(
 
 
 def _wal_backpressure_check(request: Request, ctx, settings, provider: str, model: str) -> Response | None:
-    """Step 2.5. Returns 503 if WAL is at capacity, None if OK."""
-    if not (ctx.wal_writer and not ctx.walacor_client):
+    """Step 2.5. Returns 503 if WAL is at capacity, None if OK.
+
+    Back-pressure must fire whenever the WAL is enabled, regardless of
+    whether Walacor is configured. The previous gate (`not walacor_client`)
+    was based on the false assumption that Walacor writes automatically
+    drain the WAL — they don't until ``StorageRouter.mark_delivered``
+    wires the ack path. Even with that wired, Walacor write failures or
+    a stalled delivery loop can balloon the local WAL just as fast as a
+    missing control plane can, so the back-pressure check is the correct
+    last line of defence against unbounded SQLite growth.
+    """
+    if not ctx.wal_writer:
         return None
     pending = ctx.wal_writer.pending_count()
     disk_bytes = ctx.wal_writer.disk_usage_bytes()
