@@ -2358,9 +2358,24 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             # Store canonical response for overflow capture in _build_and_write_record
             request.state._canonical_response = _canonical
 
-            # Store ML mapping metadata for audit trail
+            # Store ML mapping metadata for audit trail.
+            #
+            # D1: `schema_mapper_confidence` is now coverage-weighted —
+            # sum(mapped_confidences) / classified_count_excluding_envelope.
+            # On a 7-mapped / 8-unmapped response it reports 0.47, not 1.0.
+            # `schema_mapper_confidence_on_mapped` preserves the legacy
+            # "average over MAPPED only" semantic for any consumer that
+            # explicitly wants "how sure were we about the calls we made".
+            # D3: `schema_mapper_unmapped` and `schema_mapper_overflow_keys`
+            # exclude envelope fields (object/created/role/index/…) — the
+            # mapper tags them upstream as the synthetic `envelope` label,
+            # which keeps the operator-visible counts focused on
+            # actionably-unmapped fields rather than provider boilerplate.
             _mapping_meta = {
                 "schema_mapper_confidence": round(_canonical.mapping.confidence, 3),
+                "schema_mapper_confidence_on_mapped": round(
+                    _canonical.mapping.confidence_on_mapped, 3,
+                ),
                 "schema_mapper_mapped": len(_canonical.mapping.mapped_fields),
                 "schema_mapper_unmapped": len(_canonical.mapping.unmapped_fields),
             }
@@ -2370,6 +2385,16 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
                 _mapping_meta["schema_mapper_timing"] = dataclasses.asdict(_canonical.timing)
             if _canonical.citations:
                 _mapping_meta["schema_mapper_citations"] = len(_canonical.citations)
+            # D7: rolling 60s window of ONNX-inference timeouts on this
+            # mapper instance. Surfaced for /v1/connections — operators
+            # can see when the 100ms hot-path budget is biting under
+            # load without round-tripping to Prometheus.
+            try:
+                _timeouts = int(_schema_mapper.timeout_count_60s())
+                if _timeouts:
+                    _mapping_meta["schema_mapper_timeouts_60s"] = _timeouts
+            except Exception:
+                logger.debug("schema_mapper timeout_count_60s probe failed", exc_info=True)
 
             call = dataclasses.replace(call, metadata={**call.metadata, **_mapping_meta})
         except Exception as _sm_err:

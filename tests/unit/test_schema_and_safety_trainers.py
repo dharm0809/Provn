@@ -346,7 +346,15 @@ def test_schema_trainer_accepts_flatfield_dicts(tmp_path):
 
 
 def test_schema_trainer_candidate_drops_into_production_class(tmp_path):
-    """Train a candidate, swap it over production schema_mapper.onnx, run inference."""
+    """Train a candidate, swap it over production schema_mapper.onnx, run inference.
+
+    D2 note: SchemaMapper now validates labels-vs-model-class-count on init.
+    A candidate trained on a subset of the production label set emits
+    fewer classes than labels.json lists — that's an INFO log, not an
+    error (every emitted index is still safely inside the labels list).
+    The bad direction (model emits MORE classes than labels) is the only
+    one that raises ``LabelsMismatchError``.
+    """
     SchemaMapperTrainer().train(
         _SCHEMA_X, _SCHEMA_Y, version="dropin", candidates_dir=tmp_path,
     )
