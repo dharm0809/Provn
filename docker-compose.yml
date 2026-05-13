@@ -53,6 +53,10 @@ services:
       - WALACOR_PASSWORD=${WALACOR_PASSWORD:-}
       - WALACOR_PROVIDER_OPENAI_KEY=${OPENAI_API_KEY:-}
       - WALACOR_PROVIDER_ANTHROPIC_KEY=${ANTHROPIC_API_KEY:-}
+      # fnmatch routes (checked before path-based routing): without this the
+      # gateway sends every /v1/chat/completions to the OllamaAdapter when
+      # WALACOR_GATEWAY_PROVIDER=ollama, so gpt-* / claude-* 404 at Ollama.
+      - WALACOR_MODEL_ROUTING_JSON=${WALACOR_MODEL_ROUTING_JSON:-}
     volumes:
       - gateway-wal:/var/walacor/wal
     depends_on:
