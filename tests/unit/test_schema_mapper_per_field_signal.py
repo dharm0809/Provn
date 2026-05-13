@@ -63,24 +63,37 @@ def test_per_field_verdicts_emitted_for_openai_response():
         assert isinstance(payload["field_path"], str)
 
 
-def test_per_field_count_matches_classified_field_count():
-    """One verdict row per field — no batching, no sampling."""
+def test_per_field_count_matches_onnx_classified_field_count():
+    """One verdict row per ONNX-classified field — no batching, no sampling.
+
+    Fields routed through ``_PROVIDER_PATH_MAP`` are deterministically
+    assigned and never reach the ONNX session, so they intentionally do
+    not emit a per-field verdict (there's nothing to learn — the answer
+    is known). The contract is "one verdict per ONNX inference", not
+    "one verdict per leaf field".
+    """
     buf = VerdictBuffer(max_size=10_000)
     mapper = SchemaMapper(verdict_buffer=buf)
     if mapper._session is None:
         pytest.skip("ONNX session unavailable")
 
     from gateway.schema.features import flatten_json
+    from gateway.schema.mapper import _PROVIDER_PATH_MAP
     resp = {
         "model": "test-model",
         "choices": [{"message": {"content": "A long response with several words."}}],
         "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
     }
-    expected_field_count = len(flatten_json(resp))
+    all_fields = flatten_json(resp)
+    onnx_classified = [f for f in all_fields if f.path not in _PROVIDER_PATH_MAP]
+    expected = len(onnx_classified)
 
     mapper.map_response(resp)
     rows = _drain(buf)
-    assert len(rows) == expected_field_count
+    assert len(rows) == expected, (
+        f"verdict rows ({len(rows)}) must equal ONNX-classified field count ({expected}); "
+        f"all fields={len(all_fields)}, deterministic-skipped={len(all_fields)-expected}"
+    )
 
 
 def test_per_field_predictions_align_with_per_field_features():
