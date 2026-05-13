@@ -142,24 +142,63 @@ def _prompt_hash(text: str) -> str:
 class IntelligenceWorker:
     """Background async worker for LLM-powered enrichment.
 
-    Usage:
-        worker = IntelligenceWorker(ollama_url="http://localhost:11434")
+    The "judge" — the LLM that labels uncertain ONNX predictions for
+    distillation — is configurable. Two URL shapes are supported:
+
+      * **Gateway self-loopback (default)** — `judge_url` ending in `/v1`
+        treats the endpoint as an OpenAI-compatible chat completions
+        API (`POST /v1/chat/completions`). When the worker runs inside
+        the gateway-app container, the natural choice is
+        `http://localhost:8000/v1`; calls go through the gateway's own
+        governance layer, get audited, and use the configured upstream
+        provider (Claude by default). `judge_api_key` is required.
+
+      * **Legacy Ollama** — `judge_url` ending in anything else falls
+        back to the historical `POST {url}/api/chat` shape. Preserved
+        so existing deployments with a local Ollama keep working until
+        they migrate.
+
+    Usage::
+
+        worker = IntelligenceWorker(
+            judge_url="http://localhost:8000/v1",
+            judge_model="claude-haiku-4-5",
+            judge_api_key="wgk-...",
+        )
         task = asyncio.create_task(worker.run())
-        # ... later ...
-        await worker.enqueue(job)
-        # ... shutdown ...
-        await worker.stop()
     """
 
     def __init__(
         self,
-        ollama_url: str = "http://localhost:11434",
-        model: str = DEFAULT_MODEL,
+        judge_url: str = "http://localhost:8000/v1",
+        judge_model: str = "claude-haiku-4-5",
+        judge_api_key: str = "",
+        model: str = DEFAULT_MODEL,  # Legacy alias for judge_model; preserved for back-compat
         enabled: bool = True,
         distillation_buffer_max: int = DEFAULT_DISTILLATION_BUFFER_MAX,
+        # ── Legacy compat: old call sites pass ``ollama_url=``. ────────
+        # When provided AND ``judge_url`` is at its default, fall back
+        # to Ollama. Existing tests construct with no args and get the
+        # gateway-loopback default.
+        ollama_url: str | None = None,
     ) -> None:
-        self._ollama_url = ollama_url.rstrip("/")
-        self._model = model
+        if ollama_url is not None and judge_url == "http://localhost:8000/v1":
+            # Caller asked for the legacy path explicitly.
+            self._judge_url = ollama_url.rstrip("/")
+            self._judge_mode = "ollama"
+        else:
+            self._judge_url = judge_url.rstrip("/")
+            # Detect mode from URL shape. OpenAI-compatible endpoints
+            # end in /v1 (or /v1/openai or similar) and are addressed
+            # via /chat/completions; Ollama endpoints are everything
+            # else and use /api/chat.
+            self._judge_mode = "openai" if self._judge_url.endswith("/v1") else "ollama"
+        self._judge_model = judge_model if judge_model != DEFAULT_MODEL else model
+        self._judge_api_key = judge_api_key
+        # `_model` retained as public attr for `get_stats()` compat.
+        self._model = self._judge_model
+        # Legacy: tests + snapshot() read `_ollama_url`. Keep aliased.
+        self._ollama_url = self._judge_url
         self._enabled = enabled
         self._queue: asyncio.Queue[IntelligenceJob | None] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
         self._cache = _LRUCache()
@@ -336,25 +375,71 @@ class IntelligenceWorker:
         return result
 
     async def _call_ollama(self, prompt: str, num_predict: int) -> str | None:
-        """Call local Ollama for a single inference."""
+        """Single LLM inference. Dispatches by `self._judge_mode`.
+
+        Keeps the legacy method name so the four existing call sites
+        (intent reclassify, topics, compliance, summary) don't change.
+        Returns the model's text response, or None on any failure.
+        Failures are debug-logged — distillation is best-effort and must
+        not raise from the worker loop.
+        """
         try:
             import httpx
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                resp = await client.post(
-                    f"{self._ollama_url}/api/chat",
-                    json={
-                        "model": self._model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "stream": False,
-                        "options": {"num_predict": num_predict},
-                        "format": "json",
-                    },
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data.get("message", {}).get("content", "")
+                if self._judge_mode == "openai":
+                    return await self._call_openai_shape(client, prompt, num_predict)
+                return await self._call_ollama_shape(client, prompt, num_predict)
         except Exception as e:
-            logger.debug("Ollama call failed (non-fatal): %s", e)
+            logger.debug("Judge call failed (non-fatal): %s", e)
+        return None
+
+    async def _call_openai_shape(self, client, prompt: str, num_predict: int) -> str | None:
+        """OpenAI-compatible chat completions — used for gateway loopback
+        and any external OpenAI/Anthropic-compatible judge URL."""
+        headers = {"Content-Type": "application/json"}
+        if self._judge_api_key:
+            headers["Authorization"] = f"Bearer {self._judge_api_key}"
+        resp = await client.post(
+            f"{self._judge_url}/chat/completions",
+            headers=headers,
+            json={
+                "model": self._judge_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": num_predict,
+                "temperature": 0,
+                # Prompts already say "Respond ONLY with JSON". Models
+                # that support a structured-output hint will use it;
+                # those that don't ignore it.
+                "response_format": {"type": "json_object"},
+            },
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices") or []
+            if choices:
+                return choices[0].get("message", {}).get("content", "") or None
+        else:
+            logger.debug(
+                "Judge OpenAI-shape call returned %d (non-fatal)", resp.status_code,
+            )
+        return None
+
+    async def _call_ollama_shape(self, client, prompt: str, num_predict: int) -> str | None:
+        """Legacy Ollama call shape — kept so deployments still wired to
+        a local Ollama don't regress when this code lands."""
+        resp = await client.post(
+            f"{self._judge_url}/api/chat",
+            json={
+                "model": self._judge_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {"num_predict": num_predict},
+                "format": "json",
+            },
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("message", {}).get("content", "")
         return None
 
     def get_distillation_buffer(self) -> list[dict]:

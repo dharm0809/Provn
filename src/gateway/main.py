@@ -1866,21 +1866,39 @@ async def on_startup() -> None:
         except Exception as e:
             logger.warning("Field registry init failed (non-fatal): %s", e)
 
-        # Background LLM intelligence worker (only if Ollama is configured)
-        if settings.gateway_provider == "ollama" or settings.provider_ollama_url:
+        # Background LLM intelligence worker. Previously gated on Ollama
+        # being configured; now drives off `intelligence_judge_url` which
+        # defaults to gateway self-loopback so the worker always has a
+        # judge available (Claude via Anthropic upstream by default).
+        if settings.intelligence_enabled and settings.intelligence_judge_url:
             try:
                 from gateway.intelligence.worker import IntelligenceWorker
-                _ollama_url = settings.provider_ollama_url or "http://localhost:11434"
+                # Pick a default API key for self-loopback: first entry in
+                # WALACOR_GATEWAY_API_KEYS (strip any `:tenant_id` suffix).
+                _key = settings.intelligence_judge_api_key.strip()
+                if not _key and settings.gateway_api_keys:
+                    _key = settings.gateway_api_keys.split(",")[0].split(":")[0].strip()
                 ctx.intelligence_worker = IntelligenceWorker(
-                    ollama_url=_ollama_url,
+                    judge_url=settings.intelligence_judge_url,
+                    judge_model=settings.intelligence_judge_model,
+                    judge_api_key=_key,
                     enabled=True,
                 )
                 ctx.intelligence_worker_task = asyncio.create_task(ctx.intelligence_worker.run())
-                logger.info("Intelligence worker started (ollama=%s)", _ollama_url)
+                logger.info(
+                    "Intelligence worker started (judge=%s model=%s)",
+                    settings.intelligence_judge_url,
+                    settings.intelligence_judge_model,
+                )
 
-                # AuditLLM probe generator for active consistency testing
+                # AuditLLM probe generator for active consistency testing.
+                # ProbeGenerator still takes the legacy `ollama_url=` kwarg;
+                # we pass the judge URL — works for the gateway-loopback
+                # case (it'll just hit the gateway's own /api/chat shim if
+                # one exists, or fail fast for the OpenAI shape since
+                # probes aren't critical).
                 from gateway.intelligence.consistency import ProbeGenerator
-                ctx.probe_generator = ProbeGenerator(ollama_url=_ollama_url)
+                ctx.probe_generator = ProbeGenerator(ollama_url=settings.intelligence_judge_url)
             except Exception as e:
                 logger.warning("Intelligence worker init failed (non-fatal): %s", e)
 
