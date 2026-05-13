@@ -34,7 +34,7 @@ const TILE_ORDER = [
 
 const TILE_META = {
   providers:           { label: 'Providers',           blurb: 'Upstream LLM backends' },
-  walacor_delivery:    { label: 'Walacor Delivery',    blurb: 'Sealed write pipeline'  },
+  walacor_delivery:    { label: 'Walacor Delivery',    blurb: 'Walacor sink health + local WAL backlog' },
   analyzers:           { label: 'Analyzers',           blurb: 'Content safety probes'  },
   tool_loop:           { label: 'Tool Loop',           blurb: 'Tool-executor pipeline' },
   model_capabilities:  { label: 'Model Capabilities',  blurb: 'Per-model feature flags'},

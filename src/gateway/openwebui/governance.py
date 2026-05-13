@@ -22,8 +22,70 @@ from gateway.pipeline.context import get_pipeline_context
 from gateway.pipeline.hasher import build_execution_record
 from gateway.pipeline.model_resolver import resolve_attestation
 from gateway.pipeline.policy_evaluator import evaluate_pre_inference
+from gateway.util.request_context import new_request_id
 
 logger = logging.getLogger(__name__)
+
+
+# Map ``governance_status`` -> attempt-row ``disposition`` so the
+# completeness invariant uses the same vocabulary as the proxy path
+# (see _set_disposition in pipeline/orchestrator.py).  Plugin events
+# never block; ``blocked_post_facto`` is the audit-only verdict for
+# events that would have been blocked at the proxy.
+_PLUGIN_STATUS_TO_DISPOSITION = {
+    "pass": "allowed",
+    "warn": "allowed",
+    "skipped": "allowed",
+    "blocked_post_facto": "blocked_post_facto",
+}
+
+
+async def _write_plugin_attempt(
+    ctx,
+    settings,
+    *,
+    event_type: str,
+    provider: str,
+    model_id: str,
+    user_id: str | None,
+    status: str,
+    reason: str | None,
+    execution_id: str | None,
+) -> None:
+    """Append one gateway_attempts row for a plugin event.
+
+    Plugin events bypass ``completeness_middleware`` (``/v1/openwebui/*``
+    is on the skip-list) because the request shape is governed via
+    ``process_plugin_event`` rather than the standard chat/completions
+    pipeline. The completeness invariant still applies — every governed
+    request must have an attempt row — so we synthesize one here once
+    the governance decision is finalized.
+
+    Alternative considered (and rejected): remove ``/v1/openwebui`` from
+    the middleware skip-list and let the standard finally-block run.
+    Rejected because the middleware can't see the inlet/outlet split or
+    the post-facto verdict; the disposition column would always be
+    ``error_gateway`` for these requests and operators couldn't tell a
+    plugin block from a real handler crash.
+    """
+    if not ctx.storage:
+        return
+    record = {
+        "request_id": new_request_id(),
+        "tenant_id": settings.gateway_tenant_id or "",
+        "path": "/v1/openwebui/events",
+        "disposition": _PLUGIN_STATUS_TO_DISPOSITION.get(status, "allowed"),
+        "status_code": 200,  # plugin events always return 200 — never block
+        "provider": provider or None,
+        "model_id": model_id or None,
+        "execution_id": execution_id or None,
+        "user": user_id or None,
+        "reason": reason or f"plugin_event:{event_type}",
+    }
+    try:
+        await ctx.storage.write_attempt(record)
+    except Exception:
+        logger.warning("Plugin event write_attempt failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +377,22 @@ async def process_plugin_event(event: dict) -> dict:
             result["governance_status"] = "pass" if policy_result == "pass" else "warn"
         if errors:
             result["errors"] = errors
+        # Completeness invariant: even though inlet events skip the full
+        # pipeline, they are still governed requests and must produce
+        # exactly one gateway_attempts row. Disposition reflects the
+        # pre-inference verdict — proxy-side blocks would be
+        # blocked_post_facto here too.
+        await _write_plugin_attempt(
+            ctx,
+            settings,
+            event_type=event_type,
+            provider=provider,
+            model_id=model_id,
+            user_id=(event.get("user") or {}).get("id"),
+            status=result.get("governance_status", "skipped"),
+            reason=result.get("reason"),
+            execution_id=None,  # inlet events don't write execution records
+        )
         return result
 
     # ── Steps 3-7: Outlet-only (full pipeline) ──────────────────────────
@@ -398,5 +476,21 @@ async def process_plugin_event(event: dict) -> dict:
 
     if errors:
         result["errors"] = errors
+
+    # Completeness invariant for outlet events. process_plugin_event is
+    # the only governance path for /v1/openwebui/events, which is on the
+    # completeness_middleware skip-list, so we write the attempt row
+    # here once the final verdict is known.
+    await _write_plugin_attempt(
+        ctx,
+        settings,
+        event_type=event_type,
+        provider=provider,
+        model_id=model_id,
+        user_id=(event.get("user") or {}).get("id"),
+        status=result.get("governance_status", "pass"),
+        reason=result.get("reason"),
+        execution_id=result.get("execution_id"),
+    )
 
     return result

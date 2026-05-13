@@ -76,11 +76,15 @@ class _WC:
 
 
 class _WAL:
-    def __init__(self, pending=0):
+    def __init__(self, pending=0, oldest_pending_s=None):
         self._pending = pending
+        self._oldest = oldest_pending_s
 
     def pending_count(self):
         return self._pending
+
+    def oldest_pending_seconds(self):
+        return self._oldest
 
 
 def test_walacor_empty_disabled():
@@ -97,7 +101,9 @@ def test_walacor_red_on_low_success():
     }
     tile = B.build_walacor_delivery_tile(FakeCtx(walacor_client=_WC(snap), wal_writer=_WAL(3)))
     assert tile["status"] == "red"
-    assert tile["detail"]["pending_writes"] == 3
+    # Fix A7: field renamed from "pending_writes" -> "wal_local_backlog"
+    # to stop operators misreading WAL-local backlog as Walacor failure.
+    assert tile["detail"]["wal_local_backlog"] == 3
 
 
 def test_walacor_amber_on_partial_failures():

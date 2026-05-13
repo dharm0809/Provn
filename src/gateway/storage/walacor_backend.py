@@ -41,15 +41,25 @@ class WalacorBackend:
                 exc_info=True,
             )
 
-    async def write_tool_event(self, record: dict) -> None:
+    async def write_tool_event(self, record: dict) -> bool | None:
+        """Forward a tool event to Walacor.
+
+        Returns ``True`` on success, ``False`` on failure (must not
+        raise — the protocol-level guarantee is preserved). The return
+        value lets ``StorageRouter`` know when to fire the WAL
+        ``mark_delivered`` ack hook for tool events without violating
+        the "best-effort, no raise" contract.
+        """
         try:
             await self._client.write_tool_event(record)
+            return True
         except Exception:
             logger.warning(
                 "Walacor write_tool_event failed event_id=%s",
                 record.get("event_id"),
                 exc_info=True,
             )
+            return False
 
     async def close(self) -> None:
         await self._client.close()

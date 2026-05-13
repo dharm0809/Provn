@@ -130,21 +130,39 @@ def build_walacor_delivery_tile(ctx: Any) -> dict:
     last_success_ts = snap.get("last_success_ts")
     time_since = snap.get("time_since_last_success_s")
 
-    # Distinguish "wal not attached" from "0 pending" — the subline below
-    # only switches to "pending writes n/a" when pending is None, so we
-    # must leave it None when there is no writer to probe.
-    pending: int | None = None
+    # ``wal_local_backlog`` (renamed from ``pending_writes``): the count
+    # of undelivered rows in the local SQLite WAL.  This is a property
+    # of the *local* WAL, not of Walacor's HTTP delivery rate — under
+    # the old name operators kept reporting "Walacor delivery degraded"
+    # for a healthy Walacor whenever the WAL was backed up for other
+    # reasons (delivery worker not running, control plane gone, etc.).
+    # ``walacor_delivery_lag_seconds`` (new): seconds since the oldest
+    # undelivered row was written.  This IS a Walacor-flavoured metric
+    # because it tells you how long ago Walacor last acknowledged a
+    # record.  Distinguish "wal not attached" from "0 pending" — the
+    # subline below only switches to "n/a" when pending is None.
+    wal_local_backlog: int | None = None
+    walacor_delivery_lag_seconds: float | None = None
     wal = getattr(ctx, "wal_writer", None)
     if wal is not None:
         try:
-            pending = int(wal.pending_count())
+            wal_local_backlog = int(wal.pending_count())
         except Exception:
             logger.warning("wal pending_count failed for connections tile", exc_info=True)
-            pending = None
+            wal_local_backlog = None
+        try:
+            walacor_delivery_lag_seconds = wal.oldest_pending_seconds()
+        except Exception:
+            logger.warning("wal oldest_pending_seconds failed for connections tile", exc_info=True)
+            walacor_delivery_lag_seconds = None
 
     detail = {
         "success_rate_60s": success_rate,
-        "pending_writes": pending,
+        # Operators interpret "Walacor is failing" when Walacor is fine —
+        # the new field name pins this on the *local* WAL backlog, not
+        # the Walacor HTTP delivery rate above.
+        "wal_local_backlog": wal_local_backlog,
+        "walacor_delivery_lag_seconds": walacor_delivery_lag_seconds,
         "last_failure": last_failure,
         "last_success_ts": last_success_ts,
         "time_since_last_success_s": time_since,
@@ -159,7 +177,11 @@ def build_walacor_delivery_tile(ctx: Any) -> dict:
         if success_rate < 1.0
         else "delivery healthy"
     )
-    subline = f"{pending} pending writes" if pending is not None else "pending writes n/a"
+    subline = (
+        f"{wal_local_backlog} local backlog"
+        if wal_local_backlog is not None
+        else "local backlog n/a"
+    )
     return _tile(
         "walacor_delivery",
         status=status,
