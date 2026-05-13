@@ -26,6 +26,41 @@ logger = logging.getLogger(__name__)
 _pending_attempt_writes: set[asyncio.Task] = set()
 
 
+async def drain_pending_attempt_writes(timeout: float = 5.0) -> None:
+    """Await any in-flight attempt-write tasks before shutdown.
+
+    The completeness middleware spawns background tasks via
+    ``asyncio.create_task`` so the slow Walacor HTTP round-trip never
+    sits on the request tail.  Those tasks are only kept alive by a
+    strong reference in the module-level ``_pending_attempt_writes``
+    set — if the event loop is torn down before they finish, the
+    in-flight attempt rows are lost.
+
+    ``on_shutdown`` calls this helper with a bounded timeout so the
+    common case (a couple of writes in flight) is drained cleanly while
+    a stuck Walacor sink can never hold up shutdown indefinitely.
+
+    Alternative considered (and rejected): block the request finally
+    on the write directly. Rejected because it would re-introduce the
+    request-tail latency the background task was designed to remove —
+    drain at shutdown is the surgical fix.
+    """
+    pending = list(_pending_attempt_writes)
+    if not pending:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*pending, return_exceptions=True),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "drain_pending_attempt_writes: %d task(s) still in flight after %.1fs — dropping",
+            len(pending),
+            timeout,
+        )
+
+
 async def _write_attempt_bg(storage, record: dict, timeout: float) -> None:
     """Background task: write one attempt record without blocking the response.
 

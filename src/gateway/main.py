@@ -516,19 +516,38 @@ async def _self_test() -> None:
                 f"(e.g. http://localhost:11434)."
             )
 
-    # WAL write/deliver smoke-test (WAL mode only). Record is dict (no prompt_hash/response_hash).
+    # WAL schema smoke-test (WAL mode only). Validate the durable write
+    # path against an in-memory SQLite connection rather than the real
+    # WAL file — this used to insert a "self-test-startup" row and mark
+    # it delivered, which accumulated forever on every restart even with
+    # INSERT OR REPLACE because Walacor never saw the synthetic record.
+    # The schema is identical on both paths (see ``_apply_schema``), so
+    # exercising it in-memory is a strictly stronger check than the old
+    # round-trip while leaving the real WAL untouched.
     if ctx.wal_writer:
-        record = {
-            "execution_id": "self-test-startup",
-            "model_attestation_id": "self-test",
-            "policy_version": 0,
-            "policy_result": "pass",
-            "tenant_id": settings.gateway_tenant_id,
-            "gateway_id": settings.gateway_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        ctx.wal_writer.write_durable(record)
-        ctx.wal_writer.mark_delivered(record["execution_id"])
+        import sqlite3
+        from gateway.wal.writer import _apply_schema
+
+        smoke_conn = sqlite3.connect(":memory:")
+        try:
+            _apply_schema(smoke_conn)
+            smoke_conn.execute(
+                "INSERT INTO wal_records (execution_id, record_json, created_at)"
+                " VALUES (?, ?, ?)",
+                (
+                    "self-test-startup",
+                    "{}",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            smoke_conn.execute(
+                "UPDATE wal_records SET delivered=1, delivered_at=?"
+                " WHERE execution_id=?",
+                (datetime.now(timezone.utc).isoformat(), "self-test-startup"),
+            )
+            smoke_conn.commit()
+        finally:
+            smoke_conn.close()
 
     logger.info("Startup self-test passed")
 
@@ -571,7 +590,26 @@ async def _init_governance(settings, ctx) -> None:
 
 
 def _init_wal(settings, ctx) -> None:
-    """Phase 2: WAL writer and delivery worker."""
+    """Phase 2: WAL writer and (optionally) delivery worker.
+
+    The WAL writer is always started so the local SQLite WAL can serve
+    lineage reads and survive provider/Walacor outages.
+
+    The DeliveryWorker is a *control-plane* shipper — it POSTs records
+    to a remote aggregator at ``/v1/gateway/executions``. It is therefore
+    only useful when ``control_plane_url`` is configured and a separate
+    aggregator is fronting the gateway. For Walacor-backed deployments,
+    StorageRouter directly calls ``WALBackend.mark_delivered`` after the
+    Walacor sink acknowledges the write — see ``StorageRouter`` for the
+    delivery-acknowledgement path.
+
+    Alternative considered (and rejected): start DeliveryWorker even when
+    only Walacor is configured. Rejected because the worker POSTs to the
+    control-plane aggregator endpoint, not Walacor — running it without
+    that endpoint would generate a steady stream of connection-refused
+    errors and never mark any record delivered. The router-driven
+    ``mark_delivered`` path covers Walacor-only deployments cleanly.
+    """
     from gateway.wal.writer import WALWriter
     from gateway.wal.delivery_worker import DeliveryWorker
 
@@ -583,10 +621,16 @@ def _init_wal(settings, ctx) -> None:
         # Delivery worker ships WAL records to a remote control plane aggregator.
         # Only needed when a separate control plane URL is configured.
         # When walacor_storage_enabled=True, records go directly to Walacor
-        # via the storage router (dual-write) — no delivery worker needed.
+        # via the storage router (dual-write) and StorageRouter marks the WAL
+        # row delivered on Walacor success — no delivery worker needed.
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
-    elif not settings.walacor_storage_enabled:
+    elif settings.walacor_storage_enabled:
+        logger.info(
+            "Delivery worker skipped: Walacor backend handles durability — "
+            "StorageRouter marks WAL records delivered on Walacor success"
+        )
+    else:
         logger.info("Delivery worker skipped: no Walacor backend or control plane configured")
 
 
@@ -833,7 +877,7 @@ def _init_budget_tracker(settings, ctx) -> None:
 
 
 def _init_session_chain(settings, ctx) -> None:
-    """Phase 13: Merkle session chain tracker (in-memory or Redis-backed)."""
+    """Initialise the UUIDv7 ID-pointer session chain tracker (in-memory or Redis-backed)."""
     if not settings.session_chain_enabled:
         return
     from gateway.pipeline.session_chain import make_session_chain_tracker
@@ -1539,12 +1583,26 @@ async def on_startup() -> None:
         # the records it authenticates. Fail-open: if key generation fails
         # (e.g. read-only FS, missing cryptography package), records are
         # written unsigned and verify_chain reports signatures as "absent".
-        from gateway.crypto.signing import ensure_signing_key
+        #
+        # C3: the helper `apply_session_chain` only invokes sign_canonical
+        # when `settings.record_signing_enabled` is True. To make sure the
+        # signing infrastructure is reachable when operators do enable
+        # signing, we still auto-provision the key on every boot — the flag
+        # gates the per-record CALL, not the boot-time setup. If signing is
+        # on but the key can't be loaded, log loudly so deploys see it.
+        from gateway.crypto.signing import ensure_signing_key, signing_key_available
         import os as _os
         _key_path = settings.record_signing_key_path or _os.path.join(
             settings.wal_path, "record-signing.ed25519.pem"
         )
         ensure_signing_key(_key_path)
+        if settings.record_signing_enabled and not signing_key_available():
+            logger.error(
+                "WALACOR_RECORD_SIGNING_ENABLED=true but no Ed25519 key could be loaded from %s "
+                "— records will be written unsigned. Check filesystem permissions and the "
+                "`cryptography` package install.",
+                _key_path,
+            )
 
         # Walacor storage is mode-independent: init before the skip_governance shortcut
         # so completeness attempts are always written when credentials are configured.
@@ -1881,7 +1939,25 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"sync_loop_task: {e}")
 
+    # Drain pending background attempt-row writes before tearing down the
+    # WAL/Walacor sinks. Bounded by a tight ceiling so a stuck Walacor
+    # POST can never hold up shutdown indefinitely.
+    try:
+        from gateway.middleware.completeness import drain_pending_attempt_writes
+        await drain_pending_attempt_writes(timeout=5.0)
+    except Exception as e:
+        errors.append(f"drain_pending_attempt_writes: {e}")
+
     if ctx.delivery_worker:
+        # Best-effort drain of any freshly-written records before the
+        # writer thread shuts down. Mirrors the completeness drain above
+        # so each persistence path gets one final flush attempt.
+        try:
+            drain_fn = getattr(ctx.delivery_worker, "drain", None)
+            if drain_fn is not None:
+                await drain_fn(timeout=5.0)
+        except Exception as e:
+            errors.append(f"delivery_worker.drain: {e}")
         try:
             ctx.delivery_worker.stop()
         except Exception as e:

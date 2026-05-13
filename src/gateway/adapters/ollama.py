@@ -169,12 +169,15 @@ class OllamaAdapter(ProviderAdapter):
         url = f"{self._base_url}{original.url.path}"
         if original.url.query:
             url += f"?{original.url.query}"
-        skip = {"origin", "referer", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "host"}
+        # Strip caller auth and browser-origin headers; never forward the gateway's
+        # own X-API-Key (wgk-*) or Authorization to the upstream provider.
+        skip = {
+            "origin", "referer", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+            "host", "content-length", "authorization", "x-api-key",
+        }
         headers = {k: v for k, v in original.headers.items() if k.lower() not in skip}
-        # Strip content-length so httpx recomputes it from the actual (possibly modified) body.
-        headers.pop("content-length", None)
         if self._api_key:
-            headers.setdefault("Authorization", f"Bearer {self._api_key}")
+            headers["Authorization"] = f"Bearer {self._api_key}"
         return httpx.Request(
             method=original.method,
             url=url,

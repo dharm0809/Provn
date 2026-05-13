@@ -47,7 +47,21 @@ def _deserialize_record(r: dict) -> dict:
     """Convert Walacor storage format back to gateway record format.
 
     - metadata_json (string) → metadata (dict)
-    - Strips Walacor internal fields (_id, ORGId, UID, IsDeleted, SV, etc.)
+    - Strips Walacor envelope-internal fields that leak into operator views.
+
+    C9: the strip-list now includes ``CreatedAt``, ``UpdatedAt``, ``EId``. These
+    are Walacor bookkeeping fields that no dashboard JSX reads; they only
+    clutter the JSON returned to the audit dashboard and made record diffs
+    noisy. ``EId`` is intentionally re-attached as the leading-underscore
+    ``_walacor_eid`` by the caller for the envelope drawer; we strip it here
+    so it doesn't appear at top level.
+
+    C10: ``metadata._internal`` is PRESERVED, not promoted. Internal classifier
+    flags (``_intent``, ``_translated_from_openai``, ``schema_mapper_*``) live
+    inside that nested key. Operators with ``?debug=true`` can still see it;
+    the simple session view ignores it. The alternative (strip outright) was
+    rejected because auditors should be able to inspect classifier reasoning
+    if needed — just not by default.
     """
     # Parse metadata_json back to metadata dict
     mj = r.pop("metadata_json", None)
@@ -68,8 +82,13 @@ def _deserialize_record(r: dict) -> dict:
         for chain_key in ("sequence_number", "record_hash", "previous_record_hash"):
             if r.get(chain_key) is None and meta.get(chain_key) is not None:
                 r[chain_key] = meta[chain_key]
+        # NB: deliberately do NOT pop `_internal` — keeping classifier
+        # reasoning available behind the operator's debug filter.
     # Strip Walacor internal fields that leak into query results
-    for k in ("_id", "ORGId", "UID", "IsDeleted", "SV", "LastModifiedBy"):
+    for k in (
+        "_id", "ORGId", "UID", "IsDeleted", "SV", "LastModifiedBy",
+        "CreatedAt", "UpdatedAt", "EId",
+    ):
         r.pop(k, None)
     return r
 
@@ -137,6 +156,12 @@ class WalacorLineageReader:
         tool_map = await self._get_session_tool_indicators(session_ids) if session_ids else {}
         # For sessions where $last metadata is a system task, fetch user-record metadata
         user_meta_map = await self._get_user_record_metadata(session_ids) if session_ids else {}
+        # C6: compute per-session chain_status by walking previous_record_id
+        # linkage. The dashboard reads this field on every session row
+        # (`Sessions.jsx:58, 124, 205`); pre-fix code never populated it so
+        # all sessions defaulted to "verified", which made the integrity
+        # badge decorative.
+        chain_status_map = await self._compute_chain_status_map(session_ids) if session_ids else {}
 
         results = []
         for r in rows:
@@ -163,8 +188,72 @@ class WalacorLineageReader:
                 "request_type": meta.get("request_type"),
                 "tool_names": tools.get("tool_names", ""),
                 "tool_details": tools.get("tool_details", ""),
+                # "verified" | "warn" — derived from `previous_record_id`
+                # walk in `_compute_chain_status_map`.
+                "chain_status": chain_status_map.get(sid, "verified"),
             })
         return results
+
+    async def _compute_chain_status_map(self, session_ids: list[str]) -> dict[str, str]:
+        """Walk each session's records and decide ``chain_status``.
+
+        Returns ``{session_id: "verified" | "warn"}``. A session is "verified"
+        when every record's ``previous_record_id`` equals the immediately
+        preceding record's ``record_id`` (and the first record's
+        ``previous_record_id`` is None). Otherwise "warn".
+
+        Implementation: one batched query for all records in the supplied
+        sessions, then group-and-walk in Python. Avoids running N verify_chain
+        calls against Walacor when N can easily reach 50 sessions per page.
+
+        Fail-open: a query error returns an empty map so the caller falls back
+        to "verified" — keeps the dashboard usable on Walacor flakiness.
+        """
+        if not session_ids:
+            return {}
+        try:
+            rows = await self._client.query_complex(
+                self._exec_etid,
+                [
+                    {"$match": {"session_id": {"$in": session_ids}}},
+                    {"$project": {
+                        "session_id": 1,
+                        "sequence_number": 1,
+                        "record_id": 1,
+                        "previous_record_id": 1,
+                    }},
+                ],
+            )
+        except Exception:
+            logger.warning("chain_status query failed (defaulting to verified)", exc_info=True)
+            return {}
+
+        # Group by session_id and sort within session by sequence_number then
+        # record_id (UUIDv7 is time-ordered). Matches `get_session_timeline`'s
+        # ordering so the walk reflects what the dashboard will render.
+        from collections import defaultdict
+        by_session: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            sid = r.get("session_id")
+            if sid:
+                by_session[sid].append(r)
+
+        status: dict[str, str] = {}
+        for sid, recs in by_session.items():
+            recs.sort(key=lambda r: (
+                r.get("sequence_number") if r.get("sequence_number") is not None else 1 << 31,
+                r.get("record_id") or "",
+            ))
+            expected_prev: str | None = None
+            verified = True
+            for r in recs:
+                prev = r.get("previous_record_id")
+                if prev != expected_prev:
+                    verified = False
+                    break
+                expected_prev = r.get("record_id")
+            status[sid] = "verified" if verified else "warn"
+        return status
 
     @staticmethod
     def _parse_session_metadata(metadata_json: str | dict | None) -> dict:
@@ -313,9 +402,16 @@ class WalacorLineageReader:
     # ── Session timeline ──────────────────────────────────────────────────
 
     async def get_session_timeline(self, session_id: str, limit: int = 500) -> list[dict]:
+        # C11: sort by ``(sequence_number, record_id)`` — record_id is UUIDv7
+        # so its lexicographic order matches creation time, giving a stable
+        # tiebreaker without depending on the envelope ``$lookup`` having
+        # already attached ``CreatedAt``. The previous sort included
+        # ``CreatedAt`` here but the field isn't on the execution record before
+        # the lookup runs, so records that share a sequence_number could come
+        # back in undefined order.
         pipeline: list[dict] = [
             {"$match": {"session_id": session_id}},
-            {"$sort": {"sequence_number": 1, "CreatedAt": 1}},
+            {"$sort": {"sequence_number": 1, "record_id": 1}},
         ]
         try:
             capped = max(1, int(limit))
@@ -331,8 +427,13 @@ class WalacorLineageReader:
         rows = await self._client.query_complex(self._exec_etid, pipeline)
         results = []
         for r in rows:
+            # Capture EId BEFORE deserialization — _deserialize_record now
+            # strips it from the top-level record (C9) so the dashboard sees
+            # a clean view. We still want it available as `_walacor_eid` for
+            # the envelope drawer and the chain anchor round-trip.
+            eid = r.get("EId")
             _deserialize_record(r)
-            r["_walacor_eid"] = r.get("EId")
+            r["_walacor_eid"] = eid
             _normalize_record(r)
             results.append(r)
         return results
@@ -354,8 +455,9 @@ class WalacorLineageReader:
         if not rows:
             return None
         r = rows[0]
+        eid = r.get("EId")  # capture before _deserialize_record strips it (C9)
         _deserialize_record(r)
-        r["_walacor_eid"] = r.get("EId")
+        r["_walacor_eid"] = eid
         _normalize_record(r)
         return r
 
@@ -570,6 +672,27 @@ class WalacorLineageReader:
              EId on the envelope collection and confirm BlockId/TransId/DH
              match what the record fetch returned. Defeats any in-query
              tampering at the initial ``$lookup`` stage.
+
+        C2: ``verification_level`` distinguishes three outcomes:
+
+            * ``"verified"`` — structural integrity holds AND every anchor
+              completed an independent Walacor round-trip with matching
+              BlockId/TransId/DH. Strongest guarantee.
+            * ``"structural"`` — structural integrity holds, anchor fields are
+              present on every record, but at least one round-trip didn't
+              actually compare against the envelope collection (e.g. no
+              ``_walacor_eid`` for that record). Useful for offline / partial
+              audits. Does NOT prove the seal is still intact at Walacor.
+            * ``"unverifiable"`` — at least one anchor round-trip raised a
+              transport error, OR records have anchor fields missing, OR a
+              signature check failed, OR structural errors exist.
+
+        Per-record ``valid`` (C6 read-side): each record carries a boolean so
+        the dashboard's per-row badge reflects that single record's status,
+        not the aggregate session verdict.
+
+        The session-level ``valid`` field is True only when
+        ``verification_level == "verified"``.
         """
         from gateway.crypto.signing import verify_record_signature, signing_key_available
         from gateway.lineage.reader import _empty_verify_result
@@ -582,7 +705,7 @@ class WalacorLineageReader:
         expected_prev_id: str | None = records[0].get("previous_record_id")
         per_record: list[dict] = []
         sig_valid = sig_invalid = sig_absent = sig_unverifiable = 0
-        anchor_ok = anchor_missing = anchor_mismatched = anchor_unverifiable = 0
+        anchor_verified = anchor_present_only = anchor_missing = anchor_mismatched = anchor_unverifiable = 0
         roundtrips_attempted = False
 
         for i, r in enumerate(records):
@@ -649,7 +772,7 @@ class WalacorLineageReader:
                     fresh_trans = env.get("TransId")
                     fresh_dh = env.get("DH")
                     if (fresh_block, fresh_trans, fresh_dh) == (block_id, trans_id, dh):
-                        anchor_ok += 1
+                        anchor_verified += 1
                         anchor_status = "verified"
                     else:
                         anchor_mismatched += 1
@@ -670,10 +793,24 @@ class WalacorLineageReader:
                     anchor_unverifiable += 1
                     anchor_status = "unverifiable"
             elif has_anchor:
-                anchor_ok += 1
+                # C2: anchor fields exist on the record body but we don't have
+                # an EId to round-trip them. This is "present" (we can't
+                # tamper-check) NOT "verified" (we proved it matches). The
+                # pre-fix code lumped both buckets under `anchor_ok`, so the
+                # session-level `valid` accepted these as verified.
+                anchor_present_only += 1
                 anchor_status = "present"
             else:
                 anchor_missing += 1
+
+            # Per-record validity: passes when structural is OK, signature is
+            # not invalid (absent/unverifiable don't fail the row), and anchor
+            # didn't round-trip-mismatch.
+            record_valid = (
+                structural_ok
+                and sig_status != "invalid"
+                and anchor_status != "mismatched"
+            )
 
             per_record.append({
                 "execution_id": execution_id,
@@ -682,22 +819,61 @@ class WalacorLineageReader:
                 "structural_ok": structural_ok,
                 "signature": sig_status,
                 "anchor": anchor_status,
+                # C6 read-side: dashboard renders `r.valid !== false` for the
+                # per-row tick. Make it explicit.
+                "valid": record_valid,
                 "walacor_block_id": block_id,
                 "walacor_trans_id": trans_id,
                 "walacor_dh": dh,
             })
 
-        # `valid` requires structural integrity (no errors), zero
-        # unverifiable anchor round-trips, and zero missing anchors. A
-        # network partition that makes the round-trip fail must NOT
-        # produce valid:true — the pre-fix code did, which is the
-        # bug this method now guards against.
+        # Derive verification_level (C2):
+        #   * "verified"     — every anchor round-tripped with a match AND no
+        #                      structural / signature errors.
+        #   * "structural"   — structural integrity intact, no anchor
+        #                      mismatches OR round-trip failures, but at
+        #                      least one record was not independently
+        #                      round-tripped (anchor present on body without
+        #                      EId, or anchor absent on legacy records).
+        #                      Strong claim about LINKAGE only — not about
+        #                      whether the Walacor seal still holds today.
+        #   * "unverifiable" — anything else (transport failures during
+        #                      round-trip, mismatched anchor fields,
+        #                      structural breaks, bad signatures).
+        signatures_clean = sig_invalid == 0
+        structural_clean = len(errors) == 0
+        no_anchor_failures = (
+            anchor_mismatched == 0
+            and anchor_unverifiable == 0
+        )
+        if (
+            structural_clean
+            and signatures_clean
+            and no_anchor_failures
+            and anchor_missing == 0
+            and anchor_present_only == 0
+        ):
+            verification_level = "verified"
+        elif (
+            structural_clean
+            and signatures_clean
+            and no_anchor_failures
+        ):
+            # Chain linkage intact and no anchor evidence is contradictory.
+            # Some records have anchors that weren't round-tripped (or no
+            # anchor at all — legacy records). We can vouch for the chain
+            # structure but not for "the seal is still intact at Walacor".
+            verification_level = "structural"
+        else:
+            verification_level = "unverifiable"
+
         return {
-            "valid": (
-                len(errors) == 0
-                and anchor_unverifiable == 0
-                and anchor_missing == 0
-            ),
+            # Top-level `valid` only when the strongest level holds. A network
+            # partition that makes the round-trip fail, OR an anchor present
+            # on the record body but not independently verified, must NOT
+            # produce valid:true (the original C2 bug).
+            "valid": verification_level == "verified",
+            "verification_level": verification_level,
             "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
@@ -707,10 +883,16 @@ class WalacorLineageReader:
                 "signatures": {"valid": sig_valid, "invalid": sig_invalid,
                                "absent": sig_absent, "unverifiable": sig_unverifiable,
                                "verify_key_loaded": signing_key_available()},
-                "anchors":    {"present": anchor_ok, "absent": anchor_missing,
-                               "mismatched": anchor_mismatched,
-                               "unverifiable": anchor_unverifiable,
-                               "independent_roundtrip": roundtrips_attempted},
+                "anchors":    {
+                    # "verified" = round-tripped & matched
+                    # "present"  = on the body, not round-tripped
+                    "verified": anchor_verified,
+                    "present": anchor_present_only,
+                    "absent": anchor_missing,
+                    "mismatched": anchor_mismatched,
+                    "unverifiable": anchor_unverifiable,
+                    "independent_roundtrip": roundtrips_attempted,
+                },
             },
             "records": per_record,
             # Back-compat for older clients.

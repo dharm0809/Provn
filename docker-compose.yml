@@ -3,9 +3,30 @@
 #   docker compose up
 #
 # Starts Gateway + Ollama + OpenWebUI
-# OpenWebUI: http://localhost:3000
+# OpenWebUI: http://localhost:3000          (override with OPENWEBUI_PORT)
 # Gateway health: http://localhost:8002/health
 # Gateway lineage: http://localhost:8002/lineage/
+#
+# ─── Configuration layout ──────────────────────────────────────────────────
+# Three env files; compose loads only what each service needs:
+#
+#   .env                Compose-level interpolation only. Image tags + host
+#                       ports referenced as ${VAR} in this file.
+#   .env.gateway        Everything the gateway container reads (WALACOR_*,
+#                       OPENAI_API_KEY, ANTHROPIC_API_KEY, model routing).
+#   .env.openwebui      OpenWebUI's own config (WEBUI_*, the gateway wgk-*
+#                       key that OWUI sends as a *client* credential).
+#
+# Adding a new gateway env var? Add it to .env.gateway (and the .example).
+# No compose edits needed — env_file forwards every entry automatically.
+# The .env.gateway.example is also the source of truth for the
+# test_env_propagation.py CI check.
+#
+# Why deployment-shape constants (WALACOR_PROVIDER_OLLAMA_URL,
+# OPENAI_API_BASE_URL, WALACOR_WAL_PATH) live in `environment:` rather
+# than env files: they reference docker-network hostnames and container
+# paths, not user-overridable config. They change when the deployment
+# shape changes (e.g. moving to k8s), not when the user changes a key.
 
 services:
   ollama:
@@ -31,26 +52,16 @@ services:
     #   context: .
     #   dockerfile: deploy/Dockerfile
     ports:
-      - "8002:8000"
+      # Host port overridable via GATEWAY_PORT in .env (matches OPENWEBUI_PORT
+      # below). Default 8002 keeps existing local-dev / CI scripts working.
+      - "${GATEWAY_PORT:-8002}:8000"
     environment:
-      - WALACOR_GATEWAY_TENANT_ID=${WALACOR_GATEWAY_TENANT_ID:-dev-tenant}
+      # Deployment-shape constants. The values reference compose-internal
+      # hostnames / volume paths and never come from user-managed .env.
       - WALACOR_PROVIDER_OLLAMA_URL=http://ollama:11434
-      - WALACOR_GATEWAY_PROVIDER=${WALACOR_GATEWAY_PROVIDER:-ollama}
-      - WALACOR_GATEWAY_API_KEYS=${WALACOR_GATEWAY_API_KEYS:-}
       - WALACOR_WAL_PATH=/var/walacor/wal
-      - WALACOR_SKIP_GOVERNANCE=${WALACOR_SKIP_GOVERNANCE:-false}
-      - WALACOR_TOOL_AWARE_ENABLED=${WALACOR_TOOL_AWARE_ENABLED:-true}
-      - WALACOR_WEB_SEARCH_ENABLED=${WALACOR_WEB_SEARCH_ENABLED:-true}
-      - WALACOR_THINKING_STRIP_ENABLED=${WALACOR_THINKING_STRIP_ENABLED:-true}
-      - WALACOR_LINEAGE_ENABLED=${WALACOR_LINEAGE_ENABLED:-true}
-      - WALACOR_CONTROL_PLANE_ENABLED=${WALACOR_CONTROL_PLANE_ENABLED:-true}
-      - WALACOR_PROVIDER_TIMEOUT=${WALACOR_PROVIDER_TIMEOUT:-300}
-      - WALACOR_LOG_LEVEL=${WALACOR_LOG_LEVEL:-INFO}
-      - WALACOR_SERVER=${WALACOR_SERVER:-}
-      - WALACOR_USERNAME=${WALACOR_USERNAME:-}
-      - WALACOR_PASSWORD=${WALACOR_PASSWORD:-}
-      - WALACOR_PROVIDER_OPENAI_KEY=${OPENAI_API_KEY:-}
-      - WALACOR_PROVIDER_ANTHROPIC_KEY=${ANTHROPIC_API_KEY:-}
+    env_file:
+      - .env.gateway
     volumes:
       - gateway-wal:/var/walacor/wal
     depends_on:
@@ -68,23 +79,14 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     container_name: gateway-openwebui
     ports:
-      - "3000:8080"
+      - "${OPENWEBUI_PORT:-3000}:8080"
     volumes:
       - webui-data:/app/backend/data
     environment:
+      # Deployment-shape constant: gateway's hostname on the compose network.
       - OPENAI_API_BASE_URL=http://gateway:8000/v1
-      - OPENAI_API_KEY=${WALACOR_GATEWAY_API_KEYS:-dev-key}
-      - ENABLE_OLLAMA_API=false
-      - ENABLE_FORWARD_USER_INFO_HEADERS=true
-      - ENABLE_DIRECT_CONNECTIONS=false
-      - ENABLE_SIGNUP=true
-      - WEBUI_NAME=${WEBUI_NAME:-Walacor Chat}
-      # Stable secret key — without this, OpenWebUI auto-generates a new key on
-      # every container restart, invalidating all session tokens (users get
-      # logged out, newly-added admin users appear to "reset"). Set a long
-      # random value in your .env (see .env.example) and keep it unchanged
-      # across deployments so credentials persist.
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-me-to-a-long-random-string}
+    env_file:
+      - .env.openwebui
     depends_on:
       gateway:
         condition: service_healthy

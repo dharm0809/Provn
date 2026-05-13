@@ -1019,9 +1019,9 @@ class AnthropicAdapter(ProviderAdapter):
             }
         else:
             headers = dict(original.headers)
-            headers.pop("content-length", None)
-            headers.pop("host", None)
-            if self._api_key and "x-api-key" not in [h.lower() for h in headers]:
+            for stripped in ("content-length", "host", "authorization", "x-api-key"):
+                headers.pop(stripped, None)
+            if self._api_key:
                 headers["x-api-key"] = self._api_key
             headers.setdefault("anthropic-version", _ANTHROPIC_VERSION)
 

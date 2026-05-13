@@ -26,8 +26,14 @@ class StorageBackend(Protocol):
         """Write an attempt record. Best-effort — must not raise."""
         ...
 
-    async def write_tool_event(self, record: dict) -> None:
-        """Write a tool event record. Best-effort — must not raise."""
+    async def write_tool_event(self, record: dict) -> bool | None:
+        """Write a tool event record. Best-effort — must not raise.
+
+        May optionally return ``True`` on success / ``False`` on failure
+        so the router can fire the WAL mark_delivered ack hook for
+        tool-event rows. Returning ``None`` is treated as success for
+        backwards compatibility with older implementations.
+        """
         ...
 
     async def close(self) -> None:

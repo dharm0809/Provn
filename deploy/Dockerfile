@@ -18,7 +18,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 app
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl duckduckgo-search && rm -rf /wheels
+# Compliance PDF (jinja2 + weasyprint) is bundled because the Pango/Cairo
+# system libs installed above are useless without it — /v1/compliance/export
+# returns 501 otherwise. duckduckgo-search powers the built-in web tool.
+RUN pip install --no-cache-dir /wheels/*.whl duckduckgo-search 'jinja2>=3.1' 'weasyprint>=62.0' && rm -rf /wheels
 RUN mkdir -p /var/walacor/wal && chown app:app /var/walacor/wal
 USER app
 EXPOSE 8000

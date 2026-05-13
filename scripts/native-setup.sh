@@ -130,7 +130,7 @@ export WALACOR_GATEWAY_TENANT_ID=dev-tenant
 export WALACOR_GATEWAY_PROVIDER=ollama
 
 # Walacor backend storage (dual-write: WAL + remote)
-export WALACOR_SERVER="${WALACOR_SERVER:-https://sandbox.walacor.com/api}"
+export WALACOR_SERVER="${WALACOR_SERVER:-http://32.196.5.38/api}"
 export WALACOR_USERNAME="${WALACOR_USERNAME:-}"
 export WALACOR_PASSWORD="${WALACOR_PASSWORD:-}"
 export WALACOR_PROVIDER_OLLAMA_URL=http://localhost:11434

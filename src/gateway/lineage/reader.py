@@ -16,9 +16,17 @@ logger = logging.getLogger(__name__)
 
 
 def _empty_verify_result(session_id: str) -> dict:
+    """Shape returned for sessions with zero records on file.
+
+    ``valid`` is True (there's nothing to disprove) but ``verification_level``
+    is explicitly ``"structural"`` rather than ``"verified"`` — we have
+    absolutely no Walacor evidence either way. Dashboard renders this as a
+    neutral state, not a green check.
+    """
     from gateway.crypto.signing import signing_key_available
     return {
         "valid": True,
+        "verification_level": "structural",
         "records_checked": 0,
         "errors": [],
         "session_id": session_id,
@@ -26,7 +34,8 @@ def _empty_verify_result(session_id: str) -> dict:
             "structural": {"passed": 0, "failed": 0},
             "signatures": {"valid": 0, "invalid": 0, "absent": 0, "unverifiable": 0,
                            "verify_key_loaded": signing_key_available()},
-            "anchors":    {"present": 0, "absent": 0, "independent_roundtrip": False},
+            "anchors":    {"verified": 0, "present": 0, "absent": 0, "mismatched": 0,
+                           "unverifiable": 0, "independent_roundtrip": False},
         },
         "records": [],
         "walacor_attestation": [],
@@ -251,15 +260,78 @@ class LineageReader:
             and r.get("meta_tool_count") and r.get("meta_tool_count") > 0
         ]
         fallback_map = self._batch_extract_tool_names_from_metadata(fallback_ids)
+        # C6 read-side: walk previous_record_id per session and surface
+        # chain_status. The dashboard renders this on every session row;
+        # without it every session shows the default green chip regardless of
+        # actual chain integrity. SQLite path mirrors what the Walacor reader
+        # does in `_compute_chain_status_map`.
+        session_ids = [r["session_id"] for r in rows]
+        chain_status_map = self._compute_chain_status_map(session_ids)
 
         results = []
         for d in rows:
-            if d["session_id"] in fallback_map:
-                d["tool_names"], d["tool_details"] = fallback_map[d["session_id"]]
+            sid = d["session_id"]
+            if sid in fallback_map:
+                d["tool_names"], d["tool_details"] = fallback_map[sid]
             d.pop("meta_tool_strategy", None)
             d.pop("meta_tool_count", None)
+            d["chain_status"] = chain_status_map.get(sid, "verified")
             results.append(d)
         return results
+
+    def _compute_chain_status_map(self, session_ids: list[str]) -> dict[str, str]:
+        """Walk each session's previous_record_id chain in one batched query.
+
+        Returns ``{session_id: "verified" | "warn"}``. Linkage is "verified"
+        when every record's `previous_record_id` equals the predecessor's
+        `record_id` (and the first is None). Otherwise "warn".
+
+        Single SQLite query for N sessions — same shape as the Walacor
+        reader's `_compute_chain_status_map` so the dashboard sees the same
+        contract on both backends. Fail-open: a SQL error returns an empty
+        map and `chain_status` defaults to "verified" on the row.
+        """
+        if not session_ids:
+            return {}
+        placeholders = ",".join("?" for _ in session_ids)
+        conn = self._ensure_conn()
+        try:
+            cur = conn.execute(
+                f"""SELECT session_id, sequence_number,
+                          json_extract(record_json, '$.record_id') AS record_id,
+                          json_extract(record_json, '$.previous_record_id') AS previous_record_id
+                   FROM wal_records
+                   WHERE event_type = 'execution'
+                     AND session_id IN ({placeholders})
+                   ORDER BY session_id, sequence_number,
+                            json_extract(record_json, '$.record_id')""",
+                tuple(session_ids),
+            )
+            rows = cur.fetchall()
+        except Exception:
+            logger.warning("chain_status SQL failed (defaulting to verified)", exc_info=True)
+            return {}
+
+        from collections import defaultdict
+        by_session: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            by_session[row["session_id"]].append({
+                "record_id": row["record_id"],
+                "previous_record_id": row["previous_record_id"],
+                "sequence_number": row["sequence_number"],
+            })
+
+        status: dict[str, str] = {}
+        for sid, recs in by_session.items():
+            expected_prev = None
+            verified = True
+            for r in recs:
+                if r["previous_record_id"] != expected_prev:
+                    verified = False
+                    break
+                expected_prev = r["record_id"]
+            status[sid] = "verified" if verified else "warn"
+        return status
 
     def _batch_extract_tool_names_from_metadata(
         self, session_ids: list[str],
@@ -823,11 +895,21 @@ class LineageReader:
 
             has_anchor = bool(rec.get("walacor_block_id") and rec.get("walacor_trans_id") and rec.get("walacor_dh"))
             if has_anchor:
+                # SQLite reader does NOT do anchor round-trips (it only reads
+                # the local WAL — no live Walacor connection). The strongest
+                # claim it can make about an anchor is "present", not
+                # "verified". This is the C2 fix on the SQLite path: the
+                # session-level `valid` no longer treats "present without
+                # round-trip" as a positive proof.
                 anchor_ok += 1
                 anchor_status = "present"
             else:
                 anchor_missing += 1
                 anchor_status = "absent"
+
+            # Per-record validity (C6 read-side): true unless this row has a
+            # structural break or an invalid signature.
+            record_valid = structural_ok and sig_status != "invalid"
 
             per_record.append({
                 "execution_id": execution_id,
@@ -836,13 +918,35 @@ class LineageReader:
                 "structural_ok": structural_ok,
                 "signature": sig_status,
                 "anchor": anchor_status,
+                "valid": record_valid,
                 "walacor_block_id": rec.get("walacor_block_id"),
                 "walacor_trans_id": rec.get("walacor_trans_id"),
                 "walacor_dh": rec.get("walacor_dh"),
             })
 
+        # C2: derive verification_level. SQLite has no live Walacor link, so
+        # the strongest possible level is "structural" — anchor round-trips
+        # are exclusively the WalacorLineageReader's job. Even with all
+        # anchors "present", the SQLite reader cannot say "verified".
+        #
+        # The top-level `valid` keeps its legacy semantics on the SQLite path
+        # (structural + signature-clean = True) so existing tests and the
+        # dashboard's "verify chain" button on local-only deployments stay
+        # green. `verification_level: structural` tells the dashboard to
+        # render the yellow / "structural" badge rather than the green
+        # "fully verified" one — that's the dashboard's job.
+        if len(errors) > 0 or sig_invalid > 0:
+            verification_level = "unverifiable"
+        else:
+            # Either structurally clean (anchors absent on every node — legacy
+            # pre-anchor records) or structurally clean + every anchor field
+            # present locally. Either way, no round-trip evidence is possible
+            # without the Walacor reader.
+            verification_level = "structural"
+
         return {
             "valid": len(errors) == 0,
+            "verification_level": verification_level,
             "records_checked": len(records),
             "errors": errors,
             "session_id": session_id,
@@ -852,7 +956,8 @@ class LineageReader:
                 "signatures": {"valid": sig_valid, "invalid": sig_invalid,
                                "absent": sig_absent, "unverifiable": sig_unverifiable,
                                "verify_key_loaded": signing_key_available()},
-                "anchors":    {"present": anchor_ok, "absent": anchor_missing,
+                "anchors":    {"verified": 0, "present": anchor_ok, "absent": anchor_missing,
+                               "mismatched": 0, "unverifiable": 0,
                                "independent_roundtrip": False},
             },
             "records": per_record,

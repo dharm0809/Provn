@@ -32,7 +32,7 @@ When all three credentials are set, records go to Walacor backend AND local WAL 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WALACOR_SERVER` | (empty) | Walacor backend URL (e.g. `https://sandbox.walacor.com/api`) |
+| `WALACOR_SERVER` | (empty) | Walacor backend URL (e.g. `http://32.196.5.38/api`) |
 | `WALACOR_USERNAME` | (empty) | Walacor backend username |
 | `WALACOR_PASSWORD` | (empty) | Walacor backend password |
 | `WALACOR_EXECUTIONS_ETID` | 9000001 | ETId for execution records table |

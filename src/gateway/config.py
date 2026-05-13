@@ -303,9 +303,21 @@ class Settings(BaseSettings):
 
     # Provider URLs and keys
     provider_openai_url: str = Field(default="https://api.openai.com", description="OpenAI API base URL")
-    provider_openai_key: str = Field(default="", description="API key for OpenAI forwarding")
+    # Also accept the industry-standard OPENAI_API_KEY so an operator can drop
+    # their existing env var straight into .env.gateway without renaming. The
+    # WALACOR_-prefixed name remains canonical for documentation; the alias is
+    # the convenience door. Same rationale for Anthropic below.
+    provider_openai_key: str = Field(
+        default="",
+        description="API key for OpenAI forwarding",
+        validation_alias=AliasChoices("WALACOR_PROVIDER_OPENAI_KEY", "OPENAI_API_KEY", "provider_openai_key"),
+    )
     provider_anthropic_url: str = Field(default="https://api.anthropic.com", description="Anthropic API base URL")
-    provider_anthropic_key: str = Field(default="", description="API key for Anthropic")
+    provider_anthropic_key: str = Field(
+        default="",
+        description="API key for Anthropic",
+        validation_alias=AliasChoices("WALACOR_PROVIDER_ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "provider_anthropic_key"),
+    )
     provider_anthropic_beta_headers: str = Field(
         default="",
         description=(
@@ -343,7 +355,7 @@ class Settings(BaseSettings):
     #   WALACOR_SERVER, WALACOR_USERNAME, WALACOR_PASSWORD
     walacor_server: str = Field(
         default="",
-        description="Walacor backend server URL (e.g. https://sandbox.walacor.com/api)",
+        description="Walacor backend server URL (e.g. http://32.196.5.38/api)",
         validation_alias=AliasChoices("WALACOR_SERVER", "walacor_server"),
     )
     walacor_username: str = Field(
@@ -356,23 +368,29 @@ class Settings(BaseSettings):
         description="Walacor backend password",
         validation_alias=AliasChoices("WALACOR_PASSWORD", "walacor_password"),
     )
+    # ETIds 9000031/32/33 match what `scripts/setup_walacor_schemas.py` creates
+    # and what the production Walacor backend at http://32.196.5.38/api serves.
+    # The earlier 9000021/22/23/24 defaults predated the chain-aware schema and
+    # are no longer registered on any live Walacor — pointing at them produces
+    # `dbError: Invalid ETId` 400s from /api/query/getcomplex, which break every
+    # lineage/compliance read in the dashboard.
     walacor_executions_etid: int = Field(
-        default=9000021,
-        description="Walacor ETId for gateway execution records table (v2 schema with chain+tool fields)",
+        default=9000031,
+        description="Walacor ETId for gateway execution records (chain-aware schema; see setup_walacor_schemas.py)",
         validation_alias=AliasChoices("WALACOR_EXECUTIONS_ETID", "walacor_executions_etid"),
     )
     walacor_attempts_etid: int = Field(
-        default=9000022,
+        default=9000032,
         description="Walacor ETId for gateway attempts table",
         validation_alias=AliasChoices("WALACOR_ATTEMPTS_ETID", "walacor_attempts_etid"),
     )
     walacor_tool_events_etid: int = Field(
-        default=9000023,
-        description="Walacor ETId for gateway tool events table (v2 schema with sources+prompt_id)",
+        default=9000033,
+        description="Walacor ETId for gateway tool events table",
         validation_alias=AliasChoices("WALACOR_TOOL_EVENTS_ETID", "walacor_tool_events_etid"),
     )
     walacor_lifecycle_events_etid: int = Field(
-        default=9000024,
+        default=9000034,
         description="Walacor ETId for ONNX lifecycle event records (training fingerprint, candidate, shadow, promote, reject)",
         validation_alias=AliasChoices("WALACOR_LIFECYCLE_EVENTS_ETID", "walacor_lifecycle_events_etid"),
     )
@@ -512,6 +530,24 @@ class Settings(BaseSettings):
 
     # Resilience tuning
     delivery_batch_size: int = Field(default=50, description="WAL delivery batch size per cycle")
+    wal_delivery_max_retries: int = Field(
+        default=10,
+        description=(
+            "Per-record retry budget before a WAL record is moved to the "
+            "dead-letter queue. One bad envelope no longer starves every "
+            "later record — the worker increments the attempt counter on "
+            "each 5xx/transport error and promotes the record to DLQ once "
+            "the budget is exhausted."
+        ),
+    )
+    wal_delivery_batch_error_budget: int = Field(
+        default=5,
+        description=(
+            "How many transport/5xx failures within a single batch trigger "
+            "the worker to back off (sleep _backoff seconds) rather than "
+            "keep hammering an obviously unhealthy aggregator."
+        ),
+    )
     circuit_breaker_fail_max: int = Field(default=5, description="Failures before circuit opens")
     circuit_breaker_reset_timeout: float = Field(default=30.0, description="Seconds before circuit half-open retry")
     retry_max_attempts: int = Field(default=3, description="Max forward retry attempts on transient errors")

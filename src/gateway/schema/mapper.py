@@ -28,6 +28,9 @@ from gateway.schema.canonical import (
     CanonicalTiming,
     CanonicalToolCall,
     CanonicalUsage,
+    ENVELOPE_KEYS,
+    ENVELOPE_LABEL,
+    ENVELOPE_PATH_DISQUALIFIERS,
     IDX_TO_LABEL,
     MappingReport,
     SINGLETON_FIELDS,
@@ -46,12 +49,33 @@ _ONNX_PATH = _MODEL_DIR / "schema_mapper.onnx"
 _LABELS_PATH = _MODEL_DIR / "schema_mapper_labels.json"
 
 
+class LabelsMismatchError(RuntimeError):
+    """Raised when ``schema_mapper_labels.json`` row count diverges from the
+    ONNX model's emitted class count.
+
+    Catching this is intentional: the gateway should fail loud at boot
+    rather than silently mislabel every request. ``main.py``'s SchemaMapper
+    init site already wraps construction in a broad ``except`` for fail-open
+    behaviour; that wrapper logs the error and the gateway degrades to the
+    heuristic fallback path until the labels file is fixed.
+    """
+
+
 # Path-name patterns that strongly indicate a canonical field.
 # Used as safety net when ONNX says UNKNOWN but the path is obvious,
 # and reused by the Phase 25 SchemaMapper harvester to label overflow
 # keys for training signal capture. Format:
 #   (path must contain ALL of these tokens, leaf key must match exactly, → label)
 # Module-level so the harvester can import without touching class internals.
+#
+# The trailing block of `ENVELOPE_LABEL` rules covers provider response-shape
+# boilerplate (``object``, ``created``, ``role``, …) — the same set declared
+# in ``canonical.ENVELOPE_KEYS``. These entries make the harvester back-write
+# ``divergence_signal="envelope"`` on the corresponding verdict row, giving
+# the trainer a positive label for "the model correctly UNKNOWN'd a piece of
+# envelope". After D3's filtering these keys never make it to overflow at
+# all, but the rule entries remain so legacy verdict rows captured before
+# the filter rollout can still feed the distillation pipeline.
 _PATH_FALLBACK_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("content",), "content", "content"),
     (("text",), "text", "content"),
@@ -84,7 +108,46 @@ _PATH_FALLBACK_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("cache", "read"), "cache_read_input_tokens", "cached_tokens"),
     (("cache", "hit"), "prompt_cache_hit_tokens", "cached_tokens"),
     (("cache", "creation"), "cache_creation_input_tokens", "cache_creation_tokens"),
+    # Envelope keys — no path-token gating, the key alone is the signal.
+    ((), "object", ENVELOPE_LABEL),
+    ((), "created", ENVELOPE_LABEL),
+    ((), "index", ENVELOPE_LABEL),
+    ((), "role", ENVELOPE_LABEL),
+    ((), "refusal", ENVELOPE_LABEL),
+    ((), "logprobs", ENVELOPE_LABEL),
+    ((), "service_tier", ENVELOPE_LABEL),
+    ((), "system_fingerprint", ENVELOPE_LABEL),
+    ((), "type", ENVELOPE_LABEL),
+    ((), "stop_sequence", ENVELOPE_LABEL),
 )
+
+
+def _is_envelope_field(key: str, path: str) -> bool:
+    """Should ``(key, path)`` be tagged as ENVELOPE rather than UNKNOWN?
+
+    Rule:
+    * ``key`` must be in ``ENVELOPE_KEYS`` (case-sensitive — these are
+      well-known provider keys, not heuristics).
+    * No ancestor path segment may collide with an
+      ``ENVELOPE_PATH_DISQUALIFIERS`` entry (e.g. ``arguments.role``
+      inside a tool call: ``role`` could be user data, so we don't
+      tag).
+
+    Pure function — module-level so the heuristic, the fallback rewriter,
+    and the harvester all share one definition.
+    """
+    if key not in ENVELOPE_KEYS:
+        return False
+    # Walk the dotted path's parent segments. ``path.split(".")[:-1]`` is
+    # every ancestor; we strip ``[idx]`` suffixes that ``flatten_json``
+    # leaves on array indices.
+    for seg in path.split(".")[:-1]:
+        bracket = seg.find("[")
+        if bracket != -1:
+            seg = seg[:bracket]
+        if seg in ENVELOPE_PATH_DISQUALIFIERS:
+            return False
+    return True
 
 
 def classify_overflow_path(path: str) -> str | None:
@@ -95,6 +158,10 @@ def classify_overflow_path(path: str) -> str | None:
     `SchemaMapper._apply_path_fallbacks`. The Phase 25 harvester uses this
     against the overflow-keys list captured at audit time to produce
     training signal for the distillation pipeline.
+
+    Envelope keys go through the shared ``_is_envelope_field`` gate so
+    paths in user-data scopes (``arguments.role``, ``input.type``) are
+    NOT tagged envelope — they may carry user-defined content.
     """
     if not path:
         return None
@@ -108,8 +175,13 @@ def classify_overflow_path(path: str) -> str | None:
     for path_tokens, leaf_match, target_label in _PATH_FALLBACK_RULES:
         if leaf_lower != leaf_match.lower() and leaf != leaf_match:
             continue
-        if all(tok in path_lower for tok in path_tokens):
-            return target_label
+        if not all(tok in path_lower for tok in path_tokens):
+            continue
+        if target_label == ENVELOPE_LABEL and not _is_envelope_field(leaf, path):
+            # Envelope rule matched on leaf, but the path's parent scope
+            # disqualifies it (e.g. ``arguments.role``).
+            continue
+        return target_label
     return None
 
 
@@ -134,6 +206,13 @@ class SchemaMapper:
         self._labels: list[str] = []
         self._label_to_idx: dict[str, int] = {}
         self._verdict_buffer = verdict_buffer
+        # D7: bounded deque tracking ONNX-timeout occurrences for the
+        # `schema_mapper` tile on `/v1/connections`. We keep timestamps
+        # so callers can roll the count over arbitrary windows
+        # (defaults to 60s — matching the rest of the connections page).
+        # Per-instance, not global, so test isolation works.
+        from collections import deque
+        self._timeout_events: deque[float] = deque(maxlen=512)
 
         # optional `ModelRegistry` wiring — see `intelligence/reload.py`.
         from gateway.intelligence.reload import ReloadState
@@ -166,6 +245,122 @@ class SchemaMapper:
             from gateway.schema.canonical import CANONICAL_LABELS
             self._labels = CANONICAL_LABELS
             self._label_to_idx = {l: i for i, l in enumerate(self._labels)}
+
+        # D2: sanity-check labels.json against the ONNX model's class count.
+        # The trained model emits indices [0, n_classes) — if labels.json
+        # has fewer entries than the model emits, ``self._labels[idx]`` on
+        # high indices would raise IndexError on the hot path (currently
+        # the code defends with ``idx < len(self._labels)`` and silently
+        # mislabels as UNKNOWN, hiding the drift). Failing loudly on init
+        # surfaces label/model drift at startup — the operator catches it
+        # before the first request rather than after a confusing
+        # silent-mislabel storm in production.
+        self._validate_labels()
+
+    def _validate_labels(self) -> None:
+        """Assert labels.json can resolve every index the ONNX model emits.
+
+        Reads ``output_probability``'s seq-of-map shape from the loaded
+        ``InferenceSession`` — the map keys are the class indices the
+        model emits. The invariant we enforce is
+        ``len(self._labels) >= max_emitted_class_index + 1``:
+
+        * Model emits MORE classes than labels lists → ``LabelsMismatchError``.
+          A future request whose predicted index is `≥ len(self._labels)`
+          would silently alias to UNKNOWN (or, before the existing bounds
+          check, raise IndexError). Fail loudly at boot.
+        * Model emits FEWER classes than labels lists → log INFO only.
+          Real cause is a candidate trained on a subset of the production
+          label space (sklearn only emits indices for classes seen in y).
+          Indices are still safe — every emitted index is in [0, n_classes)
+          which is a subset of [0, len(labels)). The unused labels are
+          slots a future retrain may populate.
+
+        Adding a new label to ``schema_mapper_labels.json`` requires
+        retraining the ONNX model — the file is the contract between
+        the two and stays in lockstep via the trainer's
+        ``_write_sidecars`` (which copies the labels file byte-for-byte).
+
+        Fail-open when the session isn't loaded yet (registry-wired
+        path defers session construction to first inference) — the
+        check re-runs after ``reload()`` adopts a fresh session.
+        """
+        if self._session is None:
+            return
+        try:
+            outputs = self._session.get_outputs()  # noqa: F841 - probed for shape only
+        except Exception:
+            logger.debug("SchemaMapper: cannot read ONNX outputs for label validation")
+            return
+        # ``output_probability`` is the second output: seq(map(int64, float)).
+        # ORT doesn't directly expose the map key set in metadata, so we
+        # do a one-shot inference with a single zero feature vector and
+        # read the keys from the returned map. Cheap (a few ms) and only
+        # runs once per session adoption.
+        try:
+            import numpy as np
+            from gateway.schema.features import FEATURE_DIM
+            probe = np.zeros((1, FEATURE_DIM), dtype=np.float32)
+            result = self._session.run(None, {self._input_name: probe})
+            if len(result) < 2:
+                # Old model without probability output — fall back to
+                # comparing output[0] dim (a single int label per row,
+                # so we can't infer class count). Skip validation.
+                return
+            probs = result[1]
+            if not isinstance(probs, list) or not probs:
+                return
+            first = probs[0]
+            if not isinstance(first, dict):
+                return
+            class_keys = list(first.keys())
+            n_classes = len(class_keys)
+            max_class = max(class_keys) if class_keys else -1
+        except Exception as exc:
+            logger.debug("SchemaMapper: label validation probe failed: %s", exc)
+            return
+
+        if max_class >= len(self._labels):
+            msg = (
+                f"SchemaMapper label/model drift: ONNX model emits class "
+                f"index {max_class} but labels.json has only "
+                f"{len(self._labels)} entries — high indices would "
+                f"silently alias to UNKNOWN (or raise IndexError on the "
+                f"old bounds check). Retrain or re-export labels.json "
+                f"before serving traffic."
+            )
+            logger.error(msg)
+            raise LabelsMismatchError(msg)
+        if n_classes < len(self._labels):
+            logger.info(
+                "SchemaMapper: ONNX model emits %d classes vs %d labels — "
+                "candidate trained on a subset of the production label set. "
+                "Indices remain safe; unused labels are reserved for future "
+                "retrains.", n_classes, len(self._labels),
+            )
+
+    def _record_timeout(self) -> None:
+        """Tick the per-instance timeout deque. D7 surface for /v1/connections."""
+        import time as _t
+        self._timeout_events.append(_t.time())
+
+    def timeout_count_60s(self) -> int:
+        """Number of ONNX-inference timeouts in the trailing 60s window.
+
+        Read by ``connections/builder.build_schema_mapper_tile`` and surfaced
+        as ``schema_mapper_timeouts_60s``. Window-scoped (drops events older
+        than 60s on read) so the counter naturally decays — no separate
+        prune thread needed.
+        """
+        import time as _t
+        cutoff = _t.time() - 60.0
+        # Walk left-to-right (oldest first) and drop expired entries. A
+        # deque popleft is O(1); we don't need a fancy structure here
+        # because 60s of inference activity at 100 RPS still fits inside
+        # ``maxlen=512`` comfortably (the deque self-trims oldest first).
+        while self._timeout_events and self._timeout_events[0] < cutoff:
+            self._timeout_events.popleft()
+        return len(self._timeout_events)
 
     def map_response(self, raw: dict[str, Any]) -> CanonicalResponse:
         """Map a raw LLM API response to the canonical schema.
@@ -213,17 +408,40 @@ class SchemaMapper:
         Shares the rule table with `classify_overflow_path` (module-level
         helper reused by the Phase 25 SchemaMapper harvester) so both code
         paths stay in lockstep.
+
+        D3: also rewrites UNKNOWN→``envelope`` for provider response-shape
+        keys (``object``, ``created``, ``role``, ``index``, …). These have
+        no canonical class but live at predictable positions in OpenAI /
+        Anthropic / Ollama responses. The ``envelope`` tag is excluded
+        from both ``unmapped`` and ``overflow_keys`` so operators only
+        see actionably-unmapped fields. ``ENVELOPE_PATH_DISQUALIFIERS``
+        prevents the tag from swallowing user-data scopes like
+        ``arguments.role`` inside a tool call.
         """
         result = list(classifications)
         for i, (f, (label, conf)) in enumerate(zip(fields, classifications)):
             if label != "UNKNOWN":
                 continue
-            # Skip structural types — they're correctly UNKNOWN
+            # D3: envelope tag is the top priority once a field is UNKNOWN —
+            # it applies regardless of value_type so e.g. ``logprobs: null``
+            # or ``logprobs: {…}`` both end up tagged correctly.
+            if _is_envelope_field(f.key, f.path):
+                result[i] = (ENVELOPE_LABEL, 1.0)
+                continue
+            # Skip structural types for the canonical-fallback table —
+            # they're correctly UNKNOWN. (Envelope tagging above already
+            # handled the structural envelope keys like ``logprobs``.)
             if f.value_type in ("object", "array"):
                 continue
             key_lower = f.key.lower()
             path_lower = f.path.lower()
             for path_tokens, leaf_match, target_label in _PATH_FALLBACK_RULES:
+                # Skip envelope-label rules during canonical fallback —
+                # they're handled by the explicit depth-aware check above
+                # and we don't want a deep ``role`` field accidentally
+                # picked up here.
+                if target_label == ENVELOPE_LABEL:
+                    continue
                 if key_lower == leaf_match.lower() or f.key == leaf_match:
                     if all(tok in path_lower for tok in path_tokens):
                         result[i] = (target_label, 0.75)  # Lower confidence than ONNX
@@ -240,6 +458,12 @@ class SchemaMapper:
             try:
                 return self._classify_onnx(fields)
             except InferenceTimeout as e:
+                # D7: per-instance counter for the connections-tile surface.
+                # The Prometheus counter is already bumped inside
+                # `_inference_timeout.run_with_timeout`; here we keep an
+                # in-process rolling window so /v1/connections can report
+                # `schema_mapper_timeouts_60s` without a Prom roundtrip.
+                self._record_timeout()
                 logger.warning("schema-mapper ONNX timed out, using heuristic: %s", e)
                 return self._classify_heuristic(fields)
         return self._classify_heuristic(fields)
@@ -313,20 +537,39 @@ class SchemaMapper:
         whatever it already does. Rows where the heuristic also says
         UNKNOWN get no teacher and are skipped from training (the
         dataset builder filters on `divergence_signal IS NOT NULL`).
+
+        D5 + D6 envelope teaching: the heuristic now emits
+        ``envelope`` for provider response-shape keys. We pass that
+        label through as the teacher signal ONLY when the current
+        production model could plausibly emit it (i.e., it's already
+        in ``self._labels``). Otherwise we suppress the signal so
+        ``db.compute_accuracy`` doesn't penalize ONNX's "UNKNOWN"
+        on a label it was never trained to recognize. Once a future
+        retrain includes ``envelope`` in ``labels.json``, this gate
+        flips automatically and the teaching signal becomes active.
         """
         if self._verdict_buffer is None:
             return
         try:
+            from gateway.schema.canonical import ENVELOPE_LABEL
             from gateway.util.request_context import request_id_var
             from gateway.intelligence.types import ModelVerdict
             rid = request_id_var.get() or None
             version = self._reload_state.current_version
+            envelope_trainable = ENVELOPE_LABEL in self._label_to_idx
             for field, feat_vec, (label, confidence) in zip(
                 fields, feature_vectors, classifications,
             ):
                 # Heuristic teacher signal — independent of ONNX.
                 teacher, _ = self._heuristic_classify_one(field)
-                divergence_signal = teacher if teacher != "UNKNOWN" else None
+                if teacher == "UNKNOWN":
+                    divergence_signal = None
+                elif teacher == ENVELOPE_LABEL and not envelope_trainable:
+                    # Don't penalize the current model for an envelope label
+                    # it can't predict; see docstring above.
+                    divergence_signal = None
+                else:
+                    divergence_signal = teacher
                 # `input_text` is only used to derive `input_hash` for
                 # dedupe. Per-field uniqueness comes from path + value;
                 # without it every field on a response would collide.
@@ -371,7 +614,23 @@ class SchemaMapper:
         return results
 
     def _heuristic_classify_one(self, f: FlatField) -> tuple[str, float]:
-        """Rule-based classification for a single field."""
+        """Rule-based classification for a single field.
+
+        D6: recognizes envelope keys (``object``, ``created``, ``role``,
+        ``index``, ``logprobs``, …) so the heuristic fallback is at least
+        as honest as the ONNX path. Without this, a request that times
+        out on the ONNX side (and degrades to the heuristic classifier)
+        would still inflate ``schema_mapper_overflow_keys`` with provider
+        boilerplate — defeating D3's purpose. Uses the same
+        ``_is_envelope_field`` gate as the post-classification rewriter
+        so the two paths can't drift.
+        """
+        # D6: envelope key short-circuit. Comes BEFORE content/token rules
+        # because some envelope keys (``role``, ``type``, ``object``) are
+        # short strings that would otherwise look like enums.
+        if _is_envelope_field(f.key, f.path):
+            return ENVELOPE_LABEL, 1.0
+
         key_lower = f.key.lower()
         path_lower = f.path.lower()
 
@@ -424,15 +683,56 @@ class SchemaMapper:
 
     def _assemble(self, fields: list[FlatField], classifications: list[tuple[str, float]],
                   raw: dict) -> CanonicalResponse:
-        """Assemble a CanonicalResponse from classified fields."""
+        """Assemble a CanonicalResponse from classified fields.
+
+        D1: ``confidence`` is coverage-weighted —
+        ``sum(mapped_confidences) / classified_count`` where
+        ``classified_count`` is the number of fields that are not
+        ``envelope``-tagged. Envelope fields are removed from the
+        denominator because they're structural boilerplate that
+        legitimately has no canonical class. ``confidence_on_mapped``
+        keeps the legacy "average over mapped fields" semantic.
+
+        D3: ``envelope``-tagged fields are excluded from
+        ``unmapped_fields`` (so they don't inflate the operator-visible
+        unmapped count) and from ``cr.overflow`` (so ``overflow_keys``
+        only carries actionable-unknown fields).
+
+        D4: null-valued UNKNOWN fields are kept out of overflow — they
+        carry no information and only inflate the key list.
+        """
+        from gateway.schema.canonical import ENVELOPE_LABEL
+
         cr = CanonicalResponse()
         mapped = []
         unmapped = []
+        envelope_count = 0
 
-        # Group classifications
+        # Group classifications.
+        #
+        # D3 accounting rules for ``unmapped_fields`` / ``mapped_fields``:
+        #
+        # * ``ENVELOPE_LABEL`` → excluded from both counts. Structural
+        #   boilerplate (no canonical class to grade against).
+        # * Structural-type UNKNOWN (object/array values whose leaf is
+        #   not an envelope key) → excluded too. ``choices`` and
+        #   ``choices.0.message`` are containers; they're UNKNOWN by
+        #   nature because they have no value to classify, only nested
+        #   children. Counting them as "unmapped" gives operators a
+        #   misleadingly inflated number — the children are the real
+        #   classification targets.
+        # * Any other UNKNOWN → counted as unmapped (and put in overflow
+        #   if non-null per D4).
         field_map: dict[str, list[tuple[FlatField, float]]] = {}
         for f, (label, conf) in zip(fields, classifications):
+            if label == ENVELOPE_LABEL:
+                envelope_count += 1
+                continue
             if label == "UNKNOWN":
+                # Structural containers don't count toward operator-visible
+                # "unmapped" — they're traversal aids, not classifiable leaves.
+                if f.value_type in ("object", "array"):
+                    continue
                 unmapped.append(f.path)
                 continue
             mapped.append(f.path)
@@ -547,14 +847,40 @@ class SchemaMapper:
                                 cr.safety.blocked = True
 
         # ── Overflow (self-healing) ──────────────────────────────────
+        # D3: envelope-tagged fields skipped — they're structural, not
+        # actionable. D4: null leaves skipped too — they carry no info
+        # and only inflate the key list.
         for f, (label, _) in zip(fields, classifications):
-            if label == "UNKNOWN" and f.value_type not in ("object", "array"):
-                cr.overflow[f.path] = f.value
+            if label != "UNKNOWN":
+                continue
+            if f.value_type in ("object", "array", "null"):
+                continue
+            cr.overflow[f.path] = f.value
 
         # ── Mapping metadata ─────────────────────────────────────────
-        confidences = [conf for _, (_, conf) in zip(fields, classifications) if _ != "UNKNOWN"]
+        # D1: coverage-weighted confidence. Denominator excludes envelope
+        # fields (no canonical class to grade), so it answers "of the
+        # fields that COULD have a canonical class, how many did we
+        # correctly classify, weighted by confidence". The legacy
+        # average-over-mapped semantic remains available as
+        # ``confidence_on_mapped`` for any downstream consumer that
+        # specifically wants "how sure were we about the calls we made".
+        mapped_confidences = [
+            conf for _, (lbl, conf) in zip(fields, classifications)
+            if lbl != "UNKNOWN" and lbl != ENVELOPE_LABEL
+        ]
+        classifiable_total = len(mapped_confidences) + len(unmapped)
+        coverage_confidence = (
+            sum(mapped_confidences) / classifiable_total
+            if classifiable_total else 0.0
+        )
+        on_mapped_confidence = (
+            sum(mapped_confidences) / len(mapped_confidences)
+            if mapped_confidences else 0.0
+        )
         cr.mapping = MappingReport(
-            confidence=sum(confidences) / len(confidences) if confidences else 0.0,
+            confidence=coverage_confidence,
+            confidence_on_mapped=on_mapped_confidence,
             incomplete=not cr.content and not cr.thinking_content,
             mapped_fields=mapped,
             unmapped_fields=unmapped,

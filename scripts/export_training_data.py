@@ -4,7 +4,7 @@
 Usage:
     python scripts/export_training_data.py [--output data/training_records.json]
 
-Connects to Walacor sandbox, pulls all execution records (ETId 9000011),
+Connects to Walacor backend, pulls all execution records (ETId 9000011),
 tool events (9000013), and attempts (9000012) via getcomplex API.
 Outputs a JSON file with raw records + analysis summary.
 """
@@ -25,8 +25,8 @@ import httpx
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# Walacor sandbox defaults
-DEFAULT_SERVER = "https://sandbox.walacor.com/api"
+# Walacor backend defaults
+DEFAULT_SERVER = "http://32.196.5.38/api"
 DEFAULT_USER = "sonamsingh6658"
 DEFAULT_PASS = "Walacor@123"
 EXEC_ETID = 9000011

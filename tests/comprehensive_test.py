@@ -447,7 +447,9 @@ def test_walacor_backend_storage():
     health = requests.get(f"{BASE}/health", timeout=10).json()
     backend = health.get("storage", {}).get("backend", "")
     server = health.get("storage", {}).get("server", "")
-    passed = backend == "walacor" and "sandbox.walacor.com" in server
+    # Backend must be Walacor (not local-only). The server URL itself is operator-set —
+    # don't hardcode an environment-specific host into the test.
+    passed = backend == "walacor" and bool(server)
     return TestResult(passed=passed, model="",
                      details=f"backend={backend}, server={server}",
                      latency_ms=0)

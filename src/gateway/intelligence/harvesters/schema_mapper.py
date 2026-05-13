@@ -29,6 +29,21 @@ the empty-JSON gate.
 
 SQLite work runs in `asyncio.to_thread` so the harvester loop never
 blocks on disk I/O.
+
+D5 — envelope coverage
+----------------------
+The fallback rule table now covers OpenAI / Anthropic / Ollama envelope
+keys (``object``, ``created``, ``role``, ``index``, ``logprobs``,
+``service_tier``, …) mapping each to the synthetic ``envelope`` label.
+Post D3 those keys never reach ``overflow_keys`` in fresh requests (the
+mapper filters them upstream), so the rules primarily serve legacy
+verdict rows captured before the upstream filter rolled out. For the
+current production model — whose ``schema_mapper_labels.json`` does NOT
+contain ``envelope`` — writing ``divergence_signal="envelope"`` would
+artificially fail every row at ``compute_accuracy`` time; the harvester
+therefore SUPPRESSES envelope candidates unless the active labels file
+lists ``envelope``. This gate flips automatically when a future retrain
+adds the label.
 """
 from __future__ import annotations
 
@@ -39,6 +54,7 @@ from typing import Any
 
 from gateway.intelligence.db import IntelligenceDB
 from gateway.intelligence.harvesters.base import Harvester, HarvesterSignal
+from gateway.schema.canonical import ENVELOPE_LABEL
 from gateway.schema.mapper import classify_overflow_path
 
 logger = logging.getLogger(__name__)
@@ -47,6 +63,26 @@ logger = logging.getLogger(__name__)
 # rows (no embedded features). Module-level so the warning fires once
 # per process, not once per signal.
 _LEGACY_ROW_WARNED = False
+
+
+def _envelope_label_trainable() -> bool:
+    """True when the production labels file lists ``envelope``.
+
+    The harvester suppresses envelope candidates when this is False —
+    see module docstring D5 section. We re-read on every call rather
+    than caching at import time so a labels.json swap (e.g. a hot
+    promotion) is picked up without restarting the worker.
+    """
+    try:
+        import json
+        from gateway.schema.mapper import _LABELS_PATH
+        if not _LABELS_PATH.exists():
+            return False
+        with open(_LABELS_PATH) as fh:
+            labels = json.load(fh)
+        return isinstance(labels, list) and ENVELOPE_LABEL in labels
+    except Exception:
+        return False
 
 
 class SchemaMapperHarvester(Harvester):
@@ -75,13 +111,23 @@ class SchemaMapperHarvester(Harvester):
         # insertion order and applies whichever matches a verdict row
         # first. Falls back to the legacy "latest row" UPDATE when no
         # per-field row matches.
+        envelope_trainable = _envelope_label_trainable()
         candidates: list[tuple[str, str]] = []
         for path in overflow:
             if not isinstance(path, str):
                 continue
             match = classify_overflow_path(path)
-            if match is not None:
-                candidates.append((path, match))
+            if match is None:
+                continue
+            if match == ENVELOPE_LABEL and not envelope_trainable:
+                # D5: ``envelope`` is a synthetic tag. Until the production
+                # model is retrained with ``envelope`` in its label set,
+                # writing this as ``divergence_signal`` would deflate the
+                # rolling accuracy metric (UNKNOWN ≠ envelope on every
+                # row). Skip silently — the upstream D3 filter already
+                # keeps these out of fresh ``overflow_keys`` lists.
+                continue
+            candidates.append((path, match))
 
         if not candidates:
             return
