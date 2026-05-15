@@ -603,12 +603,14 @@ def _init_wal(settings, ctx) -> None:
     Walacor sink acknowledges the write — see ``StorageRouter`` for the
     delivery-acknowledgement path.
 
-    Alternative considered (and rejected): start DeliveryWorker even when
-    only Walacor is configured. Rejected because the worker POSTs to the
-    control-plane aggregator endpoint, not Walacor — running it without
-    that endpoint would generate a steady stream of connection-refused
-    errors and never mark any record delivered. The router-driven
-    ``mark_delivered`` path covers Walacor-only deployments cleanly.
+    For Walacor-backed deployments the DeliveryWorker now runs in
+    *Walacor-sink mode* (started in ``_init_storage`` once the Walacor
+    client exists). The request path writes only to the local WAL
+    (StorageRouter excludes Walacor from the inline fan-out), and this
+    bounded background drainer ships undelivered rows to Walacor with
+    backoff + DLQ. This replaces the previous inline dual-write, whose
+    synchronous Walacor HTTP write in the request path could exhaust the
+    connection pool under load and left failed writes stuck forever.
     """
     from gateway.wal.writer import WALWriter
     from gateway.wal.delivery_worker import DeliveryWorker
@@ -618,17 +620,17 @@ def _init_wal(settings, ctx) -> None:
     ctx.wal_writer = WALWriter(str(wal_dir / "wal.db"))
     ctx.wal_writer.start()
     if settings.control_plane_url:
-        # Delivery worker ships WAL records to a remote control plane aggregator.
-        # Only needed when a separate control plane URL is configured.
-        # When walacor_storage_enabled=True, records go directly to Walacor
-        # via the storage router (dual-write) and StorageRouter marks the WAL
-        # row delivered on Walacor success — no delivery worker needed.
+        # Control-plane aggregator shipper (POSTs to /v1/gateway/executions).
+        # Only used when a separate control-plane URL is configured.
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
     elif settings.walacor_storage_enabled:
+        # Walacor-sink DeliveryWorker is started in _init_storage (it needs
+        # the Walacor client/backend, created after this phase). The request
+        # path is WAL-only; that drainer ships WAL→Walacor with backoff/DLQ.
         logger.info(
-            "Delivery worker skipped: Walacor backend handles durability — "
-            "StorageRouter marks WAL records delivered on Walacor success"
+            "Walacor-backed: WAL→Walacor delivery worker starts in "
+            "_init_storage (request path is WAL-only, never blocks on Walacor)"
         )
     else:
         logger.info("Delivery worker skipped: no Walacor backend or control plane configured")
@@ -672,16 +674,57 @@ async def _init_walacor(settings, ctx) -> None:
 
 
 def _init_storage(settings, ctx) -> None:
-    """Build StorageRouter from available backends."""
-    from gateway.storage import StorageRouter, WALBackend, WalacorBackend
+    """Build StorageRouter; decouple Walacor delivery from the request path.
 
-    backends = []
+    Production fix: in Walacor-backed deployments WITHOUT a control-plane
+    aggregator, the router is built with the **local WAL backend only**,
+    so the request path durably writes to local SQLite and never blocks
+    on — or fails because of — the remote Walacor HTTP write. A single
+    bounded ``DeliveryWorker`` (Walacor-sink mode: backoff + batch budget
+    + DLQ) drains undelivered WAL rows to Walacor, so a slow/down Walacor
+    backend can never exhaust the request-path connection pool or lose
+    records — they stay ``delivered=0`` until it recovers, then self-heal.
+
+    All other modes are unchanged: with a control-plane aggregator (or no
+    WAL), the Walacor backend is registered for the original inline
+    dual-write and StorageRouter fans out to every backend as before.
+    """
+    from gateway.storage import StorageRouter, WALBackend, WalacorBackend
+    from gateway.wal.delivery_worker import DeliveryWorker
+
+    # Decoupled mode: WAL guarantees in-path durability; a background
+    # drainer owns Walacor delivery. Only for Walacor-backed deployments
+    # that don't front the gateway with a control-plane aggregator.
+    decoupled = bool(
+        ctx.wal_writer
+        and ctx.walacor_client
+        and settings.walacor_storage_enabled
+        and not settings.control_plane_url
+    )
+
+    backends: list = []
     if ctx.wal_writer:
         backends.append(WALBackend(ctx.wal_writer, batch_writer=ctx.batch_writer))
-    if ctx.walacor_client:
+    if ctx.walacor_client and not decoupled:
+        # Original inline dual-write (control-plane / non-WAL modes).
         backends.append(WalacorBackend(ctx.walacor_client))
     ctx.storage = StorageRouter(backends)
-    logger.info("Storage router ready: backends=%s", [b.name for b in backends])
+    logger.info(
+        "Storage router ready: backends=%s%s",
+        [b.name for b in backends],
+        " (Walacor delivery decoupled to background drainer)" if decoupled else "",
+    )
+
+    if decoupled and getattr(ctx, "delivery_worker", None) is None:
+        ctx.delivery_worker = DeliveryWorker(
+            ctx.wal_writer, sink=WalacorBackend(ctx.walacor_client)
+        )
+        ctx.delivery_worker.start()
+        logger.info(
+            "Walacor delivery worker started: bounded WAL→Walacor drain "
+            "(backoff + DLQ); request path is WAL-only and never blocks "
+            "on Walacor"
+        )
 
 
 def _init_content_analyzers(settings, ctx) -> None:

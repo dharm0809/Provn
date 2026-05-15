@@ -55,8 +55,19 @@ class DeliveryWorker:
         except Exception:
             return DeliveryWorker._DEFAULT_BATCH_ERROR_BUDGET
 
-    def __init__(self, wal: WALWriter) -> None:
+    def __init__(self, wal: WALWriter, sink: object | None = None) -> None:
+        # ``sink`` (optional): a StorageBackend-like object exposing
+        # ``async write_execution(dict)->bool`` / ``write_tool_event``.
+        # When set, the worker drains undelivered WAL rows to that sink
+        # (the Walacor backend) instead of POSTing to the control-plane
+        # aggregator. This is the durability path for Walacor-backed
+        # deployments: the request path no longer writes to Walacor
+        # inline (see StorageRouter._inline_backends), so this bounded
+        # background drainer — same backoff / batch error budget / DLQ —
+        # is what delivers records and marks them delivered, immune to
+        # request concurrency and to a slow/down Walacor backend.
         self._wal = wal
+        self._sink = sink
         self._running = False
         self._task: asyncio.Task | None = None
         self._interval = 1.0
@@ -113,7 +124,10 @@ class DeliveryWorker:
     async def _loop(self) -> None:
         while self._running:
             try:
-                batch_unhealthy = await self._deliver_batch()
+                if self._sink is not None:
+                    batch_unhealthy = await self._deliver_batch_walacor()
+                else:
+                    batch_unhealthy = await self._deliver_batch()
                 if batch_unhealthy:
                     # Aggregator returned failures up to the batch error
                     # budget. Sleep with exponential backoff before the
@@ -298,6 +312,75 @@ class DeliveryWorker:
                 continue
         return batch_errors >= self._batch_error_budget
 
+    async def _deliver_batch_walacor(self) -> bool:
+        """Drain a batch of undelivered WAL rows to the Walacor sink.
+
+        Same robustness contract as ``_deliver_batch`` (the control-plane
+        path): bounded batch, per-record retry → DLQ via
+        ``_record_transient_failure``, and a batch error budget that
+        signals ``_loop`` to back off exponentially. Because only this
+        single worker (one client, ``batch_size`` rows/cycle) ever talks
+        to Walacor, request concurrency can never exhaust the Walacor
+        connection pool, and a slow/down backend just leaves rows
+        ``delivered=0`` until it recovers — never blocking requests.
+
+        Returns True iff the per-batch error budget was exhausted.
+        """
+        rows = self._wal.get_undelivered(limit=self._batch_size)
+        if not rows:
+            return False
+        batch_errors = 0
+        for execution_id, record_json, _ in rows:
+            try:
+                body = json.loads(record_json)
+            except (TypeError, ValueError):
+                # Poisoned row — never parseable, so retrying is futile.
+                # Park in DLQ so it can't starve the queue forever.
+                delivery_total.labels(result="dead_letter").inc()
+                self._wal.mark_dead_lettered(execution_id, "invalid record_json")
+                self._attempt_counts.pop(execution_id, None)
+                self._dlq_count += 1
+                continue
+            try:
+                if body.get("event_type") == "tool_call":
+                    ok = await self._sink.write_tool_event(body)  # type: ignore[union-attr]
+                else:
+                    ok = await self._sink.write_execution(body)  # type: ignore[union-attr]
+                ok = ok is not False  # legacy None == success
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — sink must not kill the loop
+                ok = False
+                logger.debug("Walacor sink raised for %s: %s", execution_id, e)
+            if ok:
+                delivery_total.labels(result="success").inc()
+                self._wal.mark_delivered(execution_id)
+                self._attempt_counts.pop(execution_id, None)
+                continue
+            # Transient failure: retry with per-record counter → DLQ when
+            # exhausted, and trip the batch budget so _loop backs off
+            # instead of hammering a degraded Walacor backend.
+            delivery_total.labels(result="error").inc()
+            promoted = self._record_transient_failure(
+                execution_id, "walacor sink write failed"
+            )
+            if not promoted:
+                logger.warning(
+                    "Walacor delivery failed for %s — retry %d/%d",
+                    execution_id,
+                    self._attempt_counts.get(execution_id, 0),
+                    self._max_retries,
+                )
+            batch_errors += 1
+            if batch_errors >= self._batch_error_budget:
+                logger.warning(
+                    "Walacor delivery batch error budget exhausted "
+                    "(%d errors) — backing off",
+                    batch_errors,
+                )
+                break
+        return batch_errors >= self._batch_error_budget
+
     async def drain(self, timeout: float = 5.0) -> None:
         """Best-effort drain of pending writes before shutdown.
 
@@ -311,7 +394,12 @@ class DeliveryWorker:
         symmetrically.
         """
         try:
-            await asyncio.wait_for(self._deliver_batch(), timeout=timeout)
+            batch = (
+                self._deliver_batch_walacor()
+                if self._sink is not None
+                else self._deliver_batch()
+            )
+            await asyncio.wait_for(batch, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
                 "DeliveryWorker.drain timed out after %.1fs — pending records will retry on next start",
