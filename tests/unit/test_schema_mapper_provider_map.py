@@ -205,3 +205,153 @@ def test_shortest_path_wins_on_canonical_collision() -> None:
         f"shortest-path tiebreaker failed: got {cr.usage.completion_tokens}, "
         f"expected 50 (the top-level usage.completion_tokens value)"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deterministic-first expansion: canonical-content paths
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_provider_map_covers_canonical_content_paths() -> None:
+    """The ~13 labels that previously fell through to the ONNX residual
+    are now deterministic. Pinning these prevents a silent regression
+    back to ONNX guessing for content/tool/finish/identity fields."""
+    expected = {
+        "id": "response_id",
+        "model": "model",
+        "choices.0.message.content": "content",
+        "choices.0.message.reasoning_content": "thinking_content",
+        "choices.0.finish_reason": "finish_reason",
+        "choices.0.message.tool_calls.0.id": "tool_call_id",
+        "choices.0.message.tool_calls.0.type": "tool_call_type",
+        "choices.0.message.tool_calls.0.function.name": "tool_call_name",
+        "choices.0.message.tool_calls.0.function.arguments": "tool_call_arguments",
+        "content.0.text": "content",
+        "content.0.thinking": "thinking_content",
+        "content.0.id": "tool_call_id",
+        "content.0.name": "tool_call_name",
+        "content.0.input": "tool_call_arguments",
+        "content.0.citations.0.url": "citation_url",
+        "stop_reason": "finish_reason",
+        "message.content": "content",
+        "message.thinking": "thinking_content",
+        "message.reasoning_content": "thinking_content",
+        "done_reason": "finish_reason",
+        "message.tool_calls.0.function.name": "tool_call_name",
+        "message.tool_calls.0.function.arguments": "tool_call_arguments",
+    }
+    for path, label in expected.items():
+        assert _PROVIDER_PATH_MAP.get(path) == label, (
+            f"_PROVIDER_PATH_MAP[{path!r}] should be {label!r}, "
+            f"got {_PROVIDER_PATH_MAP.get(path)!r}"
+        )
+
+
+def test_envelope_keys_deliberately_excluded_from_provider_map() -> None:
+    """No-behavior-change guarantee: envelope boilerplate must NOT be in
+    the provider map. These are tagged `envelope` by the fallback layer
+    and excluded from overflow; remapping them would change canonical
+    output for known providers (the chosen scope explicitly forbids that)."""
+    for key in ("created", "object", "role", "index",
+                "system_fingerprint", "service_tier", "logprobs"):
+        assert _PROVIDER_PATH_MAP.get(key) is None, (
+            f"{key!r} must stay out of _PROVIDER_PATH_MAP — it is envelope "
+            f"boilerplate handled by _apply_path_fallbacks. Mapping it is a "
+            f"behavior change for known providers."
+        )
+
+
+def test_openai_content_and_tool_calls_are_deterministic() -> None:
+    """OpenAI content/finish/tool-call paths classify via the provider
+    map at confidence 1.0 — ONNX is not consulted for them."""
+    from gateway.schema.features import flatten_json
+    mapper = SchemaMapper()
+    payload = {
+        "id": "chatcmpl-x", "object": "chat.completion", "model": "gpt-4o-mini",
+        "choices": [{
+            "index": 0, "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant", "content": "hello",
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }],
+            },
+        }],
+    }
+    fields = flatten_json(payload)
+    results = mapper._classify_fields(fields)
+    by_path = {f.path: (label, conf) for f, (label, conf) in zip(fields, results)}
+    for path, expected_label in (
+        ("choices.0.message.content", "content"),
+        ("choices.0.finish_reason", "finish_reason"),
+        ("choices.0.message.tool_calls.0.id", "tool_call_id"),
+        ("choices.0.message.tool_calls.0.function.name", "tool_call_name"),
+        ("id", "response_id"),
+        ("model", "model"),
+    ):
+        assert by_path[path] == (expected_label, 1.0), (
+            f"{path!r} → {by_path.get(path)!r}, expected ({expected_label!r}, 1.0)"
+        )
+    r = mapper.map_response(payload)
+    assert r.content == "hello"
+    assert r.finish_reason == "tool_calls"
+
+
+def test_anthropic_text_block_is_deterministic_content() -> None:
+    from gateway.schema.features import flatten_json
+    mapper = SchemaMapper()
+    payload = {
+        "id": "msg_x", "type": "message", "role": "assistant",
+        "model": "claude-haiku-4-5", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "the answer"}],
+    }
+    fields = flatten_json(payload)
+    results = mapper._classify_fields(fields)
+    by_path = {f.path: (label, conf) for f, (label, conf) in zip(fields, results)}
+    assert by_path["content.0.text"] == ("content", 1.0)
+    assert by_path["stop_reason"] == ("finish_reason", 1.0)
+    r = mapper.map_response(payload)
+    assert r.content == "the answer"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema-shape drift tracker
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_novel_shape_with_overflow_ticks_once_and_dedupes() -> None:
+    """A never-seen skeleton that produces an overflow field records one
+    drift event; an identical repeat does NOT re-tick (fingerprint
+    dedupe)."""
+    mapper = SchemaMapper()
+    # `usage.prompt_tokens_details.audio_tokens` is deterministically
+    # mapped to UNKNOWN → guaranteed overflow regardless of ONNX.
+    payload = {
+        "id": "x", "model": "gpt-4o-mini",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "hi"}}],
+        "usage": {
+            "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
+            "prompt_tokens_details": {"audio_tokens": 5},
+        },
+    }
+    assert mapper.novel_shapes_60s() == 0
+    mapper.map_response(payload)
+    assert mapper.novel_shapes_60s() == 1, "first novel-shape+overflow should tick"
+    mapper.map_response(payload)
+    assert mapper.novel_shapes_60s() == 1, "identical shape must dedupe (no re-tick)"
+
+
+def test_clean_shape_does_not_tick_drift() -> None:
+    """A fully-mapped response (no overflow) is not a drift signal even
+    if its skeleton is novel."""
+    mapper = SchemaMapper()
+    payload = {
+        "id": "x", "model": "gpt-4o-mini",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "hi"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    mapper.map_response(payload)
+    assert mapper.novel_shapes_60s() == 0, (
+        "a clean (no-overflow) response must not register as schema drift"
+    )
