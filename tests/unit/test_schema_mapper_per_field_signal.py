@@ -135,22 +135,21 @@ def test_per_field_verdicts_carry_heuristic_teacher_signal():
     if mapper._session is None:
         pytest.skip("ONNX session unavailable")
 
-    # An OpenAI-shaped response has fields the heuristic confidently
-    # labels: content (long natural string in usage-shaped key),
-    # prompt_tokens / completion_tokens / total_tokens (int siblings
-    # in usage subobject).
+    # Deliberately NON-standard provider shape: every key here is absent
+    # from `_PROVIDER_PATH_MAP`, so the fields reach the ONNX residual and
+    # `_record_per_field_verdicts` runs (the only place a teacher signal
+    # is emitted). Do NOT replace this with an OpenAI/Anthropic/Ollama
+    # shape — those are now fully deterministic and emit zero verdicts by
+    # design (see test_per_field_count_matches_onnx_classified_field_count).
+    # `_heuristic_classify_one` still confidently names these by key:
+    # output_text→content, completion_reason→finish_reason,
+    # *_token_count→prompt/completion/total_tokens.
     resp = {
-        "choices": [
-            {
-                "message": {
-                    "content": "This is a real natural-language response with many spaces and words.",
-                },
-                "finish_reason": "stop",
-            },
-        ],
-        "usage": {
-            "prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19,
-        },
+        "output_text": "This is a real natural-language response with many spaces and words here.",
+        "completion_reason": "stop",
+        "input_token_count": 12,
+        "output_token_count": 7,
+        "total_token_count": 19,
     }
     mapper.map_response(resp)
     rows = _drain(buf)
@@ -211,16 +210,19 @@ def test_per_field_buffer_overflow_drops_oldest_not_newest():
     if mapper._session is None:
         pytest.skip("ONNX session unavailable")
 
+    # NON-standard shape (5 leaves, none in `_PROVIDER_PATH_MAP`) so all
+    # 5 reach the ONNX residual and emit per-field verdicts. A standard
+    # provider shape is now fully deterministic and would emit zero
+    # verdicts (nothing to overflow) — keep this fixture non-standard.
     resp = {
-        "choices": [
-            {"message": {"content": "Multi-word response."}, "finish_reason": "stop"}
-        ],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-        "model": "test",
+        "output_text": "Multi word response here now.",
+        "completion_reason": "stop",
+        "input_token_count": 5,
+        "output_token_count": 3,
+        "total_token_count": 8,
     }
     mapper.map_response(resp)
     assert buf.size <= 3
-    # Drop count is positive — confirms the buffer didn't silently
-    # accept everything (which would mean the per-field loop short-
-    # circuited).
+    # 5 verdict rows into a size-3 buffer ⇒ 2 dropped. Positive drop
+    # count confirms the per-field loop didn't silently short-circuit.
     assert buf.dropped_total > 0
