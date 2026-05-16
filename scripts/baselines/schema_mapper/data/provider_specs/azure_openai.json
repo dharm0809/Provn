@@ -1,0 +1,75 @@
+{
+  "provider": "azure_openai",
+  "endpoint": "chat.completions",
+  "doc_url": "https://learn.microsoft.com/en-us/azure/ai-services/openai/reference",
+  "captured_at": "2026-04-27T17:20:00Z",
+  "captured_from": "Public Azure OpenAI API docs (chat.completions, with content-filter extensions). Synthetic doc-shaped example.",
+  "examples": [
+    {
+      "raw": {
+        "id": "chatcmpl-AbCdEfGhIjKl",
+        "object": "chat.completion",
+        "created": 1714233800,
+        "model": "gpt-4o",
+        "prompt_filter_results": [
+          {
+            "prompt_index": 0,
+            "content_filter_results": {
+              "hate": {"filtered": false, "severity": "safe"},
+              "self_harm": {"filtered": false, "severity": "safe"},
+              "sexual": {"filtered": false, "severity": "safe"},
+              "violence": {"filtered": false, "severity": "safe"}
+            }
+          }
+        ],
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "<assistant_reply>"},
+            "finish_reason": "stop",
+            "content_filter_results": {
+              "hate": {"filtered": false, "severity": "safe"},
+              "self_harm": {"filtered": false, "severity": "safe"},
+              "sexual": {"filtered": false, "severity": "safe"},
+              "violence": {"filtered": false, "severity": "safe"}
+            }
+          }
+        ],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 6, "total_tokens": 17},
+        "system_fingerprint": "fp_azure_xyz"
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "prompt_filter_results[0].prompt_index": "UNKNOWN",
+        "prompt_filter_results[0].content_filter_results.hate.filtered": "UNKNOWN",
+        "prompt_filter_results[0].content_filter_results.hate.severity": "safety_category",
+        "prompt_filter_results[0].content_filter_results.self_harm.filtered": "UNKNOWN",
+        "prompt_filter_results[0].content_filter_results.self_harm.severity": "safety_category",
+        "prompt_filter_results[0].content_filter_results.sexual.filtered": "UNKNOWN",
+        "prompt_filter_results[0].content_filter_results.sexual.severity": "safety_category",
+        "prompt_filter_results[0].content_filter_results.violence.filtered": "UNKNOWN",
+        "prompt_filter_results[0].content_filter_results.violence.severity": "safety_category",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].finish_reason": "finish_reason",
+        "choices[0].content_filter_results.hate.filtered": "UNKNOWN",
+        "choices[0].content_filter_results.hate.severity": "safety_category",
+        "choices[0].content_filter_results.self_harm.filtered": "UNKNOWN",
+        "choices[0].content_filter_results.self_harm.severity": "safety_category",
+        "choices[0].content_filter_results.sexual.filtered": "UNKNOWN",
+        "choices[0].content_filter_results.sexual.severity": "safety_category",
+        "choices[0].content_filter_results.violence.filtered": "UNKNOWN",
+        "choices[0].content_filter_results.violence.severity": "safety_category",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "system_fingerprint": "model_hash"
+      },
+      "notes": "Azure OpenAI: same chat.completions shape as OpenAI plus content_filter_results blocks (one per choice + per prompt). The `severity` enum (safe/low/medium/high) is the actual provider-side safety classification → safety_category. The `filtered` boolean is a derived gate decision, not a category — UNKNOWN."
+    }
+  ]
+}

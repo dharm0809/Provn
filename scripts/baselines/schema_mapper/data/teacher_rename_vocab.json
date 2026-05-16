@@ -1,0 +1,145 @@
+{
+  "_doc": "Teacher-curated semantic-equivalent surface forms per canonical label. Generated inline by Claude Opus 4.7 acting as the Magneto-style teacher (the same model the API would have called). Used by data/synthetic_corpus.py:aug_rename_attack to expand the corpus's per-key-name diversity beyond simple snake/camel/kebab/pascal style cycles. Each canonical label maps to a list of surface forms a real provider might use.",
+  "by_label": {
+    "prompt_tokens": [
+      "prompt_tokens", "promptTokens", "prompt-tokens",
+      "input_tokens", "inputTokens", "input-tokens", "input_token_count", "inputTokenCount",
+      "prompt_eval_count", "promptEvalCount",
+      "tokens_in", "tokensIn", "tokens.input", "tokens.prompt",
+      "billed_units.input_tokens", "usage.inputTokens",
+      "promptTokenCount"
+    ],
+    "completion_tokens": [
+      "completion_tokens", "completionTokens", "completion-tokens",
+      "output_tokens", "outputTokens", "output-tokens", "output_token_count", "outputTokenCount",
+      "eval_count", "evalCount",
+      "tokens_out", "tokensOut", "tokens.output", "tokens.completion",
+      "billed_units.output_tokens", "usage.outputTokens",
+      "candidatesTokenCount", "generation_token_count", "generationTokenCount"
+    ],
+    "total_tokens": [
+      "total_tokens", "totalTokens", "total-tokens",
+      "tokens_total", "tokensTotal", "tokens.total",
+      "totalTokenCount", "total_token_count",
+      "usage.totalTokens", "billed_total"
+    ],
+    "cached_tokens": [
+      "cached_tokens", "cachedTokens", "cached-tokens",
+      "cache_read_input_tokens", "cacheReadInputTokens",
+      "prompt_cache_hit_tokens", "promptCacheHitTokens",
+      "cachedContentTokenCount", "cache_hit_tokens"
+    ],
+    "cache_creation_tokens": [
+      "cache_creation_tokens", "cacheCreationTokens", "cache-creation-tokens",
+      "cache_creation_input_tokens", "cacheCreationInputTokens",
+      "cache_write_tokens", "cacheWriteTokens",
+      "cacheWriteInputTokens"
+    ],
+    "response_id": [
+      "id", "response_id", "responseId", "response-id",
+      "request_id", "requestId", "requestid",
+      "completion_id", "completionId",
+      "trace_id", "traceId", "x_request_id"
+    ],
+    "response_timestamp": [
+      "created", "created_at", "createdAt", "created-at",
+      "timestamp", "ts", "time",
+      "completed_at", "completedAt",
+      "responseTimestamp", "response_time"
+    ],
+    "model": [
+      "model", "modelId", "model_id", "model-id",
+      "modelVersion", "model_version", "model-version",
+      "modelName", "model_name",
+      "engine", "engine_id"
+    ],
+    "model_hash": [
+      "system_fingerprint", "systemFingerprint", "system-fingerprint",
+      "model_hash", "modelHash", "model-hash",
+      "model_fingerprint", "modelFingerprint",
+      "version", "version_hash", "versionHash",
+      "fingerprint"
+    ],
+    "content": [
+      "content", "text", "message_content", "messageContent",
+      "response", "responseText", "response_text",
+      "generation", "generated_text", "generatedText",
+      "outputText", "output_text",
+      "completion", "completion_text", "completionText",
+      "delta.content", "delta.text"
+    ],
+    "thinking_content": [
+      "thinking", "thinking_content", "thinkingContent",
+      "reasoning", "reasoning_content", "reasoningContent", "reasoning-content",
+      "tool_plan", "toolPlan", "thought", "thought_process", "thoughtProcess",
+      "internal_reasoning", "scratchpad", "chain_of_thought", "chainOfThought"
+    ],
+    "finish_reason": [
+      "finish_reason", "finishReason", "finish-reason",
+      "stop_reason", "stopReason", "stop-reason",
+      "done_reason", "doneReason", "done-reason",
+      "completion_reason", "completionReason",
+      "termination_reason", "terminationReason",
+      "end_reason", "endReason"
+    ],
+    "tool_call_id": [
+      "tool_call_id", "toolCallId", "tool-call-id",
+      "id", "call_id", "callId",
+      "invocation_id", "invocationId"
+    ],
+    "tool_call_name": [
+      "function.name", "function_name", "functionName",
+      "tool.name", "tool_name", "toolName",
+      "name",
+      "method", "method_name", "methodName"
+    ],
+    "tool_call_arguments": [
+      "function.arguments", "function_arguments", "functionArguments",
+      "tool.arguments", "tool_arguments", "toolArguments",
+      "arguments", "args", "params", "parameters",
+      "input"
+    ],
+    "tool_call_type": [
+      "type", "tool_type", "toolType", "tool-type",
+      "kind", "category", "classification"
+    ],
+    "citation_url": [
+      "url", "source_url", "sourceUrl", "source-url",
+      "link", "href",
+      "citation", "citation_url", "citationUrl",
+      "reference", "ref"
+    ],
+    "safety_category": [
+      "category", "harm_category", "harmCategory",
+      "label", "classification",
+      "probability", "severity",
+      "policy_name", "policyName"
+    ],
+    "timing_value": [
+      "latency_ms", "latencyMs", "latency-ms",
+      "duration", "duration_ms", "durationMs",
+      "elapsed", "elapsed_ms", "elapsedMs",
+      "predict_time", "predictTime",
+      "queue_time", "queueTime",
+      "prompt_time", "promptTime",
+      "completion_time", "completionTime",
+      "total_time", "totalTime",
+      "load_duration", "loadDuration",
+      "eval_duration", "evalDuration",
+      "prompt_eval_duration", "promptEvalDuration",
+      "total_duration", "totalDuration"
+    ]
+  },
+  "_provider_aliases": {
+    "_doc": "Real provider key names that aren't simple style transforms. The aug_rename_attack engine uses these to apply 'random surface form' replacements when it picks a key whose canonical label is in by_label.",
+    "examples": [
+      "{prompt_tokens: input_token_count} (Anthropic API)",
+      "{completion_tokens: candidatesTokenCount} (Vertex Gemini)",
+      "{response_id: x_groq.id} (Groq)",
+      "{model_hash: system_fingerprint} (OpenAI)",
+      "{thinking_content: tool_plan} (Cohere v2)",
+      "{finish_reason: completionReason} (Bedrock Titan)",
+      "{tool_call_arguments: input} (Replicate-style)"
+    ]
+  }
+}

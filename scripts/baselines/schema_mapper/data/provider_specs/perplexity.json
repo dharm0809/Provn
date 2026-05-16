@@ -1,0 +1,54 @@
+{
+  "provider": "perplexity",
+  "endpoint": "chat.completions",
+  "doc_url": "https://docs.perplexity.ai/api-reference/chat-completions-post",
+  "captured_at": "2026-04-27T17:30:00Z",
+  "captured_from": "Public Perplexity API docs (OpenAI-compatible plus citations).",
+  "examples": [
+    {
+      "raw": {
+        "id": "0123456789abcdef",
+        "object": "chat.completion",
+        "created": 1714234400,
+        "model": "sonar-pro",
+        "citations": [
+          "https://example.com/source-a",
+          "https://example.com/source-b"
+        ],
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "<assistant_reply>"},
+            "finish_reason": "stop",
+            "delta": {"role": "assistant", "content": ""}
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 20,
+          "completion_tokens": 12,
+          "total_tokens": 32,
+          "search_context_size": "medium"
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "citations[0]": "citation_url",
+        "citations[1]": "citation_url",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].finish_reason": "finish_reason",
+        "choices[0].delta.role": "UNKNOWN",
+        "choices[0].delta.content": "content",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "usage.search_context_size": "UNKNOWN"
+      },
+      "notes": "Perplexity: OpenAI-compatible plus a top-level `citations` array of URL strings → citation_url (first appearance of this label in the corpus). Each array element is a leaf string. Perplexity also echoes a `delta` field in the non-streaming response (a quirk); content is still labelled content. `search_context_size` is a knob enum (low/medium/high) — UNKNOWN."
+    }
+  ]
+}

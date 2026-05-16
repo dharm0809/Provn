@@ -1,0 +1,28 @@
+{
+  "provider": "bedrock",
+  "endpoint": "invoke(amazon.titan-text-*)",
+  "doc_url": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-text.html",
+  "captured_at": "2026-04-27T17:40:00Z",
+  "captured_from": "Public AWS Bedrock Titan Text invoke-model docs.",
+  "examples": [
+    {
+      "raw": {
+        "inputTextTokenCount": 12,
+        "results": [
+          {
+            "tokenCount": 9,
+            "outputText": "<assistant_reply>",
+            "completionReason": "FINISH"
+          }
+        ]
+      },
+      "expected_labels": {
+        "inputTextTokenCount": "prompt_tokens",
+        "results[0].tokenCount": "completion_tokens",
+        "results[0].outputText": "content",
+        "results[0].completionReason": "finish_reason"
+      },
+      "notes": "Bedrock Titan Text /invoke: bare-shape provider response. Per-result tokenCount is the OUTPUT count for that result (Titan does n=1 typically). completionReason values: FINISH/LENGTH/CONTENT_FILTERED. Titan does not return a total_tokens field; downstream code computes from input + sum of result tokenCounts."
+    }
+  ]
+}

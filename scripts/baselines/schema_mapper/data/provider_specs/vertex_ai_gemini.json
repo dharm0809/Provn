@@ -1,0 +1,56 @@
+{
+  "provider": "vertex_ai",
+  "endpoint": "generateContent(gemini)",
+  "doc_url": "https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference",
+  "captured_at": "2026-04-27T17:52:00Z",
+  "captured_from": "Public Vertex AI Gemini generateContent API docs.",
+  "examples": [
+    {
+      "raw": {
+        "candidates": [
+          {
+            "content": {
+              "role": "model",
+              "parts": [{"text": "<assistant_reply>"}]
+            },
+            "finishReason": "STOP",
+            "safetyRatings": [
+              {"category": "HARM_CATEGORY_HATE_SPEECH", "probability": "NEGLIGIBLE", "probabilityScore": 0.05, "severity": "HARM_SEVERITY_NEGLIGIBLE", "severityScore": 0.04},
+              {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "probability": "NEGLIGIBLE", "probabilityScore": 0.04, "severity": "HARM_SEVERITY_NEGLIGIBLE", "severityScore": 0.03}
+            ]
+          }
+        ],
+        "usageMetadata": {
+          "promptTokenCount": 13,
+          "candidatesTokenCount": 7,
+          "totalTokenCount": 20,
+          "cachedContentTokenCount": 0
+        },
+        "modelVersion": "gemini-2.0-flash-001",
+        "responseId": "AbCdEfGhIjKl"
+      },
+      "expected_labels": {
+        "candidates[0].content.role": "UNKNOWN",
+        "candidates[0].content.parts[0].text": "content",
+        "candidates[0].finishReason": "finish_reason",
+        "candidates[0].safetyRatings[0].category": "safety_category",
+        "candidates[0].safetyRatings[0].probability": "safety_category",
+        "candidates[0].safetyRatings[0].probabilityScore": "UNKNOWN",
+        "candidates[0].safetyRatings[0].severity": "safety_category",
+        "candidates[0].safetyRatings[0].severityScore": "UNKNOWN",
+        "candidates[0].safetyRatings[1].category": "safety_category",
+        "candidates[0].safetyRatings[1].probability": "safety_category",
+        "candidates[0].safetyRatings[1].probabilityScore": "UNKNOWN",
+        "candidates[0].safetyRatings[1].severity": "safety_category",
+        "candidates[0].safetyRatings[1].severityScore": "UNKNOWN",
+        "usageMetadata.promptTokenCount": "prompt_tokens",
+        "usageMetadata.candidatesTokenCount": "completion_tokens",
+        "usageMetadata.totalTokenCount": "total_tokens",
+        "usageMetadata.cachedContentTokenCount": "cached_tokens",
+        "modelVersion": "model",
+        "responseId": "response_id"
+      },
+      "notes": "Vertex AI Gemini: camelCase, deeply nested. `safetyRatings[].category` (HARM_CATEGORY_*), `.probability` (NEGLIGIBLE/LOW/MEDIUM/HIGH), `.severity` (HARM_SEVERITY_*) are ALL safety_category — three different facets of the same provider safety classification, each is a categorical label string. The matching `*Score` floats (probabilityScore/severityScore) are continuous risk numbers, not categories — UNKNOWN. `modelVersion` is the canonical model identifier (no separate `model` field). FLAG FOR ARCHITECT: should multiple co-occurring safety_category leaves under the same parent (a single safetyRatings[i] dict has 3 of them) collapse to one? Current: per-leaf labelling, CRF will learn the pattern."
+    }
+  ]
+}

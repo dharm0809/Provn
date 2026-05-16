@@ -1,0 +1,94 @@
+{
+  "provider": "deepseek",
+  "endpoint": "chat.completions",
+  "doc_url": "https://api-docs.deepseek.com/api/create-chat-completion",
+  "captured_at": "2026-04-27T17:28:00Z",
+  "captured_from": "Public DeepSeek API docs (OpenAI-compatible chat.completions with prompt-cache + reasoning extensions).",
+  "examples": [
+    {
+      "raw": {
+        "id": "ddef0123-4567-89ab-cdef-0123456789ab",
+        "object": "chat.completion",
+        "created": 1714234200,
+        "model": "deepseek-chat",
+        "system_fingerprint": "fp_deepseek_xyz",
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "<assistant_reply>"},
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 9,
+          "total_tokens": 27,
+          "prompt_cache_hit_tokens": 12,
+          "prompt_cache_miss_tokens": 6
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].logprobs": "UNKNOWN",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "usage.prompt_cache_hit_tokens": "cached_tokens",
+        "usage.prompt_cache_miss_tokens": "UNKNOWN"
+      },
+      "notes": "DeepSeek: OpenAI-compatible plus prompt-cache hit/miss split. `prompt_cache_hit_tokens` are tokens served from cache → cached_tokens. `prompt_cache_miss_tokens` is the complement (cache misses charged at full rate); no canonical label maps cleanly — UNKNOWN. (cache_creation_tokens means tokens *written* into the cache, which DeepSeek doesn't expose as a separate field.)"
+    },
+    {
+      "raw": {
+        "id": "ddef0123-4567-89ab-cdef-0123456789cd",
+        "object": "chat.completion",
+        "created": 1714234300,
+        "model": "deepseek-reasoner",
+        "system_fingerprint": "fp_deepseek_xyz",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<final_answer>",
+              "reasoning_content": "<reasoning_trace>"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 25,
+          "completion_tokens": 88,
+          "total_tokens": 113,
+          "completion_tokens_details": {"reasoning_tokens": 60}
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "system_fingerprint": "model_hash",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].message.reasoning_content": "thinking_content",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "usage.completion_tokens_details.reasoning_tokens": "UNKNOWN"
+      },
+      "notes": "DeepSeek-Reasoner: returns `reasoning_content` alongside `content` in the same message dict. This is the OpenAI-API equivalent of Anthropic's thinking blocks → thinking_content. EXCLUSIVE_GROUPS['primary_content'] now legitimately fires under choices[0].message — content + thinking_content co-occur but are the canonical pair, not a conflict; the CRF should learn this as a positive transition (cooccur_bias not strict exclusion). FLAG FOR ARCHITECT: review whether the primary_content exclusive group is too strict; an Anthropic content[*] array makes them per-slot exclusive, but DeepSeek puts both under the same parent."
+    }
+  ]
+}

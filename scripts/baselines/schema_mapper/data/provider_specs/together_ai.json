@@ -1,0 +1,45 @@
+{
+  "provider": "together_ai",
+  "endpoint": "chat.completions",
+  "doc_url": "https://docs.together.ai/reference/chat-completions",
+  "captured_at": "2026-04-27T17:24:00Z",
+  "captured_from": "Public Together AI API docs (OpenAI-compatible chat.completions).",
+  "examples": [
+    {
+      "raw": {
+        "id": "8a1b2c3d4e5f6789",
+        "object": "chat.completion",
+        "created": 1714234000,
+        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "<assistant_reply>"},
+            "finish_reason": "stop",
+            "logprobs": null,
+            "seed": 12345
+          }
+        ],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14},
+        "prompt": []
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].finish_reason": "finish_reason",
+        "choices[0].logprobs": "UNKNOWN",
+        "choices[0].seed": "UNKNOWN",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "prompt": "UNKNOWN"
+      },
+      "notes": "Together AI: OpenAI-compatible. Quirks: per-choice `seed` (deterministic-replay seed used by the model — UNKNOWN, not a model_hash), and an empty top-level `prompt` array (Together echoes the prompt-token spec; empty array means no leaves emitted)."
+    }
+  ]
+}

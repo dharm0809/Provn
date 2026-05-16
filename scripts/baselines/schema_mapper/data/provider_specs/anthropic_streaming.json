@@ -1,0 +1,81 @@
+{
+  "provider": "anthropic",
+  "endpoint": "messages-stream(SSE events)",
+  "doc_url": "https://docs.anthropic.com/en/api/messages-streaming",
+  "captured_at": "2026-04-27T17:56:00Z",
+  "captured_from": "Public Anthropic streaming-events docs. Each SSE event payload is a separate example here (the gateway emits one record per event when it audits streaming).",
+  "examples": [
+    {
+      "raw": {
+        "type": "message_start",
+        "message": {
+          "id": "msg_01AbCdEfGhIj",
+          "type": "message",
+          "role": "assistant",
+          "model": "claude-opus-4-7",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 14,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 1
+          }
+        }
+      },
+      "expected_labels": {
+        "type": "UNKNOWN",
+        "message.id": "response_id",
+        "message.type": "UNKNOWN",
+        "message.role": "UNKNOWN",
+        "message.model": "model",
+        "message.content": "UNKNOWN",
+        "message.stop_reason": "finish_reason",
+        "message.stop_sequence": "UNKNOWN",
+        "message.usage.input_tokens": "prompt_tokens",
+        "message.usage.cache_creation_input_tokens": "cache_creation_tokens",
+        "message.usage.cache_read_input_tokens": "cached_tokens",
+        "message.usage.output_tokens": "completion_tokens"
+      },
+      "notes": "message_start event: header chunk with full message-level metadata before any content blocks are emitted. content is an empty list → no leaves. stop_reason is null mid-stream — labelled finish_reason regardless of value (the path-meaning is what we classify)."
+    },
+    {
+      "raw": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""}
+      },
+      "expected_labels": {
+        "type": "UNKNOWN",
+        "index": "UNKNOWN",
+        "content_block.type": "UNKNOWN",
+        "content_block.text": "content"
+      },
+      "notes": "content_block_start event: announces a new block with empty text. content_block.text is empty string but path is still content."
+    },
+    {
+      "raw": {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+        "usage": {"output_tokens": 9}
+      },
+      "expected_labels": {
+        "type": "UNKNOWN",
+        "delta.stop_reason": "finish_reason",
+        "delta.stop_sequence": "UNKNOWN",
+        "usage.output_tokens": "completion_tokens"
+      },
+      "notes": "message_delta event: emitted once at end-of-stream with the final stop_reason and the cumulative output_tokens. No input_tokens here (those came in message_start)."
+    },
+    {
+      "raw": {
+        "type": "message_stop"
+      },
+      "expected_labels": {
+        "type": "UNKNOWN"
+      },
+      "notes": "message_stop event: trivial closer, only the type discriminator. Single-leaf example tests that the labelling discipline doesn't choke on minimal payloads."
+    }
+  ]
+}

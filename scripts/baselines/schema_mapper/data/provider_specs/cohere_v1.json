@@ -1,0 +1,37 @@
+{
+  "provider": "cohere",
+  "endpoint": "v1/generate",
+  "doc_url": "https://docs.cohere.com/v1/reference/generate",
+  "captured_at": "2026-04-27T17:46:00Z",
+  "captured_from": "Public Cohere v1 /generate API docs (legacy text-generation endpoint).",
+  "examples": [
+    {
+      "raw": {
+        "id": "0a1b2c3d-4e5f-6789-abcd-ef0123456789",
+        "generations": [
+          {
+            "id": "gen_AbCdEf",
+            "text": "<assistant_reply>",
+            "finish_reason": "COMPLETE"
+          }
+        ],
+        "prompt": "<echoed_prompt>",
+        "meta": {
+          "api_version": {"version": "1"},
+          "billed_units": {"input_tokens": 11, "output_tokens": 7}
+        }
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "generations[0].id": "UNKNOWN",
+        "generations[0].text": "content",
+        "generations[0].finish_reason": "finish_reason",
+        "prompt": "UNKNOWN",
+        "meta.api_version.version": "UNKNOWN",
+        "meta.billed_units.input_tokens": "prompt_tokens",
+        "meta.billed_units.output_tokens": "completion_tokens"
+      },
+      "notes": "Cohere v1 /generate: deeply nested usage info under meta.billed_units. `meta.billed_units.input_tokens` and `output_tokens` map to prompt_tokens/completion_tokens (same Anthropic-style naming convention)."
+    }
+  ]
+}

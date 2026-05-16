@@ -1,0 +1,45 @@
+{
+  "_doc": "Adversarial holdouts for the schema-mapper baseline-v2 evaluator. NEVER train on these. The Phase 5 teacher-LLM synthesis MUST also exclude them — see synthesize.py for the enforcement. evaluate.py loads this file and computes the unseen-provider macro-F1 + per-key-rename macro-F1.",
+  "unseen_providers": [
+    {
+      "spec": "xai_grok",
+      "rationale": "OpenAI-compatible chat-completions shape with xAI-specific reasoning_content + num_sources_used quirks. Holding it out tests generalisation to a new provider that LOOKS like a known family but has subtle deltas."
+    },
+    {
+      "spec": "replicate",
+      "rationale": "Predictions-shape API (id/version/output/input) — completely unlike chat.completions. Holding it out tests generalisation to a structurally-distinct response shape we never trained on."
+    }
+  ],
+  "rename_attacks": [
+    {
+      "base_provider": "openai_chat",
+      "renames": {
+        "completion_tokens": ["completionTokens", "completion-tokens", "output_tokens", "outputTokens", "tokens_out"],
+        "prompt_tokens": ["promptTokens", "prompt-tokens", "input_tokens", "inputTokens", "tokens_in"],
+        "total_tokens": ["totalTokens", "total-tokens", "tokens_total"],
+        "finish_reason": ["finishReason", "finish-reason", "stop_reason", "stopReason", "done_reason"]
+      }
+    },
+    {
+      "base_provider": "anthropic_messages",
+      "renames": {
+        "input_tokens": ["promptTokens", "prompt-tokens", "input_token_count", "inputTokenCount"],
+        "output_tokens": ["completionTokens", "completion_tokens", "output_token_count", "outputTokenCount"],
+        "stop_reason": ["finishReason", "finish_reason", "done_reason", "completionReason"]
+      }
+    },
+    {
+      "base_provider": "ollama_chat",
+      "renames": {
+        "prompt_eval_count": ["promptEvalCount", "prompt-eval-count", "prompt_tokens", "input_token_count"],
+        "eval_count": ["evalCount", "eval-count", "completion_tokens", "output_token_count"],
+        "done_reason": ["doneReason", "done-reason", "finish_reason", "finishReason"]
+      }
+    }
+  ],
+  "_evaluator_contract": {
+    "unseen_providers_gate": "macro-F1 ≥ 0.85 across all xai_grok + replicate examples (success criterion #6)",
+    "rename_attacks_gate": "macro-F1 ≥ 0.90 across all rename-permuted variants (success criterion #9)",
+    "rename_generation": "evaluate.py loads each base_provider spec, generates one synthetic response per (path, replacement) pair by deep-copy + key-rename, runs the model, and verifies the canonical label is preserved despite the renamed key."
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "provider": "mistral",
+  "endpoint": "chat.completions",
+  "doc_url": "https://docs.mistral.ai/api/#tag/chat",
+  "captured_at": "2026-04-27T17:34:00Z",
+  "captured_from": "Public Mistral La Plateforme API docs (OpenAI-compatible chat.completions).",
+  "examples": [
+    {
+      "raw": {
+        "id": "abcd1234efgh5678",
+        "object": "chat.completion",
+        "created": 1714234600,
+        "model": "mistral-large-latest",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<assistant_reply>",
+              "tool_calls": null
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {"prompt_tokens": 13, "completion_tokens": 7, "total_tokens": 20}
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].message.tool_calls": "UNKNOWN",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens"
+      },
+      "notes": "Mistral La Plateforme: clean OpenAI-compatible. Quirk: `tool_calls` is null (not absent) when no tool calls — emitted as a leaf with no children → labelled UNKNOWN (it's the absence-of-tool-calls signal, not a tool-call field itself)."
+    },
+    {
+      "raw": {
+        "id": "abcd1234efgh9999",
+        "object": "chat.completion",
+        "created": 1714234700,
+        "model": "mistral-large-latest",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "tcall_abc123",
+                  "type": "function",
+                  "function": {"name": "search_web", "arguments": "{\"q\":\"<placeholder>\"}"}
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 18, "total_tokens": 68}
+      },
+      "expected_labels": {
+        "id": "response_id",
+        "object": "UNKNOWN",
+        "created": "response_timestamp",
+        "model": "model",
+        "choices[0].index": "UNKNOWN",
+        "choices[0].message.role": "UNKNOWN",
+        "choices[0].message.content": "content",
+        "choices[0].message.tool_calls[0].id": "tool_call_id",
+        "choices[0].message.tool_calls[0].type": "tool_call_type",
+        "choices[0].message.tool_calls[0].function.name": "tool_call_name",
+        "choices[0].message.tool_calls[0].function.arguments": "tool_call_arguments",
+        "choices[0].finish_reason": "finish_reason",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens"
+      },
+      "notes": "Mistral tool_calls: matches OpenAI shape exactly (id/type/function.{name,arguments})."
+    }
+  ]
+}
