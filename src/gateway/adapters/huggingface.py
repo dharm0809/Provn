@@ -10,6 +10,7 @@ import httpx
 from starlette.requests import Request
 
 from gateway.adapters.base import ModelCall, ModelResponse, ProviderAdapter
+from gateway.adapters.openai import iter_sse_data_payloads
 
 
 class HuggingFaceAdapter(ProviderAdapter):
@@ -101,23 +102,21 @@ class HuggingFaceAdapter(ProviderAdapter):
         content_parts = []
         provider_request_id = None
         usage = None
-        for chunk in chunks:
-            for line in chunk.decode("utf-8", errors="replace").splitlines():
-                if line.startswith("data: "):
-                    try:
-                        obj = json.loads(line[6:].strip())
-                        if provider_request_id is None:
-                            provider_request_id = obj.get("id")
-                        if "choices" in obj and obj["choices"]:
-                            delta = (obj["choices"][0].get("delta") or {}).get("content") or ""
-                            if delta:
-                                content_parts.append(delta)
-                        elif "token" in obj and "text" in obj["token"]:
-                            content_parts.append(obj["token"]["text"])
-                        if obj.get("usage"):
-                            usage = obj["usage"]
-                    except json.JSONDecodeError:
-                        pass
+        for payload in iter_sse_data_payloads(chunks):  # span-safe (join-then-split)
+            try:
+                obj = json.loads(payload)
+                if provider_request_id is None:
+                    provider_request_id = obj.get("id")
+                if "choices" in obj and obj["choices"]:
+                    delta = (obj["choices"][0].get("delta") or {}).get("content") or ""
+                    if delta:
+                        content_parts.append(delta)
+                elif "token" in obj and "text" in obj["token"]:
+                    content_parts.append(obj["token"]["text"])
+                if obj.get("usage"):
+                    usage = obj["usage"]
+            except json.JSONDecodeError:
+                pass
         return ModelResponse(
             content="".join(content_parts),
             usage=usage,

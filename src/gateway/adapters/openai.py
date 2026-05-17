@@ -290,6 +290,34 @@ def _process_sse_line(
         state["usage"] = usage
 
 
+def iter_sse_data_payloads(chunks: list[bytes]):
+    """Yield each SSE ``data:`` payload string, span-safe.
+
+    THE FIX (pre-existing TCP-fragmentation defect): the forwarder buffers
+    raw ``aiter_bytes()`` chunks, which TCP fragments with NO respect for
+    SSE line boundaries OR UTF-8 codepoint boundaries. Per-chunk
+    ``chunk.decode(...).splitlines()`` therefore silently drops any
+    ``data:`` line split across two chunks (it fails the
+    ``startswith('data: ')`` check) → the model's response content AND
+    its usage are lost from the audit record and token accounting →
+    audit-blank + budget undercount on streamed OpenAI/Ollama/HF.
+
+    Joining ALL chunks before decoding+splitting heals both failure modes
+    at once (a codepoint split across chunks is also only correct after
+    the join). This is the exact discipline Anthropic's
+    ``_iter_sse_objects`` already uses for the same reason; OpenAI / Ollama
+    / HF were left on the fragile per-chunk path. One helper, all sites.
+    """
+    full = b"".join(chunks).decode("utf-8", errors="replace")
+    for line in full.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:].strip()
+        if payload == "[DONE]" or not payload:
+            continue
+        yield payload
+
+
 class OpenAIAdapter(ProviderAdapter):
     """Adapter for OpenAI-compatible API (chat/completions and completions)."""
 
@@ -537,14 +565,8 @@ class OpenAIAdapter(ProviderAdapter):
         tool_call_map: dict[int, dict[str, Any]] = {}
         state: dict[str, Any] = {"provider_request_id": None, "has_pending_tool_calls": False}
 
-        for chunk in chunks:
-            for line in chunk.decode("utf-8", errors="replace").splitlines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if payload == "[DONE]":
-                    continue
-                _process_sse_line(payload, content_parts, tool_call_map, state)
+        for payload in iter_sse_data_payloads(chunks):  # span-safe (join-then-split)
+            _process_sse_line(payload, content_parts, tool_call_map, state)
 
         tool_interactions = _build_interactions_from_map(tool_call_map)
         return ModelResponse(
