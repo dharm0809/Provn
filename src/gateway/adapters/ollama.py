@@ -36,6 +36,7 @@ from gateway.adapters.openai import (
     _extract_system_prompt,
     _parse_chat_completions_choice,
     _process_sse_line,
+    iter_sse_data_payloads,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,23 +243,17 @@ class OllamaAdapter(ProviderAdapter):
         tool_call_map: dict[int, dict[str, Any]] = {}
         state: dict[str, Any] = {"provider_request_id": None, "has_pending_tool_calls": False}
 
-        for chunk in chunks:
-            for line in chunk.decode("utf-8", errors="replace").splitlines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if payload == "[DONE]":
-                    continue
-                _process_sse_line(payload, content_parts, tool_call_map, state)
-                # Collect native reasoning deltas (Ollama OpenAI-compat).
-                try:
-                    obj = json.loads(payload)
-                    delta = (obj.get("choices") or [{}])[0].get("delta") or {}
-                    rpart = delta.get("reasoning")
-                    if rpart:
-                        reasoning_parts.append(rpart)
-                except (json.JSONDecodeError, IndexError, TypeError):
-                    pass
+        for payload in iter_sse_data_payloads(chunks):  # span-safe (join-then-split)
+            _process_sse_line(payload, content_parts, tool_call_map, state)
+            # Collect native reasoning deltas (Ollama OpenAI-compat).
+            try:
+                obj = json.loads(payload)
+                delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                rpart = delta.get("reasoning")
+                if rpart:
+                    reasoning_parts.append(rpart)
+            except (json.JSONDecodeError, IndexError, TypeError):
+                pass
 
         tool_interactions = _build_interactions_from_map(tool_call_map)
         joined = "".join(content_parts)
