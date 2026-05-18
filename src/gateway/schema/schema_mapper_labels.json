@@ -5,6 +5,7 @@
   "citation_url",
   "completion_tokens",
   "content",
+  "envelope",
   "finish_reason",
   "model",
   "model_hash",

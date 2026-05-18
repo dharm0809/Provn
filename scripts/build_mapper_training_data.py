@@ -20,6 +20,15 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.gateway.schema.features import flatten_json, extract_features, FlatField
+from src.gateway.schema.canonical import ENVELOPE_KEYS, ENVELOPE_PATH_DISQUALIFIERS, ENVELOPE_LABEL
+
+
+def _is_envelope_field(key: str, path: str) -> bool:
+    """Mirror the runtime mapper's envelope gate so training labels match inference."""
+    for seg in path.split("."):
+        if seg in ENVELOPE_PATH_DISQUALIFIERS:
+            return False
+    return key in ENVELOPE_KEYS
 
 # ── Real provider response examples with labels ─────────────────────────────
 # Each example: (provider_name, response_json, {path: canonical_label})
@@ -582,6 +591,12 @@ def _extract_samples(provider: str, response: dict, labels: dict) -> list[dict]:
     samples = []
     for f in fields:
         label = labels.get(f.path, "UNKNOWN")
+        # Promote UNKNOWN → envelope when the runtime mapper would do the same.
+        # This keeps training labels in sync with _apply_path_fallbacks so the
+        # ONNX model learns to predict "envelope" directly, eliminating the
+        # post-hoc rewrite for provider response-shape boilerplate.
+        if label == "UNKNOWN" and _is_envelope_field(f.key, f.path):
+            label = ENVELOPE_LABEL
         features = extract_features(f)
         samples.append({
             "provider": provider,
