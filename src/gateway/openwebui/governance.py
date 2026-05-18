@@ -486,6 +486,26 @@ async def process_plugin_event(event: dict) -> dict:
             errors.append(f"session_chain: {exc}")
             logger.warning("Plugin event session chain failed: %s", exc, exc_info=True)
             chain_result = None
+            # SECURITY: If signing is enabled and apply_session_chain failed, do NOT write
+            # the record unsigned. Signing failure is non-fatal per apply_session_chain's
+            # design, but a complete chain failure (sequence reserve, signature compute,
+            # lock acquisition) must block the write to avoid records in Walacor without
+            # sequence numbers or signatures when they're mandated.
+            if getattr(settings, "record_signing_enabled", False):
+                errors.append("blocking write: record_signing_enabled=true but session chain failed")
+                result["governance_status"] = "error"
+                # Don't write the record; return early instead.
+                await _write_plugin_attempt(
+                    ctx, settings,
+                    event_type=event_type, provider=provider, model_id=model_id,
+                    user_id=(event.get("user") or {}).get("id"),
+                    status="error",
+                    reason="session_chain_failed",
+                    execution_id=record.get("execution_id"),
+                )
+                if errors:
+                    result["errors"] = errors
+                return result
 
         # Dual-write (WAL + Walacor)
         wrote_ok = False
