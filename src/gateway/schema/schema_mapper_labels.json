@@ -10,6 +10,7 @@
   "model",
   "model_hash",
   "prompt_tokens",
+  "reasoning_tokens",
   "response_id",
   "safety_category",
   "thinking_content",
