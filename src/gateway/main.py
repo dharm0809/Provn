@@ -1640,13 +1640,26 @@ async def on_startup() -> None:
             _init_wal(settings, ctx)
 
         if settings.skip_governance:
+            # SECURITY: skip_governance and record_signing_enabled are incompatible.
+            # Records cannot bypass audit chain/signing in production. Disable skip mode.
+            if settings.record_signing_enabled:
+                logger.error(
+                    "STARTUP BLOCKED: skip_governance=true AND record_signing_enabled=true are "
+                    "mutually exclusive. Skip mode bypasses audit chain & signing, violating "
+                    "compliance. Choose ONE: (a) record_signing_enabled=true (recommended, "
+                    "disables skip), or (b) record_signing_enabled=false + skip_governance=true "
+                    "(audit-only transparent proxy, no signatures). Refusing to start."
+                )
+                raise RuntimeError(
+                    "Configuration conflict: skip_governance and record_signing_enabled both true"
+                )
             ctx.skip_governance = True
             if settings.wal_batch_enabled and ctx.wal_writer:
                 await _init_batch_writer(settings, ctx)
             _init_storage(settings, ctx)
             _init_lineage(settings, ctx)
             ctx.event_loop_lag_task = asyncio.create_task(_event_loop_lag_monitor())
-            logger.info("Gateway running in skip_governance (transparent proxy) mode")
+            logger.warning("Gateway running in skip_governance (transparent proxy) mode — audit signatures disabled!")
             return
 
         await _init_governance(settings, ctx)

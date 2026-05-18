@@ -839,8 +839,19 @@ async def _skip_governance_after_stream(
             latency_ms=round((time.perf_counter() - pipeline_start) * 1000, 1) if pipeline_start else None,
             file_metadata=getattr(request.state, "file_metadata", None) if request else None,
         )
-        if ctx.storage:
-            await ctx.storage.write_execution(record)
+        # CRITICAL: Apply session chain even in skip_governance mode to ensure records
+        # are signed and linked. Governance can be skipped, but audit integrity cannot.
+        session_id = call.metadata.get("session_id")
+        from gateway.pipeline.chain_helpers import (
+            apply_session_chain as _apply_chain,
+            advance_session_chain as _advance_chain,
+        )
+        async with _session_chain_lock(ctx, session_id):
+            _chain_res = await _apply_chain(record, session_id, ctx, settings)
+            if ctx.storage:
+                result = await ctx.storage.write_execution(record)
+                if result.succeeded and _chain_res.applied:
+                    await _advance_chain(record, session_id, ctx, _chain_res)
         execution_id_var.set(record["execution_id"])
     except Exception as e:
         logger.error("Skip-governance after-stream write failed: %s", e, exc_info=True)
