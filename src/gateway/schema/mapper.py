@@ -169,6 +169,14 @@ _PROVIDER_PATH_MAP: dict[str, str] = {
     "eval_duration": "timing_value",
     "load_duration": "timing_value",
     "total_duration": "timing_value",
+    # ── OpenAI tool calls (first call, index 0) ─────────────────
+    # These paths are not in the shallow training data, so ONNX
+    # misclassifies them (e.g. `id` → `envelope`). Deterministic
+    # rules here prevent that at index 0; ONNX serves index 1+.
+    "choices.0.message.tool_calls.0.id": "tool_call_id",
+    "choices.0.message.tool_calls.0.type": "tool_call_type",
+    "choices.0.message.tool_calls.0.function.name": "tool_call_name",
+    "choices.0.message.tool_calls.0.function.arguments": "tool_call_arguments",
 }
 
 
