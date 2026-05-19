@@ -177,6 +177,10 @@ _PROVIDER_PATH_MAP: dict[str, str] = {
     "choices.0.message.tool_calls.0.type": "tool_call_type",
     "choices.0.message.tool_calls.0.function.name": "tool_call_name",
     "choices.0.message.tool_calls.0.function.arguments": "tool_call_arguments",
+    # ── DeepSeek-R1 reasoning trace ─────────────────────────────
+    # ONNX confidently misclassifies `reasoning_content` as `content`
+    # (the value reads like an answer). Pin it deterministically.
+    "choices.0.message.reasoning_content": "thinking_content",
 }
 
 
@@ -478,6 +482,14 @@ class SchemaMapper:
         """
         result = list(classifications)
         for i, (f, (label, conf)) in enumerate(zip(fields, classifications)):
+            # A direct ONNX/heuristic ``envelope`` prediction must still
+            # honour ENVELOPE_PATH_DISQUALIFIERS. Without this, a deep
+            # ``arguments.role`` (user data inside a tool call) that ONNX
+            # confidently calls ``envelope`` gets silently swallowed,
+            # because the disqualifier gate below only runs for UNKNOWN.
+            if label == ENVELOPE_LABEL and not _is_envelope_field(f.key, f.path):
+                result[i] = ("UNKNOWN", conf)
+                label = "UNKNOWN"
             if label != "UNKNOWN":
                 continue
             # D3: envelope tag is the top priority once a field is UNKNOWN —
