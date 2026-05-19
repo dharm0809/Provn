@@ -24,6 +24,51 @@ def _open_wal_ro(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _wal_paths(ctx) -> list[str]:
+    """Every WAL file the integrity checks should aggregate across.
+
+    3b Phase 1: in multi-worker deployments each uvicorn worker writes its
+    own ``wal-<pid>.db`` (the single-writer file would otherwise corrupt).
+    Integrity checks must therefore look at every file in the WAL dir, not
+    just this worker's. At workers<=1 the legacy ``wal.db`` is the only
+    entry and behaviour is byte-identical with pre-Phase-1.
+
+    Falls back to ``ctx.wal_writer._path`` if directory scan finds nothing
+    (e.g. WAL writer running but file not yet flushed at startup), so the
+    pre-Phase-1 single-file invariant is preserved.
+    """
+    from gateway.config import get_settings
+    from gateway.wal.path import iter_wal_db_paths
+    paths = iter_wal_db_paths(get_settings().wal_path)
+    if paths:
+        return paths
+    own = getattr(getattr(ctx, "wal_writer", None), "_path", None)
+    return [own] if own else []
+
+
+def _exec_wal_ro_all(ctx, sql: str, params: tuple = (), *, row_factory=None) -> list:
+    """Run a read-only SELECT against every WAL file and return concatenated rows.
+
+    Each per-worker file is queried independently with its own short-lived
+    connection. Caller decides how to fold the results (sum, dedup, sort).
+    Per-file errors are logged once and skipped (a partial result beats a
+    blanket integrity-check failure when one file is briefly unavailable).
+    """
+    out: list = []
+    for p in _wal_paths(ctx):
+        try:
+            c = _open_wal_ro(p)
+            if row_factory is not None:
+                c.row_factory = row_factory
+            try:
+                out.extend(c.execute(sql, params).fetchall())
+            finally:
+                c.close()
+        except Exception:  # noqa: BLE001 — partial aggregation is the contract
+            continue
+    return out
+
+
 class _Int01SigningKeyLoaded:
     id = "INT-01"
     name = "Signing key loaded"
@@ -64,19 +109,22 @@ class _Int02SigningActive:
             return CheckResult(status="amber", detail="WAL writer not available — cannot sample records", elapsed_ms=elapsed_ms())
 
         try:
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            # Exclude internal execution records that legitimately skip the
-            # signing path (startup self-test, intelligence verdict writes).
-            rows = conn.execute(
+            # 3b Phase 1: union the 50 newest per WAL file, then sort by
+            # created_at and take 50 across all files. ``rowid`` is per-file
+            # so it cannot order across workers; ISO 8601 created_at strings
+            # are lexicographically chronological in this codebase.
+            per_file = _exec_wal_ro_all(
+                ctx,
                 """
-                SELECT record_json FROM wal_records
+                SELECT record_json, created_at FROM wal_records
                  WHERE event_type='execution'
                    AND execution_id NOT LIKE 'self-test-%'
                    AND (request_type IS NULL OR request_type NOT IN ('system_task', 'intelligence_verdict'))
                  ORDER BY rowid DESC LIMIT 50
-                """
-            ).fetchall()
-            conn.close()
+                """,
+            )
+            per_file.sort(key=lambda r: r[1], reverse=True)
+            rows = [(r[0],) for r in per_file[:50]]
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Could not sample WAL records: {exc}", elapsed_ms=elapsed_ms())
 
@@ -124,12 +172,13 @@ class _Int03SignaturesVerify:
             return CheckResult(status="amber", detail="WAL writer not available", elapsed_ms=elapsed_ms())
 
         try:
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            rows = conn.execute(
-                "SELECT record_json FROM wal_records WHERE event_type='execution' "
-                "ORDER BY rowid DESC LIMIT 100"
-            ).fetchall()
-            conn.close()
+            per_file = _exec_wal_ro_all(
+                ctx,
+                "SELECT record_json, created_at FROM wal_records WHERE event_type='execution' "
+                "ORDER BY rowid DESC LIMIT 100",
+            )
+            per_file.sort(key=lambda r: r[1], reverse=True)
+            rows = [(r[0],) for r in per_file[:100]]
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Could not sample records: {exc}", elapsed_ms=elapsed_ms())
 
@@ -269,12 +318,13 @@ class _Int05AnchorRoundTrip:
             return CheckResult(status="amber", detail="Walacor client or WAL not available", elapsed_ms=elapsed_ms())
 
         try:
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            rows = conn.execute(
-                "SELECT record_json FROM wal_records WHERE event_type='execution' "
-                "ORDER BY rowid DESC LIMIT 20"
-            ).fetchall()
-            conn.close()
+            per_file = _exec_wal_ro_all(
+                ctx,
+                "SELECT record_json, created_at FROM wal_records WHERE event_type='execution' "
+                "ORDER BY rowid DESC LIMIT 20",
+            )
+            per_file.sort(key=lambda r: r[1], reverse=True)
+            rows = [(r[0],) for r in per_file[:20]]
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Could not sample records: {exc}", elapsed_ms=elapsed_ms())
 
@@ -348,25 +398,36 @@ class _Int06ChainContinuity:
         if ctx.wal_writer is None:
             return CheckResult(status="amber", detail="WAL writer not available", elapsed_ms=elapsed_ms())
 
+        # 3b Phase 1: a session's records live in exactly one worker's WAL
+        # (workers don't share session affinity). Find the file that holds a
+        # multi-record session and verify with a LineageReader pinned to it.
+        from gateway.lineage.reader import LineageReader
+        session_id = None
+        session_file = None
         try:
-            from gateway.lineage.reader import LineageReader
-            reader = LineageReader(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            row = conn.execute(
-                "SELECT session_id, COUNT(*) c FROM wal_records "
-                "WHERE event_type='execution' AND session_id IS NOT NULL "
-                "GROUP BY session_id HAVING c > 1 ORDER BY MAX(rowid) DESC LIMIT 1"
-            ).fetchone()
-            conn.close()
+            for p in _wal_paths(ctx):
+                try:
+                    c = _open_wal_ro(p)
+                    row = c.execute(
+                        "SELECT session_id FROM wal_records "
+                        "WHERE event_type='execution' AND session_id IS NOT NULL "
+                        "GROUP BY session_id HAVING COUNT(*) > 1 "
+                        "ORDER BY MAX(rowid) DESC LIMIT 1"
+                    ).fetchone()
+                    c.close()
+                    if row:
+                        session_id, session_file = row[0], p
+                        break
+                except Exception:
+                    continue
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Could not query sessions: {exc}", elapsed_ms=elapsed_ms())
 
-        if not row:
+        if not session_id:
             return CheckResult(status="amber", detail="No multi-record session found to verify", elapsed_ms=elapsed_ms())
 
-        session_id = row[0]
         try:
-            result = reader.verify_chain(session_id)
+            result = LineageReader(session_file).verify_chain(session_id)
         except Exception as exc:
             return CheckResult(status="amber", detail=f"verify_chain raised: {exc}", elapsed_ms=elapsed_ms())
 
@@ -401,24 +462,18 @@ class _Int07AttemptCompleteness:
             return CheckResult(status="amber", detail="WAL writer not available", elapsed_ms=elapsed_ms())
 
         try:
-            conn = _open_wal_ro(ctx.wal_writer._path)  # type: ignore[attr-defined]
-            # Join executions (older than 30s to avoid race with the async
-            # attempt write in completeness_middleware's finally block) ⨝ attempts.
-            # Restrict to last 100 executions for bounded cost.
-            #
-            # created_at is stored as ISO 8601 ('2025-…T01:30:45.123+00:00'),
-            # but datetime('now') returns SQLite format ('2025-… 01:30:45').
-            # Direct string comparison gets the 'T' vs space ordering wrong — wrap
-            # both sides in datetime() so SQLite parses them to a common form.
-            # Exclude internal execution records that never flow through the
-            # HTTP request pipeline (startup self-test, intelligence worker
-            # verdicts, etc.) — completeness_middleware only writes attempt
-            # rows for real inbound requests, so these would be counted as
-            # spurious orphans.
-            rows = conn.execute(
+            # 3b Phase 1: an execution and its attempt row are always in the
+            # same worker's WAL (the request hit one worker; completeness
+            # middleware writes the attempt to that same WAL), so the
+            # intra-file JOIN below is correct per-file. Run it against
+            # every worker's WAL, then merge by created_at and keep the
+            # newest 100 system-wide.
+            per_file = _exec_wal_ro_all(
+                ctx,
                 """
                 SELECT r.execution_id,
-                       (SELECT COUNT(*) FROM gateway_attempts a WHERE a.execution_id = r.execution_id) AS matched
+                       (SELECT COUNT(*) FROM gateway_attempts a WHERE a.execution_id = r.execution_id) AS matched,
+                       r.created_at
                   FROM wal_records r
                  WHERE r.event_type='execution'
                    AND r.execution_id NOT LIKE 'self-test-%'
@@ -426,9 +481,10 @@ class _Int07AttemptCompleteness:
                    AND datetime(r.created_at) < datetime('now', '-30 seconds')
                  ORDER BY r.rowid DESC
                  LIMIT 100
-                """
-            ).fetchall()
-            conn.close()
+                """,
+            )
+            per_file.sort(key=lambda r: r[2], reverse=True)
+            rows = [(r[0], r[1]) for r in per_file[:100]]
         except Exception as exc:
             return CheckResult(status="amber", detail=f"Query failed: {exc}", elapsed_ms=elapsed_ms())
 

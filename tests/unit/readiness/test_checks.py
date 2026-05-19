@@ -159,11 +159,13 @@ def test_int02_green(tmp_path):
 
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
-    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, request_type TEXT)")
+    # 3b Phase 1: integrity checks now select created_at to merge across
+    # multiple per-worker WAL files; fixture schema must match.
+    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, request_type TEXT, created_at TEXT)")
     for i in range(50):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, ?, 'execution', NULL)",
-            (str(i), json.dumps({"record_signature": f"sig{i}"})),
+            "INSERT INTO wal_records VALUES (?, ?, 'execution', NULL, ?)",
+            (str(i), json.dumps({"record_signature": f"sig{i}"}), f"2026-05-19T00:00:{i:02d}+00:00"),
         )
     conn.commit()
     conn.close()
@@ -180,11 +182,11 @@ def test_int02_red_unsigned(tmp_path):
 
     db = tmp_path / "wal.db"
     conn = sqlite3.connect(str(db))
-    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, request_type TEXT)")
+    conn.execute("CREATE TABLE wal_records (execution_id TEXT, record_json TEXT, event_type TEXT, request_type TEXT, created_at TEXT)")
     for i in range(50):
         conn.execute(
-            "INSERT INTO wal_records VALUES (?, ?, 'execution', NULL)",
-            (str(i), json.dumps({"record_signature": None})),
+            "INSERT INTO wal_records VALUES (?, ?, 'execution', NULL, ?)",
+            (str(i), json.dumps({"record_signature": None}), f"2026-05-19T00:00:{i:02d}+00:00"),
         )
     conn.commit()
     conn.close()

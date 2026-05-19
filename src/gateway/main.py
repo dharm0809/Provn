@@ -614,10 +614,15 @@ def _init_wal(settings, ctx) -> None:
     """
     from gateway.wal.writer import WALWriter
     from gateway.wal.delivery_worker import DeliveryWorker
+    from gateway.wal.path import wal_db_path
 
     wal_dir = Path(settings.wal_path)
     wal_dir.mkdir(parents=True, exist_ok=True)
-    ctx.wal_writer = WALWriter(str(wal_dir / "wal.db"))
+    # Per-worker WAL file when uvicorn_workers > 1 (3b Phase 1) to avoid
+    # SQLite multi-writer corruption. At workers<=1 this returns the
+    # legacy ``wal.db`` so deployments without a workers bump are
+    # byte-identical to before the refactor.
+    ctx.wal_writer = WALWriter(wal_db_path(wal_dir, settings.uvicorn_workers))
     ctx.wal_writer.start()
     if settings.control_plane_url:
         # Control-plane aggregator shipper (POSTs to /v1/gateway/executions).
@@ -912,10 +917,26 @@ def _init_budget_tracker(settings, ctx) -> None:
     ctx.budget_tracker = make_budget_tracker(ctx.redis_client, settings, alert_bus=ctx.alert_bus, alert_thresholds=alert_thresholds)
     if settings.token_budget_enabled and settings.token_budget_max_tokens > 0:
         if ctx.redis_client is None:
-            # In-memory tracker supports synchronous configure
+            # 3b Phase 1: in multi-worker deployments WITHOUT Redis, each
+            # worker has its own in-memory tracker. Divide the configured
+            # budget by worker count so aggregate spend across workers
+            # stays under the intended cap. Crude (rounds down) but safe;
+            # a shared store (Phase 2) replaces this when needed.
+            # Robust to test fixtures where settings may be a mock — coerce.
+            try:
+                workers = max(1, int(settings.uvicorn_workers))
+            except (TypeError, ValueError):
+                workers = 1
+            per_worker_budget = settings.token_budget_max_tokens // workers
+            if workers > 1:
+                logger.info(
+                    "Token budget multi-worker split: %d total / %d workers "
+                    "= %d per worker (no shared store)",
+                    settings.token_budget_max_tokens, workers, per_worker_budget,
+                )
             ctx.budget_tracker.configure(
                 settings.gateway_tenant_id, None,
-                settings.token_budget_period, settings.token_budget_max_tokens,
+                settings.token_budget_period, per_worker_budget,
             )
         logger.info(
             "Token budget enabled: period=%s max_tokens=%d",

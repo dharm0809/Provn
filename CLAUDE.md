@@ -87,6 +87,13 @@ Bidirectional translator for OpenAI `/v1/chat/completions` ↔ Anthropic `/v1/me
 ### OpenWebUI integration (`src/gateway/ollama_proxy.py`, `src/gateway/openwebui/governance.py`)
 4 Ollama-shape handlers (`/api/tags|ps|version|show`) proxy to `provider_ollama_url` so OpenWebUI registers the gateway as an *Ollama* connection. `/api/` and `/v1/openwebui/` are exempted in `api_key_middleware._plugin_paths` and `completeness_middleware`. Plugin event governance reproduces the proxy-path pipeline for events that bypassed the proxy (outlet=full, inlet=lightweight, sessions namespaced `owui:{chat_id}`, blocks surface as `blocked_post_facto`). **Source of truth for chain logic is `pipeline/orchestrator.py:_apply_session_chain`** — never reintroduce the old SHA3 Merkle helpers.
 
+## Multi-worker WAL (3b Phase 1)
+- `WALACOR_UVICORN_WORKERS=1` (default): WAL file is `{wal_path}/wal.db` — byte-identical to pre-Phase-1.
+- `WALACOR_UVICORN_WORKERS>1`: each worker writes its own `{wal_path}/wal-<pid>.db` (SQLite multi-writer to one file is unsafe even with the internal lock; per-PID files eliminate it). The control-plane `DeliveryWorker` / #34 Walacor sink in each worker drains *its own* file — no cross-worker drain races.
+- Readers must aggregate: `gateway.wal.path.iter_wal_db_paths(wal_dir)` returns every `wal*.db` in the dir. Integrity readiness checks (INT-02/03/05/06/07) already use this via `_exec_wal_ro_all` in `readiness/checks/integrity.py` — they union by file then merge by `created_at`.
+- Token budget: in-memory tracker is divided by `uvicorn_workers` at boot (`main._init_budget_tracker`) so aggregate spend stays under the configured cap. Redis-backed tracker is unaffected. Phase 2 (shared store) replaces the divide.
+- **Deferred to Phase 1.1:** `LineageReader` (local-SQLite fallback, only used when Walacor is unavailable) does NOT yet union across worker files. Prod uses `WalacorLineageReader` (HTTP, no SQLite) and is unaffected.
+
 ## Failure modes & guards (do not delete the guards)
 These guards exist because the exact bug shipped to production. Each is a *by-construction* chokepoint — failing loudly beats relying on review/discipline (the originals had docs and still broke). If you touch one, keep the guard or move it; don't just remove it.
 
