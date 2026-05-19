@@ -31,6 +31,12 @@ class StorageRouter:
 
     def __init__(self, backends: list[StorageBackend]) -> None:
         self._backends = list(backends)
+        # Strong refs to in-flight remote attempt-write tasks. The durable
+        # WAL leg is awaited inline; the remote leg is decoupled into a
+        # task so a slow Walacor can never trip the caller's bounded
+        # timeout and discard an attempt that is already durably recorded
+        # locally. Without a strong ref the loop could GC the task mid-POST.
+        self._pending_remote_attempts: set = set()
 
     @property
     def backend_names(self) -> list[str]:
@@ -111,7 +117,28 @@ class StorageRouter:
         return WriteResult(succeeded=succeeded, failed=failed)
 
     async def write_attempt(self, record: dict) -> None:
-        """Parallel fan-out attempt write. Fire-and-forget — never raises."""
+        """Fan-out attempt write. Fire-and-forget — never raises.
+
+        Ordering matters for the completeness invariant ("every request
+        gets an attempt record"). The WAL backend write is a microsecond
+        thread-enqueue; the Walacor backend write is a remote HTTP POST
+        that can take seconds — or stall — under load. The caller
+        (``_write_attempt_bg``) wraps this whole coroutine in a single
+        bounded ``asyncio.wait_for``. If both backends were awaited
+        together (``gather``), a slow Walacor would trip that timeout and
+        abandon the *entire* operation — discarding the durable local WAL
+        row that had already been instant to write. That is exactly how a
+        stress test dropped ~9k attempt records: not WAL capacity, but the
+        durable write being chained to a slow remote dependency under one
+        shared deadline.
+
+        Fix: write the durable WAL backend first and await it, so a
+        subsequent timeout abort of the remote fan-out can no longer eat
+        the committed audit row. Behaviour is otherwise unchanged — every
+        registered backend still receives the write, the dual-write
+        contract holds, and deployments with no WAL backend (control-plane
+        aggregator mode) take the original byte-identical gather path.
+        """
         if not self._backends:
             return
 
@@ -126,7 +153,25 @@ class StorageRouter:
                     exc_info=True,
                 )
 
-        await asyncio.gather(*(_write_one(b) for b in self._backends))
+        wal = self._wal_backend()
+        if wal is None:
+            # No durable local sink — preserve original parallel fan-out.
+            await asyncio.gather(*(_write_one(b) for b in self._backends))
+            return
+        # Durable local row first (microsecond thread-enqueue) and AWAITED:
+        # this is the completeness invariant — once this returns the audit
+        # row is recorded regardless of anything remote.
+        await _write_one(wal)
+        # Remote leg decoupled: a slow/stalled Walacor must not keep this
+        # coroutine alive long enough for the caller's bounded timeout
+        # (_write_attempt_bg) to cancel it and emit a misleading "attempt
+        # skipped" — the attempt is NOT skipped, it is durably in the WAL.
+        # Same decoupling principle as commit 520cba5 for executions.
+        others = [b for b in self._backends if b is not wal]
+        for b in others:
+            t = asyncio.create_task(_write_one(b))
+            self._pending_remote_attempts.add(t)
+            t.add_done_callback(self._pending_remote_attempts.discard)
 
     async def write_tool_event(self, record: dict) -> None:
         """Parallel fan-out tool event write. Fire-and-forget — never raises.

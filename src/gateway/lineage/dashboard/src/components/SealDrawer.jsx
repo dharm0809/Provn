@@ -53,7 +53,9 @@ export default function SealDrawer({ r, sessionId, totalInChain }) {
     if (seal.error) return { state: 'unreachable', msg: seal.error };
     if (seal.envelope === null || seal.envelope === undefined) return { state: 'missing' };
     if (!seal.match) return { state: 'no-match' };
-    return { state: seal.match.all_ok ? 'match' : 'drift' };
+    if (seal.match.all_ok) return { state: 'match' };
+    if (seal.match.pending) return { state: 'pending-anchor' };
+    return { state: 'drift' };
   }, [seal]);
 
   const sigStatus = rec.record_signature || 'absent';
@@ -147,6 +149,11 @@ export default function SealDrawer({ r, sessionId, totalInChain }) {
                               <p className="exec-rr-section-label">ROUND-TRIP CHECK</p>
                               {blockB.state === 'match' && (
                                 <div className="exec-roundtrip pass">✓ local DH matches remote</div>
+                              )}
+                              {blockB.state === 'pending-anchor' && (
+                                <div className="exec-roundtrip" style={{ color: 'var(--text-muted)' }}>
+                                  ⧗ anchor pending — Walacor anchors asynchronously; local anchor fields not yet populated
+                                </div>
                               )}
                               {blockB.state === 'drift' && (
                                 <div className="exec-roundtrip fail">
@@ -288,11 +295,14 @@ function sigBadge(s) {
   return <span className={'exec-badge-mini ' + cls}>{s}</span>;
 }
 function rtClass(state) {
-  return state === 'match' ? 'pass' : state === 'drift' ? 'fail' : state === 'unreachable' ? 'warn' : 'dim';
+  return state === 'match' ? 'pass' : state === 'drift' ? 'fail'
+       : state === 'unreachable' ? 'warn' : 'dim';
 }
 function rtLabel(state) {
   return state === 'match' ? 'ok' : state === 'drift' ? 'drift'
-       : state === 'unreachable' ? 'offline' : state === 'missing' ? 'pending' : 'unknown';
+       : state === 'unreachable' ? 'offline'
+       : state === 'pending-anchor' ? 'anchor pending'
+       : state === 'missing' ? 'pending' : 'unknown';
 }
 function buildPillsCompact(r) {
   const p = policyStatus(r.policy_result);

@@ -20,6 +20,15 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.gateway.schema.features import flatten_json, extract_features, FlatField
+from src.gateway.schema.canonical import ENVELOPE_KEYS, ENVELOPE_PATH_DISQUALIFIERS, ENVELOPE_LABEL
+
+
+def _is_envelope_field(key: str, path: str) -> bool:
+    """Mirror the runtime mapper's envelope gate so training labels match inference."""
+    for seg in path.split("."):
+        if seg in ENVELOPE_PATH_DISQUALIFIERS:
+            return False
+    return key in ENVELOPE_KEYS
 
 # ── Real provider response examples with labels ─────────────────────────────
 # Each example: (provider_name, response_json, {path: canonical_label})
@@ -391,6 +400,215 @@ PROVIDER_EXAMPLES = [
         "usage.completion_time": "timing_value",
         "x_groq": "UNKNOWN", "x_groq.id": "UNKNOWN",
     }),
+
+    # ── 14. OpenAI o1/o3 with reasoning tokens ─────────────────────────
+    ("openai_reasoning", {
+        "id": "chatcmpl-o1abc",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "o3-mini",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "After careful reasoning, the answer is 42.",
+                "refusal": None,
+            },
+            "finish_reason": "stop",
+            "logprobs": None,
+        }],
+        "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 800,
+            "total_tokens": 920,
+            "prompt_tokens_details": {"cached_tokens": 64, "audio_tokens": 0},
+            "completion_tokens_details": {"reasoning_tokens": 650, "audio_tokens": 0,
+                                          "accepted_prediction_tokens": 0,
+                                          "rejected_prediction_tokens": 0},
+        },
+        "service_tier": "default",
+        "system_fingerprint": "fp_reasoning_abc",
+    }, {
+        "id": "response_id", "object": "UNKNOWN", "created": "UNKNOWN",
+        "model": "model",
+        "choices": "UNKNOWN",
+        "choices.0.index": "UNKNOWN", "choices.0.message": "UNKNOWN",
+        "choices.0.message.role": "UNKNOWN",
+        "choices.0.message.content": "content",
+        "choices.0.message.refusal": "UNKNOWN",
+        "choices.0.finish_reason": "finish_reason",
+        "choices.0.logprobs": "UNKNOWN",
+        "usage": "UNKNOWN",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "usage.prompt_tokens_details": "UNKNOWN",
+        "usage.prompt_tokens_details.cached_tokens": "cached_tokens",
+        "usage.prompt_tokens_details.audio_tokens": "UNKNOWN",
+        "usage.completion_tokens_details": "UNKNOWN",
+        "usage.completion_tokens_details.reasoning_tokens": "reasoning_tokens",
+        "usage.completion_tokens_details.audio_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.accepted_prediction_tokens": "UNKNOWN",
+        "usage.completion_tokens_details.rejected_prediction_tokens": "UNKNOWN",
+        "service_tier": "UNKNOWN",
+        "system_fingerprint": "model_hash",
+    }),
+
+    # ── 15. Anthropic with tool_use content blocks ──────────────────────
+    ("anthropic_tools", {
+        "id": "msg_tooluse123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-7",
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "content": [
+            {"type": "text", "text": "I'll look that up for you."},
+            {"type": "tool_use", "id": "toolu_abc", "name": "web_search",
+             "input": {"query": "latest AI news"}},
+        ],
+        "usage": {
+            "input_tokens": 40,
+            "output_tokens": 60,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }, {
+        "id": "response_id", "type": "UNKNOWN", "role": "UNKNOWN",
+        "model": "model", "stop_reason": "finish_reason", "stop_sequence": "UNKNOWN",
+        "content": "UNKNOWN",
+        "content.0.type": "UNKNOWN", "content.0.text": "content",
+        "content.1.type": "UNKNOWN",
+        "content.1.id": "tool_call_id",
+        "content.1.name": "tool_call_name",
+        "content.1.input": "tool_call_arguments",
+        "usage": "UNKNOWN",
+        "usage.input_tokens": "prompt_tokens",
+        "usage.output_tokens": "completion_tokens",
+        "usage.cache_creation_input_tokens": "cache_creation_tokens",
+        "usage.cache_read_input_tokens": "cached_tokens",
+    }),
+
+    # ── 16. Anthropic extended thinking ────────────────────────────────
+    ("anthropic_thinking", {
+        "id": "msg_think123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-7",
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "content": [
+            {"type": "thinking",
+             "thinking": "Let me work through this step by step. First I need to consider..."},
+            {"type": "text",
+             "text": "Based on my analysis, the answer is that quantum entanglement allows..."},
+        ],
+        "usage": {
+            "input_tokens": 30,
+            "output_tokens": 450,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }, {
+        "id": "response_id", "type": "UNKNOWN", "role": "UNKNOWN",
+        "model": "model", "stop_reason": "finish_reason", "stop_sequence": "UNKNOWN",
+        "content": "UNKNOWN",
+        "content.0.type": "UNKNOWN",
+        "content.0.thinking": "thinking_content",
+        "content.1.type": "UNKNOWN",
+        "content.1.text": "content",
+        "usage": "UNKNOWN",
+        "usage.input_tokens": "prompt_tokens",
+        "usage.output_tokens": "completion_tokens",
+        "usage.cache_creation_input_tokens": "cache_creation_tokens",
+        "usage.cache_read_input_tokens": "cached_tokens",
+    }),
+
+    # ── 17. Mistral AI ──────────────────────────────────────────────────
+    ("mistral", {
+        "id": "cmpl-mistral123",
+        "object": "chat.completion",
+        "created": 1700000001,
+        "model": "mistral-large-latest",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Mistral AI builds efficient open-weight LLMs."},
+            "finish_reason": "stop",
+            "logprobs": None,
+        }],
+        "usage": {"prompt_tokens": 18, "completion_tokens": 22, "total_tokens": 40},
+    }, {
+        "id": "response_id", "object": "UNKNOWN", "created": "UNKNOWN",
+        "model": "model",
+        "choices": "UNKNOWN",
+        "choices.0.index": "UNKNOWN", "choices.0.message": "UNKNOWN",
+        "choices.0.message.role": "UNKNOWN",
+        "choices.0.message.content": "content",
+        "choices.0.finish_reason": "finish_reason",
+        "choices.0.logprobs": "UNKNOWN",
+        "usage": "UNKNOWN",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+    }),
+
+    # ── 18. Together AI ─────────────────────────────────────────────────
+    ("together_ai", {
+        "id": "chatcmpl-together123",
+        "object": "chat.completion",
+        "created": 1700000002,
+        "model": "meta-llama/Llama-3-70b-chat-hf",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Together AI provides fast inference on open models."},
+            "finish_reason": "eos",
+            "logprobs": None,
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 30, "total_tokens": 50},
+        "prompt": [],
+    }, {
+        "id": "response_id", "object": "UNKNOWN", "created": "UNKNOWN",
+        "model": "model",
+        "choices": "UNKNOWN",
+        "choices.0.index": "UNKNOWN", "choices.0.message": "UNKNOWN",
+        "choices.0.message.role": "UNKNOWN",
+        "choices.0.message.content": "content",
+        "choices.0.finish_reason": "finish_reason",
+        "choices.0.logprobs": "UNKNOWN",
+        "usage": "UNKNOWN",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+        "prompt": "UNKNOWN",
+    }),
+
+    # ── 19. Fireworks AI ────────────────────────────────────────────────
+    ("fireworks", {
+        "id": "chatcmpl-fw123",
+        "object": "chat.completion",
+        "created": 1700000003,
+        "model": "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Fireworks AI specializes in fast, cost-efficient LLM hosting."},
+            "finish_reason": "stop",
+            "logprobs": None,
+        }],
+        "usage": {"prompt_tokens": 16, "completion_tokens": 28, "total_tokens": 44},
+    }, {
+        "id": "response_id", "object": "UNKNOWN", "created": "UNKNOWN",
+        "model": "model",
+        "choices": "UNKNOWN",
+        "choices.0.index": "UNKNOWN", "choices.0.message": "UNKNOWN",
+        "choices.0.message.role": "UNKNOWN",
+        "choices.0.message.content": "content",
+        "choices.0.finish_reason": "finish_reason",
+        "choices.0.logprobs": "UNKNOWN",
+        "usage": "UNKNOWN",
+        "usage.prompt_tokens": "prompt_tokens",
+        "usage.completion_tokens": "completion_tokens",
+        "usage.total_tokens": "total_tokens",
+    }),
 ]
 
 # ── Augmentation ─────────────────────────────────────────────────────────────
@@ -582,6 +800,12 @@ def _extract_samples(provider: str, response: dict, labels: dict) -> list[dict]:
     samples = []
     for f in fields:
         label = labels.get(f.path, "UNKNOWN")
+        # Promote UNKNOWN → envelope when the runtime mapper would do the same.
+        # This keeps training labels in sync with _apply_path_fallbacks so the
+        # ONNX model learns to predict "envelope" directly, eliminating the
+        # post-hoc rewrite for provider response-shape boilerplate.
+        if label == "UNKNOWN" and _is_envelope_field(f.key, f.path):
+            label = ENVELOPE_LABEL
         features = extract_features(f)
         samples.append({
             "provider": provider,

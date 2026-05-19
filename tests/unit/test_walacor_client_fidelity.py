@@ -574,3 +574,118 @@ async def test_openwebui_bulky_fields_stripped(captured_submit):
     for stripped in ("features", "tool_ids", "files", "variables",
                      "params", "knowledge", "citations"):
         assert stripped not in meta, f"OpenWebUI bulk field {stripped!r} leaked"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# B5 — pipeline timings round-trip + self-revealing unexpected-drop guard
+#
+# This is the regression guard for the bug class where ``timings`` was added
+# to the execution record for the dashboard Pipeline Trace but never added to
+# the Walacor schema allowlist: it stayed visible locally (LineageReader reads
+# the SQLite WAL, which has it) and vanished only on the Walacor read path —
+# a prod-only, test-invisible regression for months. These tests pin the
+# contract at the trust boundary so it cannot silently recur.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+_SAMPLE_TIMINGS = {
+    "attestation_ms": 0.4, "policy_ms": 5.8, "budget_ms": 0.1,
+    "forward_ms": 812.3, "content_analysis_ms": 41.2,
+    "chain_ms": 2.1, "write_ms": 9.7, "total_ms": 871.6,
+}
+
+
+@pytest.mark.anyio
+async def test_b5_timings_rehomed_into_metadata_json(captured_submit):
+    """``timings`` is not a Walacor column — it must survive via metadata_json."""
+    client = _make_client()
+    record = _full_execution_record(timings=dict(_SAMPLE_TIMINGS))
+
+    await client.write_execution(record)
+
+    body = captured_submit[0][1][0]
+    assert "timings" not in body, "timings is not a schema column — must not be top-level"
+    meta = json.loads(body["metadata_json"])
+    assert meta.get("timings") == _SAMPLE_TIMINGS, (
+        "timings lost on the Walacor write path — the Pipeline Trace "
+        "waterfall would render empty in production"
+    )
+
+
+@pytest.mark.anyio
+async def test_b5_timings_recoverable_via_walacor_reader(captured_submit, monkeypatch):
+    """End-to-end: serialized record → WalacorLineageReader.get_execution_trace
+    must return non-empty timings. This is the exact assertion that would have
+    caught the original Pipeline Trace bug."""
+    from gateway.lineage.walacor_reader import WalacorLineageReader
+
+    client = _make_client()
+    await client.write_execution(_full_execution_record(timings=dict(_SAMPLE_TIMINGS)))
+    walacor_body = captured_submit[0][1][0]
+
+    reader = WalacorLineageReader(client=client)
+
+    async def _fake_get_execution(self, execution_id):  # noqa: ANN001
+        return dict(walacor_body)
+
+    async def _fake_get_tool_events(self, execution_id):  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr(WalacorLineageReader, "get_execution", _fake_get_execution)
+    monkeypatch.setattr(WalacorLineageReader, "get_tool_events", _fake_get_tool_events)
+
+    trace = await reader.get_execution_trace("exec-1")
+    assert trace is not None
+    assert trace["timings"] == _SAMPLE_TIMINGS, (
+        "WalacorLineageReader could not recover timings from metadata_json — "
+        "Pipeline Trace would be invisible in production"
+    )
+
+
+@pytest.mark.anyio
+async def test_b5_unexpected_non_schema_field_is_flagged(captured_submit, caplog):
+    """A field added to the execution record but forgotten in the allowlist
+    must NOT vanish silently: it is logged and audit-marked in
+    ``schema_stripped_keys`` inside metadata_json."""
+    import logging
+
+    client = _make_client()
+    record = _full_execution_record(brand_new_dashboard_metric={"p99_ms": 42})
+
+    with caplog.at_level(logging.WARNING):
+        await client.write_execution(record)
+
+    assert any("UNEXPECTED non-None fields" in r.message for r in caplog.records), (
+        "an un-allowlisted field was dropped without a warning — the silent-"
+        "drop guard is not working"
+    )
+    body = captured_submit[0][1][0]
+    assert "brand_new_dashboard_metric" not in body
+    meta = json.loads(body["metadata_json"])
+    assert meta.get("schema_stripped_keys") == ["brand_new_dashboard_metric"], (
+        "forensic evidence of the dropped field must be embedded in the "
+        "record so the loss is discoverable by query, not just by log scrape"
+    )
+
+
+@pytest.mark.anyio
+async def test_b5_intentional_drops_are_not_flagged(captured_submit, caplog):
+    """prompt_hash / response_hash are deliberately not sent (Walacor hashes
+    on ingest). They must not trip the unexpected-drop guard."""
+    import logging
+
+    client = _make_client()
+    record = _full_execution_record(
+        prompt_hash="sha3:deadbeef", response_hash="sha3:cafebabe",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await client.write_execution(record)
+
+    assert not any("UNEXPECTED non-None fields" in r.message for r in caplog.records), (
+        "intentional non-schema drops (prompt_hash/response_hash) must not "
+        "raise false alarms"
+    )
+    body = captured_submit[0][1][0]
+    meta = json.loads(body["metadata_json"])
+    assert "schema_stripped_keys" not in meta

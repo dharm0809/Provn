@@ -590,6 +590,14 @@ class SchemaMapper:
         """
         result = list(classifications)
         for i, (f, (label, conf)) in enumerate(zip(fields, classifications)):
+            # A direct ONNX/heuristic ``envelope`` prediction must still
+            # honour ENVELOPE_PATH_DISQUALIFIERS. Without this, a deep
+            # ``arguments.role`` (user data inside a tool call) that ONNX
+            # confidently calls ``envelope`` gets silently swallowed,
+            # because the disqualifier gate below only runs for UNKNOWN.
+            if label == ENVELOPE_LABEL and not _is_envelope_field(f.key, f.path):
+                result[i] = ("UNKNOWN", conf)
+                label = "UNKNOWN"
             if label != "UNKNOWN":
                 continue
             # D3: envelope tag is the top priority once a field is UNKNOWN —

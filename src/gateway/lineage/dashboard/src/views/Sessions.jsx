@@ -218,6 +218,20 @@ function SessionsListView({ all, onOpen, navigate, fetchError }) {
     return list;
   }, [all, q, chainFilter, modelFilter, sort]);
 
+  const exportCsv = useCallback(() => {
+    const cols = ['session_id', 'user', 'model', 'user_message_count', 'user_question'];
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [cols.join(',')];
+    for (const s of filtered) lines.push(cols.map(c => esc(s[c])).join(','));
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sessions-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [filtered]);
+
   return (
     <div className="ses-view">
       {fetchError?.kind === 'auth' && (
@@ -298,7 +312,8 @@ function SessionsListView({ all, onOpen, navigate, fetchError }) {
               </select>
             </div>
 
-            <button className="btn-wal btn-ghost btn-sm">⇣ Export</button>
+            <button className="btn-wal btn-ghost btn-sm" onClick={exportCsv}
+              disabled={filtered.length === 0} title="Export filtered sessions as CSV">⇣ Export</button>
           </div>
         </div>
 
@@ -579,7 +594,7 @@ function SessionTimelineView({ session, onBack }) {
                   r={r}
                   isLast={i === records.length - 1}
                   verified={i < nodeResults.length ? (nodeResults[i] ? 'pass' : 'fail') : null}
-                  onClick={() => {}}
+                  onClick={() => r.execution_id && ss === 'sealed' && toggleSeal(r.execution_id)}
                   sealOpen={isOpen}
                   onToggleSeal={() => r.execution_id && toggleSeal(r.execution_id)}
                 />

@@ -97,6 +97,51 @@ async def test_write_attempt_fire_and_forget():
 
 
 @pytest.mark.anyio
+async def test_write_attempt_durable_wal_not_blocked_by_slow_remote():
+    """Regression: a stress test dropped ~9k attempt records because the
+    durable WAL write was chained to a slow remote Walacor write under one
+    shared timeout. The durable WAL row MUST be written before
+    write_attempt returns; the remote leg MUST NOT delay that return.
+
+    Models the production bug: caller wraps write_attempt in a bounded
+    wait_for; if the remote leg blocked the return, that timeout would
+    discard an attempt that is in fact durably recorded locally.
+    """
+    import asyncio
+    import time
+
+    remote_started = asyncio.Event()
+    remote_finished = asyncio.Event()
+
+    class SlowRemote(FakeBackend):
+        async def write_attempt(self, record: dict) -> None:
+            remote_started.set()
+            await asyncio.sleep(5.0)  # simulate a stalled Walacor POST
+            self.attempts.append(record)
+            remote_finished.set()
+
+    wal = FakeBackend("wal")
+    remote = SlowRemote("walacor")
+    router = StorageRouter([wal, remote])
+
+    t0 = time.perf_counter()
+    # Caller's bounded deadline (mirrors _write_attempt_bg's wait_for).
+    await asyncio.wait_for(router.write_attempt({"request_id": "r1"}), timeout=2.0)
+    elapsed = time.perf_counter() - t0
+
+    # Durable WAL row landed, fast, before the remote even finished.
+    assert wal.attempts == [{"request_id": "r1"}], "durable WAL attempt lost"
+    assert elapsed < 1.0, f"write_attempt blocked on slow remote ({elapsed:.2f}s)"
+    assert not remote_finished.is_set(), "remote must not block the return"
+
+    # Remote leg still completes independently (decoupled, not dropped):
+    # it starts once the loop yields and finishes after its own delay.
+    await asyncio.wait_for(remote_finished.wait(), timeout=8.0)
+    assert remote_started.is_set()
+    assert remote.attempts == [{"request_id": "r1"}]
+
+
+@pytest.mark.anyio
 async def test_write_tool_event_fire_and_forget():
     b1 = FakeBackend("wal", fail_tool=True)
     b2 = FakeBackend("walacor")

@@ -63,11 +63,32 @@ async def _cached_analytics(key: str, compute: Callable[[], Any]) -> Any:
         return value
 
 
+# Upper bound for a single lineage *read* against the backing reader.
+# Healthy reads (SQLite WAL or Walacor query_complex) return in well
+# under a second even under moderate load; the WalacorLineageReader's
+# httpx client allows 30s, which means a stalled Walacor read pins a
+# connection + coroutine for the full 30s and the dashboard read path
+# does not recover for tens of seconds after a load spike clears.
+# This bound trips ONLY on a genuine stall (8s is an order of magnitude
+# above normal), so healthy behaviour is byte-identical; a stalled read
+# now fails fast into the endpoints' existing graceful 503/502 path
+# instead of wedging the pool. Not a config knob on purpose — keeping
+# the surface minimal; revisit if a deployment legitimately needs >8s
+# dashboard reads (it shouldn't).
+_LINEAGE_READ_TIMEOUT_S = 8.0
+
+
 async def _call(method, *args, **kwargs) -> Any:
-    """Call a reader method, awaiting if async (WalacorLineageReader) or calling directly (SQLite)."""
+    """Call a reader method, awaiting if async (WalacorLineageReader) or calling directly (SQLite).
+
+    Async reader calls are bounded by ``_LINEAGE_READ_TIMEOUT_S`` so a
+    stalled Walacor backend cannot hold the dashboard read path hostage
+    far longer than any read could usefully take. Sync (SQLite) calls are
+    returned directly — they are local and not subject to remote stalls.
+    """
     result = method(*args, **kwargs)
     if inspect.isawaitable(result):
-        return await result
+        return await asyncio.wait_for(result, timeout=_LINEAGE_READ_TIMEOUT_S)
     return result
 
 _DEFAULT_SESSION_LIMIT = 50
@@ -516,6 +537,21 @@ async def lineage_envelope(request: Request) -> JSONResponse:
                if local_anchor["walacor_dh"] and remote_dh else None,
     }
     match["all_ok"] = all(v is True for v in (match["block_id"], match["trans_id"], match["dh"]))
+    # Distinguish "not yet anchored" (Walacor anchoring is async — local anchor
+    # fields are still null) from a genuine integrity mismatch. Without this the
+    # SealDrawer shows every freshly written record as a seal failure until the
+    # backend anchors it minutes later.
+    _local_unanchored = not any((
+        local_anchor["walacor_block_id"],
+        local_anchor["walacor_trans_id"],
+        local_anchor["walacor_dh"],
+    ))
+    if not match["all_ok"]:
+        match["pending"] = _local_unanchored and not any(
+            v is False for v in (match["block_id"], match["trans_id"], match["dh"])
+        )
+    else:
+        match["pending"] = False
 
     return JSONResponse({
         "execution_id": execution_id,

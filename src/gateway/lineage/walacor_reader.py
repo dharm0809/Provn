@@ -492,6 +492,16 @@ class WalacorLineageReader:
                 timings = json.loads(timings)
             except (json.JSONDecodeError, ValueError):
                 timings = {}
+        # Timings are not a top-level Walacor schema field — they're stored in
+        # metadata_json. Extract them from there when the top-level field is absent.
+        if not timings:
+            raw_meta = execution.get("metadata_json")
+            if raw_meta:
+                try:
+                    meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                    timings = meta.get("timings") or {}
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    pass
         return {
             "execution": execution,
             "tool_events": tool_events,
