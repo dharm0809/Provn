@@ -12,6 +12,14 @@ requires-python = ">=3.12"
 dependencies = [
   "starlette>=0.40",
   "uvicorn[standard]>=0.34",
+  # gunicorn is used as the process manager when WALACOR_UVICORN_WORKERS>1
+  # so each worker gets its OWN listening socket via SO_REUSEPORT. uvicorn's
+  # own --workers mode shares one listener across processes, and the kernel
+  # accept-queue distribution is heavily uneven (a 4-worker stress test saw
+  # 61% of traffic land on one worker). Single-worker deploys continue to
+  # use plain uvicorn — gunicorn is only invoked when multi-worker is asked
+  # for, so legacy single-worker installs are unaffected by the dep.
+  "gunicorn>=23.0",
   "httpx[http2]>=0.28",
   "pydantic-settings>=2.0",
   "prometheus-client>=0.20",

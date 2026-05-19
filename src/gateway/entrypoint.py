@@ -131,13 +131,40 @@ def main() -> None:
             "(reading secrets from env / .env files instead)"
         )
 
-    # exec uvicorn so it inherits PID 1, signals propagate cleanly, and
-    # the entrypoint Python process is fully replaced (no double process).
-    argv = [
-        "uvicorn", "gateway.main:app",
-        "--host", "0.0.0.0",
-        "--port", "8000",
-    ]
+    # Launcher choice — single-worker stays on plain uvicorn (byte-identical
+    # with the legacy path); multi-worker switches to gunicorn + uvicorn
+    # worker class with SO_REUSEPORT. uvicorn's own --workers mode shares
+    # one listener so the kernel-level accept-queue distribution is heavily
+    # uneven (a 4-worker stress test saw 61% of traffic on one worker);
+    # gunicorn's --reuse-port gives each worker its own listening socket
+    # and the kernel does fair round-robin.
+    try:
+        workers = int(os.environ.get("WALACOR_UVICORN_WORKERS", "1"))
+    except ValueError:
+        workers = 1
+    if workers > 1:
+        argv = [
+            "gunicorn", "gateway.main:app",
+            "-k", "uvicorn.workers.UvicornWorker",
+            "--workers", str(workers),
+            "--bind", "0.0.0.0:8000",
+            # SO_REUSEPORT — each worker gets its own listening socket.
+            # Linux distributes new connections fairly across them.
+            "--reuse-port",
+            # Match the per-worker WAL graceful-stop behaviour: give the
+            # writer thread + #34 sink a few seconds to drain on shutdown.
+            "--graceful-timeout", "10",
+            "--access-logfile", "-",
+        ]
+        logger.info("entrypoint: launching gunicorn (workers=%d, SO_REUSEPORT)", workers)
+    else:
+        argv = [
+            "uvicorn", "gateway.main:app",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+        ]
+        logger.info("entrypoint: launching uvicorn (single worker, byte-identical legacy path)")
+    # exec so it inherits PID 1 and signals propagate cleanly.
     os.execvp(argv[0], argv)
 
 
