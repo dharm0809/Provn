@@ -6,6 +6,35 @@ import { getAttempts } from '../api';
 import { timeAgo } from '../utils';
 import '../styles/attempts-v2.css';
 
+// Client-side export of the currently-filtered attempts. The buttons used
+// to be dead no-ops (rendered but no onClick) — now they download the
+// filtered set as CSV or JSONL via a Blob URL. Only the filtered set is
+// included on purpose: users want what they see, not the full 500-row
+// load, and a full-window export would need a separate API endpoint.
+function exportAttempts(rows, fmt) {
+  const cols = ["timestamp", "request_id", "execution_id", "tenant_id",
+                "path", "provider", "model_id", "user",
+                "disposition", "status_code", "reason", "latency_ms"];
+  let blob;
+  if (fmt === "jsonl") {
+    blob = new Blob(
+      rows.map(r => JSON.stringify(r) + "\n"),
+      { type: "application/x-ndjson" },
+    );
+  } else {
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const lines = [cols.join(",")];
+    for (const r of rows) lines.push(cols.map(c => esc(r[c])).join(","));
+    blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `attempts-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}.${fmt}`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // Memoized table row. Extracted so a 3s poll that returns unchanged rows
 // skips re-rendering 40+ <tr>s entirely. Custom comparator compares only
 // the primitive fields the row reads, plus the isExpanded flag and stable
@@ -142,8 +171,18 @@ function AttCopyBtn({ text, title }) {
   );
 }
 
-function AttemptsMetricBar({ items, filtered }) {
+function AttemptsMetricBar({ items, filtered, total: sysTotal }) {
+  // ``items`` is the (capped at 500) loaded set; ``filtered`` is the
+  // client-side filtered subset; ``sysTotal`` is the API's true count
+  // for the window. The previous build displayed ``items.length`` as
+  // "total" — which silently capped at 500 and presented "500" as the
+  // system total. Now: in-view = filtered, of loaded = items.length,
+  // of true system total = sysTotal, with a clear "loaded vs. total"
+  // disclosure when the load was truncated.
   const total = filtered.length;
+  const loaded = items.length;
+  const trueTotal = (typeof sysTotal === "number" && sysTotal > 0) ? sysTotal : loaded;
+  const truncated = trueTotal > loaded;
   const allow = filtered.filter(a => dispositionMetaA(a.disposition).cat === 'allow').length;
   const block = filtered.filter(a => dispositionMetaA(a.disposition).cat === 'block').length;
   const err = filtered.filter(a => dispositionMetaA(a.disposition).cat === 'error').length;
@@ -157,7 +196,11 @@ function AttemptsMetricBar({ items, filtered }) {
       <div className="att-metric">
         <div className="att-metric-label">Attempts · in view</div>
         <div className="att-metric-value">{total.toLocaleString()}</div>
-        <div className="att-metric-sub">of {items.length.toLocaleString()} total · 24h window</div>
+        <div className="att-metric-sub">
+          of {loaded.toLocaleString()} loaded
+          {truncated && <> · {trueTotal.toLocaleString()} total</>}
+          {" · 24h window"}
+        </div>
       </div>
       <div className="att-metric accent-green">
         <div className="att-metric-label">Allow rate</div>
@@ -310,6 +353,11 @@ function AttemptDrawer({ a, onOpenTrace }) {
 
 export default function Attempts({ navigate, params = {} }) {
   const [items, setItems] = useState([]);
+  // True system-wide attempt count from the API (window-scoped). The
+  // previous build displayed items.length (≤500) as "total" in the
+  // metric bar — capping the visible figure and silently hiding the
+  // truth when the window has more attempts.
+  const [totalAttempts, setTotalAttempts] = useState(0);
   const [loading, setLoading] = useState(true);
 
   const [q, setQ] = useState(params.q || '');
@@ -325,8 +373,11 @@ export default function Attempts({ navigate, params = {} }) {
     (async () => {
       try {
         const res = await getAttempts(500, 0, { q, sort: params.sort, order: params.order });
-        if (!cancelled) setItems(res.attempts || res.items || []);
-      } catch { if (!cancelled) setItems([]); }
+        if (!cancelled) {
+          setItems(res.attempts || res.items || []);
+          setTotalAttempts(typeof res.total === "number" ? res.total : (res.attempts || res.items || []).length);
+        }
+      } catch { if (!cancelled) { setItems([]); setTotalAttempts(0); } }
       finally { if (!cancelled) setLoading(false); }
     })();
     return () => { cancelled = true; };
@@ -397,7 +448,7 @@ export default function Attempts({ navigate, params = {} }) {
 
   return (
     <div className="att-view">
-      <AttemptsMetricBar items={items} filtered={filtered} />
+      <AttemptsMetricBar items={items} filtered={filtered} total={totalAttempts} />
 
       <div className="card att-list-card">
         <div className="att-head">
@@ -409,8 +460,14 @@ export default function Attempts({ navigate, params = {} }) {
               </span>
             </div>
             <div className="att-head-actions">
-              <button className="btn-wal btn-ghost btn-sm">⇣ export csv</button>
-              <button className="btn-wal btn-ghost btn-sm">⇣ export jsonl</button>
+              <button className="btn-wal btn-ghost btn-sm"
+                disabled={filtered.length === 0}
+                title="Download the currently-filtered attempts as CSV"
+                onClick={() => exportAttempts(filtered, "csv")}>⇣ export csv</button>
+              <button className="btn-wal btn-ghost btn-sm"
+                disabled={filtered.length === 0}
+                title="Download the currently-filtered attempts as newline-delimited JSON"
+                onClick={() => exportAttempts(filtered, "jsonl")}>⇣ export jsonl</button>
             </div>
           </div>
 

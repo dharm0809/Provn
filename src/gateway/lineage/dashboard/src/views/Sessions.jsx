@@ -50,10 +50,18 @@ function CopyBtn({ text, title }) {
   );
 }
 
-function SessionsMetricBar({ sessions }) {
-  const total = sessions.length;
+function SessionsMetricBar({ sessions, total }) {
+  // total = true system-wide session count from API; sessions = the (capped)
+  // page actually loaded into the browser. The "Sessions" metric must show
+  // the real total, not the page length. Tiles computed over the page
+  // sample are labelled "(sample)" when the page is a strict subset so we
+  // don't fabricate a system-wide claim from a partial set.
+  const sampled = sessions.length;
+  const sysTotal = (typeof total === "number" && total >= 0) ? total : sampled;
+  const isSample = sysTotal > sampled;
+  const sampleNote = isSample ? `sample of ${sampled} / ${sysTotal}` : `${sampled} sessions`;
   const lastHour = sessions.filter(s => (Date.now() - new Date(s.last_activity)) < 3600 * 1000).length;
-  const avgTurns = total ? (sessions.reduce((s, x) => s + (x.user_message_count || 0), 0) / total) : 0;
+  const avgTurns = sampled ? (sessions.reduce((s, x) => s + (x.user_message_count || 0), 0) / sampled) : 0;
   const withTools = sessions.filter(s => (s.tools || []).length > 0).length;
   const chainOk = sessions.filter(s => s.chain_status === 'verified' || s.chain_status == null).length;
 
@@ -61,33 +69,33 @@ function SessionsMetricBar({ sessions }) {
     <div className="ses-metric-bar">
       <div className="ses-metric">
         <div className="ses-metric-label">Sessions</div>
-        <div className="ses-metric-value">{total}</div>
+        <div className="ses-metric-value">{sysTotal}</div>
         <div className="ses-metric-sub">threaded through gateway</div>
       </div>
       <div className="ses-metric">
         <div className="ses-metric-label">Active · last hour</div>
         <div className="ses-metric-value gold">{lastHour}</div>
         <div className="ses-metric-sub">
-          <span className="ses-dot-green" />live traffic
+          <span className="ses-dot-green" />{isSample ? sampleNote : "live traffic"}
         </div>
       </div>
       <div className="ses-metric">
         <div className="ses-metric-label">Avg turns</div>
         <div className="ses-metric-value">{avgTurns.toFixed(1)}</div>
-        <div className="ses-metric-sub">user messages / session</div>
+        <div className="ses-metric-sub">{isSample ? sampleNote : "user messages / session"}</div>
       </div>
       <div className="ses-metric">
         <div className="ses-metric-label">Sessions w/ tools</div>
         <div className="ses-metric-value">{withTools}</div>
-        <div className="ses-metric-sub">gateway + mcp interactions</div>
+        <div className="ses-metric-sub">{isSample ? sampleNote : "gateway + mcp interactions"}</div>
       </div>
       <div className="ses-metric accent">
         <div className="ses-metric-label">Chain integrity</div>
         <div className="ses-metric-value green">
-          {chainOk}/{total}
+          {chainOk}/{sampled}
         </div>
         <div className="ses-metric-sub">
-          <span className="ses-dot-green" />verified on chain
+          <span className="ses-dot-green" />{isSample ? `verified in ${sampleNote}` : "verified on chain"}
         </div>
       </div>
     </div>
@@ -188,7 +196,7 @@ const SessionListRow = React.memo(function SessionListRow({ s, onOpen }) {
     && aToolsLen === bToolsLen;
 });
 
-function SessionsListView({ all, onOpen, navigate, fetchError }) {
+function SessionsListView({ all, total, onOpen, navigate, fetchError }) {
   const [q, setQ] = useState('');
   const [chainFilter, setChainFilter] = useState('all');
   const [modelFilter, setModelFilter] = useState('all');
@@ -257,7 +265,7 @@ function SessionsListView({ all, onOpen, navigate, fetchError }) {
         </div>
       )}
 
-      <SessionsMetricBar sessions={all} />
+      <SessionsMetricBar sessions={all} total={total} />
 
       <div className="card ses-list-card">
         <div className="ses-list-head">
@@ -265,7 +273,12 @@ function SessionsListView({ all, onOpen, navigate, fetchError }) {
             <span className="ses-list-title-main">Sessions</span>
             <span className="ses-list-title-count">
               <span className="mono">{filtered.length}</span>
-              {filtered.length !== all.length && <span className="ses-muted">of {all.length}</span>}
+              {filtered.length !== all.length && <span className="ses-muted">of {all.length} loaded</span>}
+              {typeof total === "number" && total > all.length && (
+                <span className="ses-muted" title="Page capped at 200 sessions; earlier sessions are truncated. Use filter/sort to drill in.">
+                  · of {total} total
+                </span>
+              )}
             </span>
           </div>
 
@@ -616,6 +629,7 @@ function SessionTimelineView({ session, onBack }) {
 
 export default function Sessions({ navigate, params = {} }) {
   const [all, setAll] = useState([]);
+  const [total, setTotal] = useState(0);  // true system-wide count from API
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const [fetchError, setFetchError] = useState(null);
@@ -625,8 +639,12 @@ export default function Sessions({ navigate, params = {} }) {
     (async () => {
       try {
         setFetchError(null);
-        const res = await getSessions(100, 0, params);
-        if (!cancelled) setAll(res.sessions || []);
+        // 200 is the API's _MAX_SESSION_LIMIT; previous 100 silently truncated.
+        const res = await getSessions(200, 0, params);
+        if (!cancelled) {
+          setAll(res.sessions || []);
+          setTotal(typeof res.total === "number" ? res.total : (res.sessions || []).length);
+        }
       } catch (e) {
         if (!cancelled) {
           setAll([]);
@@ -652,5 +670,5 @@ export default function Sessions({ navigate, params = {} }) {
   if (selected) {
     return <SessionTimelineView session={selected} onBack={() => setSelected(null)} />;
   }
-  return <SessionsListView all={all} onOpen={setSelected} navigate={navigate} fetchError={fetchError} />;
+  return <SessionsListView all={all} total={total} onOpen={setSelected} navigate={navigate} fetchError={fetchError} />;
 }

@@ -188,6 +188,11 @@ export default function Overview({ navigate, health }) {
   }, []);
 
   const [sessions,   setSessions]   = useState([]);
+  // True system-wide totals from the API (.total field). The previous
+  // build displayed `sessions.length` and `attempts.length` in the
+  // StatusStrip, which capped at 6/8 — the feed sizes — and bore no
+  // resemblance to actual system counts. These hold the real numbers.
+  const [sessTotal,  setSessTotal]  = useState(0);
   const [attempts,   setAttempts]   = useState([]);
   const [attStats,   setAttStats]   = useState({});
   const [attTotal,   setAttTotal]   = useState(0);
@@ -247,6 +252,7 @@ export default function Overview({ navigate, health }) {
         prevActivityIdsRef.current = new Set(aa.map((a, i) => a.execution_id || `r${i}`));
 
         setSessions(ss);
+        setSessTotal(typeof sessData.total === "number" ? sessData.total : ss.length);
         setAttempts(aa);
         setAttStats(attData.stats || {});
         setAttTotal(attData.total || 0);
@@ -363,8 +369,8 @@ export default function Overview({ navigate, health }) {
 
       <StatusStrip
         health={health}
-        sessions={sessions.length}
-        total={totalRequests}
+        sessions={sessTotal}
+        total={attTotal || totalRequests}
         pctAllowed={pctAllowedDisplay}
       />
 
@@ -438,13 +444,12 @@ export default function Overview({ navigate, health }) {
                   <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 4 }}>ms</span>
                 </span>
               </div>
-              <div className="twin-stat">
-                <span className="twin-stat-label">P95 est.</span>
-                <span className="twin-stat-value">
-                  {Math.round(latencySnap.avg * 1.8)}
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 4 }}>ms</span>
-                </span>
-              </div>
+              {/* P95 tile removed: the previous build computed `avg × 1.8`,
+                  a magic constant with no statistical basis, and labelled
+                  it "P95 est." — that's a fabricated metric. The backend
+                  doesn't expose a real P95 in the latency history payload;
+                  showing avg only is the honest choice until the API
+                  reports per-bucket percentiles. */}
             </div>
           </div>
           {ltData.length > 0 ? (
