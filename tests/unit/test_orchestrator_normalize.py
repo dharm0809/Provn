@@ -213,6 +213,59 @@ async def test_si_missing_runs_standalone_once(monkeypatch):
     assert standalone_calls == ["ollama"]
 
 
+@pytest.mark.anyio
+async def test_after_stream_record_propagates_execution_id_to_request_state(monkeypatch):
+    """INT-07 regression: completeness_middleware runs in a separate anyio
+    task and reads request.state.walacor_execution_id (the contextvar set in
+    the handler is invisible to it). The streaming write path must propagate
+    the execution_id onto request.state, else the attempt row is written with
+    a NULL execution_id and cannot join its execution → INT-07 "missing
+    attempt row" → readiness unready. Before the fix this path set only the
+    contextvar.
+    """
+    from types import SimpleNamespace as NS
+    from gateway.pipeline import orchestrator
+
+    ctx = _build_ctx_with_si(None)
+
+    class _OkStorage:
+        async def write_execution(self, record):
+            return NS(succeeded=["wal"], failed=[])
+
+    ctx.storage = _OkStorage()
+
+    monkeypatch.setattr(orchestrator, "get_pipeline_context", lambda: ctx)
+    monkeypatch.setattr(orchestrator, "_record_token_usage",
+                        MagicMock(side_effect=lambda *a, **kw: _async_none()))
+    monkeypatch.setattr(orchestrator, "_eval_post_stream_policy",
+                        MagicMock(side_effect=lambda *a, **kw: _async_tuple()))
+    monkeypatch.setattr(orchestrator, "_session_chain_lock",
+                        lambda *a, **kw: _NoopAsyncCM())
+    monkeypatch.setattr(orchestrator, "_apply_session_chain",
+                        MagicMock(side_effect=lambda *a, **kw: _async_value(None)))
+    monkeypatch.setattr(orchestrator, "_write_tool_events",
+                        MagicMock(side_effect=lambda *a, **kw: _async_none()))
+    monkeypatch.setattr(orchestrator, "build_execution_record",
+                        MagicMock(return_value={"execution_id": "exec-int07",
+                                                "sequence_number": 0, "record_id": "r"}))
+
+    request = NS(state=NS())
+    with patch("gateway.pipeline.normalizer.normalize_model_response",
+               side_effect=lambda resp, provider: resp):
+        await orchestrator._after_stream_record(
+            buffer=[b"chunk"], call=_make_call(), adapter=_make_adapter("ollama"),
+            attestation_id="att", policy_version=1, policy_result="pass",
+            audit_metadata={}, budget_estimated=0, pipeline_start=None,
+            governance_meta=None, request=request, prebuilt_model_response=None,
+        )
+
+    assert getattr(request.state, "walacor_execution_id", None) == "exec-int07", (
+        "streaming write path did not propagate execution_id to request.state "
+        "— completeness_middleware will write a NULL-execution_id attempt row "
+        "(INT-07 regression)"
+    )
+
+
 # ── async test helpers ────────────────────────────────────────────────────────
 
 async def _async_none():
