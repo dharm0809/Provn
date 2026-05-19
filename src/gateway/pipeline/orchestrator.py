@@ -787,6 +787,15 @@ async def _after_stream_record(
                 result = await ctx.storage.write_execution(record)
                 if result.succeeded:
                     execution_id_var.set(record["execution_id"])
+                    # Propagate via request.state too: completeness_middleware
+                    # runs call_next in a separate anyio task, so the
+                    # contextvar set above is invisible to it — it reads
+                    # request.state.walacor_execution_id. Without this the
+                    # attempt row is written with a NULL execution_id and
+                    # cannot join to this execution (INT-07 "missing attempt
+                    # row"). Mirrors _store_execution / the non-stream path.
+                    if request is not None:
+                        request.state.walacor_execution_id = record["execution_id"]
                     wrote_ok = True
             await _write_tool_events(model_response.tool_interactions or [], record["execution_id"], call, "passive", ctx, settings)
             # C7: advance the tracker on successful WRITE, regardless of whether
@@ -853,6 +862,12 @@ async def _skip_governance_after_stream(
                 if result.succeeded and _chain_res.applied:
                     await _advance_chain(record, session_id, ctx, _chain_res)
         execution_id_var.set(record["execution_id"])
+        # See _after_stream_record: contextvar is invisible to
+        # completeness_middleware (separate anyio task); it reads
+        # request.state. Propagate so the attempt row joins this
+        # execution (INT-07). Mirrors the non-stream write path.
+        if request is not None:
+            request.state.walacor_execution_id = record["execution_id"]
     except Exception as e:
         logger.error("Skip-governance after-stream write failed: %s", e, exc_info=True)
 
