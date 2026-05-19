@@ -108,8 +108,18 @@ def test_schema_mapper_records_per_field_verdicts_with_buffer():
         import pytest as _pytest
         _pytest.skip("ONNX session unavailable")
 
-    raw = {"choices": [{"message": {"content": "hello"}}]}
-    expected_field_count = len(flatten_json(raw))
+    # NON-standard shape: keys absent from `_PROVIDER_PATH_MAP` so the
+    # fields reach the ONNX residual and emit per-field verdicts. A
+    # standard provider shape is now fully deterministic (zero verdicts)
+    # by design. The contract is "one verdict per ONNX-classified field",
+    # not "one per leaf" — mirror test_per_field_count_matches_onnx_
+    # classified_field_count and exclude deterministic-map paths.
+    from gateway.schema.mapper import _PROVIDER_PATH_MAP
+    raw = {"result": {"generated_text": "hello there friend"}}
+    expected_field_count = len(
+        [f for f in flatten_json(raw) if f.path not in _PROVIDER_PATH_MAP]
+    )
+    assert expected_field_count > 0  # fixture must exercise the ONNX path
     mapper.map_response(raw)
 
     drained = buf.drain()

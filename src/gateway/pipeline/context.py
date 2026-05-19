@@ -38,10 +38,6 @@ class PipelineContext:
         self.sync_client: SyncClient | None = None
         self.wal_writer: WALWriter | None = None
         self.delivery_worker: DeliveryWorker | None = None
-        # Retries execution WAL rows whose inline Walacor write failed
-        # (Walacor-backend mode only — the control-plane DeliveryWorker
-        # ships to a different destination and is skipped in that mode).
-        self.walacor_redelivery_worker = None
         self.sync_loop_task: Any = None        # asyncio.Task for periodic sync
         self.skip_governance: bool = False     # transparent proxy mode
         # Phase 9

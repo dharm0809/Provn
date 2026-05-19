@@ -9,6 +9,12 @@ on:
 
 env:
   ECR_REPOSITORY: provn-gateway
+  # Opt every JS-based action into Node 24. GitHub will force this default
+  # on June 2nd 2026; setting it explicitly now silences the deprecation
+  # warnings on actions/checkout@v4, actions/setup-python@v5, etc., and
+  # avoids the inevitable surprise breakage on the day the flip happens.
+  # Reference: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   test:
@@ -46,6 +52,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
       full_image: ${{ steps.tag.outputs.full_image }}
+      image_digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +79,7 @@ jobs:
           echo "full_image=$ECR_REGISTRY/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
 
       - name: Build and push to ECR
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -101,19 +109,24 @@ jobs:
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_DEPLOY_KEY }}
           port: 22
-          envs: AWS_ACCOUNT_ID,AWS_REGION
+          envs: AWS_ACCOUNT_ID,AWS_REGION,IMAGE_DIGEST
           script: |
             set -e
 
             ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-            IMAGE="$ECR_REGISTRY/provn-gateway:latest"
+            # Pin to the immutable digest produced by `Build and push to ECR`
+            # so a concurrent `:latest` push can't slip an unintended image
+            # into the deploy under our feet.
+            IMAGE="$ECR_REGISTRY/provn-gateway@$IMAGE_DIGEST"
 
             echo "=== Deploy Gateway from ECR ==="
+            echo "Image: $IMAGE"
 
             # 1. Login to ECR
             ECR_PASSWORD=$(aws ecr get-login-password --region "$AWS_REGION")
@@ -126,10 +139,10 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
-            # 4. Pull latest gateway image explicitly
+            # 4. Pull gateway image by digest
             docker pull "$IMAGE"
 
-            # 5. Persist GATEWAY_IMAGE in .env
+            # 5. Persist GATEWAY_IMAGE (digest-pinned) in .env
             touch .env
             sed -i '/^GATEWAY_IMAGE=/d' .env || true
             echo "GATEWAY_IMAGE=$IMAGE" >> .env
@@ -141,19 +154,28 @@ jobs:
             docker compose up -d --force-recreate
 
             # 7. Health check
-            echo "Waiting for gateway to start..."
-            for i in $(seq 1 30); do
-              if curl -sf http://localhost:8002/health > /dev/null 2>&1; then
-                echo "DEPLOY OK — Gateway healthy"
-                curl -s http://localhost:8002/health | python3 -m json.tool | head -5
+            # Probe the container's internal port directly via `docker exec`
+            # instead of the host port — the host port is configurable via
+            # GATEWAY_PORT in .env (8002 default, 8100 on prod), and the old
+            # hardcoded `localhost:8002` failed every deploy on hosts that
+            # remapped the port.
+            # Bumped to 5 min (was 90 s) — cold start with ONNX model load,
+            # intelligence layer init, and Walacor login regularly runs 3-4 min.
+            echo "Waiting for gateway to start (up to 5 min)..."
+            for i in $(seq 1 60); do
+              if docker exec gateway-app python -c \
+                "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status == 200 else 1)" \
+                > /dev/null 2>&1; then
+                echo "DEPLOY OK — Gateway healthy after ${i}x5s"
+                docker exec gateway-app python -c \
+                  "import urllib.request, json; print(json.dumps(json.loads(urllib.request.urlopen('http://localhost:8000/health').read())['status']))"
                 exit 0
               fi
-              sleep 3
+              sleep 5
             done
 
-            echo "DEPLOY FAILED — gateway not healthy after 90s"
+            echo "DEPLOY FAILED — gateway not healthy after 300s"
             docker compose ps
-            docker compose logs gateway --tail=50
-            docker compose logs ollama --tail=50 || true
+            docker compose logs gateway --tail=80
             docker compose logs openwebui --tail=50 || true
             exit 1

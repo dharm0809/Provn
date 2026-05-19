@@ -603,12 +603,14 @@ def _init_wal(settings, ctx) -> None:
     Walacor sink acknowledges the write — see ``StorageRouter`` for the
     delivery-acknowledgement path.
 
-    Alternative considered (and rejected): start DeliveryWorker even when
-    only Walacor is configured. Rejected because the worker POSTs to the
-    control-plane aggregator endpoint, not Walacor — running it without
-    that endpoint would generate a steady stream of connection-refused
-    errors and never mark any record delivered. The router-driven
-    ``mark_delivered`` path covers Walacor-only deployments cleanly.
+    For Walacor-backed deployments the DeliveryWorker now runs in
+    *Walacor-sink mode* (started in ``_init_storage`` once the Walacor
+    client exists). The request path writes only to the local WAL
+    (StorageRouter excludes Walacor from the inline fan-out), and this
+    bounded background drainer ships undelivered rows to Walacor with
+    backoff + DLQ. This replaces the previous inline dual-write, whose
+    synchronous Walacor HTTP write in the request path could exhaust the
+    connection pool under load and left failed writes stuck forever.
     """
     from gateway.wal.writer import WALWriter
     from gateway.wal.delivery_worker import DeliveryWorker
@@ -618,33 +620,22 @@ def _init_wal(settings, ctx) -> None:
     ctx.wal_writer = WALWriter(str(wal_dir / "wal.db"))
     ctx.wal_writer.start()
     if settings.control_plane_url:
-        # Delivery worker ships WAL records to a remote control plane aggregator.
-        # Only needed when a separate control plane URL is configured.
-        # When walacor_storage_enabled=True, records go directly to Walacor
-        # via the storage router (dual-write) and StorageRouter marks the WAL
-        # row delivered on Walacor success — no delivery worker needed.
+        # Control-plane aggregator shipper (POSTs to /v1/gateway/executions).
+        # Only used when a separate control-plane URL is configured.
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
     elif settings.walacor_storage_enabled:
-        # StorageRouter's inline write covers the happy path, but a single
-        # inline POST has no retry: a live-backend stress test proved that
-        # executions whose inline Walacor write fails under a load spike
-        # stay delivered=0 forever (102 orphaned rows that never drained).
-        # This sweep is the missing retry for exactly that failure tail;
-        # it never touches successfully-delivered rows, so the happy path
-        # is unchanged. The control-plane DeliveryWorker is still the wrong
-        # tool here (different destination) and stays skipped.
+        # Walacor-sink DeliveryWorker is started in _init_storage (it needs
+        # the Walacor client/backend, created after this phase). The request
+        # path is WAL-only; that drainer ships WAL→Walacor with backoff/DLQ.
+        # (This supersedes the branch's earlier standalone
+        # WalacorRedeliveryWorker — same problem, main's sink mode is the
+        # better implementation; the separate worker was dropped to avoid
+        # two drainers racing on the same WAL rows.)
         logger.info(
-            "Delivery worker skipped (control-plane shipper). Walacor "
-            "durability: StorageRouter marks WAL rows delivered on inline "
-            "success; WalacorRedeliveryWorker retries the failure tail."
+            "Walacor-backed: WAL→Walacor delivery worker starts in "
+            "_init_storage (request path is WAL-only, never blocks on Walacor)"
         )
-        if ctx.walacor_client is not None:
-            from gateway.wal.walacor_redelivery import WalacorRedeliveryWorker
-            ctx.walacor_redelivery_worker = WalacorRedeliveryWorker(
-                ctx.wal_writer, ctx.walacor_client
-            )
-            ctx.walacor_redelivery_worker.start()
     else:
         logger.info("Delivery worker skipped: no Walacor backend or control plane configured")
 
@@ -687,16 +678,57 @@ async def _init_walacor(settings, ctx) -> None:
 
 
 def _init_storage(settings, ctx) -> None:
-    """Build StorageRouter from available backends."""
-    from gateway.storage import StorageRouter, WALBackend, WalacorBackend
+    """Build StorageRouter; decouple Walacor delivery from the request path.
 
-    backends = []
+    Production fix: in Walacor-backed deployments WITHOUT a control-plane
+    aggregator, the router is built with the **local WAL backend only**,
+    so the request path durably writes to local SQLite and never blocks
+    on — or fails because of — the remote Walacor HTTP write. A single
+    bounded ``DeliveryWorker`` (Walacor-sink mode: backoff + batch budget
+    + DLQ) drains undelivered WAL rows to Walacor, so a slow/down Walacor
+    backend can never exhaust the request-path connection pool or lose
+    records — they stay ``delivered=0`` until it recovers, then self-heal.
+
+    All other modes are unchanged: with a control-plane aggregator (or no
+    WAL), the Walacor backend is registered for the original inline
+    dual-write and StorageRouter fans out to every backend as before.
+    """
+    from gateway.storage import StorageRouter, WALBackend, WalacorBackend
+    from gateway.wal.delivery_worker import DeliveryWorker
+
+    # Decoupled mode: WAL guarantees in-path durability; a background
+    # drainer owns Walacor delivery. Only for Walacor-backed deployments
+    # that don't front the gateway with a control-plane aggregator.
+    decoupled = bool(
+        ctx.wal_writer
+        and ctx.walacor_client
+        and settings.walacor_storage_enabled
+        and not settings.control_plane_url
+    )
+
+    backends: list = []
     if ctx.wal_writer:
         backends.append(WALBackend(ctx.wal_writer, batch_writer=ctx.batch_writer))
-    if ctx.walacor_client:
+    if ctx.walacor_client and not decoupled:
+        # Original inline dual-write (control-plane / non-WAL modes).
         backends.append(WalacorBackend(ctx.walacor_client))
     ctx.storage = StorageRouter(backends)
-    logger.info("Storage router ready: backends=%s", [b.name for b in backends])
+    logger.info(
+        "Storage router ready: backends=%s%s",
+        [b.name for b in backends],
+        " (Walacor delivery decoupled to background drainer)" if decoupled else "",
+    )
+
+    if decoupled and getattr(ctx, "delivery_worker", None) is None:
+        ctx.delivery_worker = DeliveryWorker(
+            ctx.wal_writer, sink=WalacorBackend(ctx.walacor_client)
+        )
+        ctx.delivery_worker.start()
+        logger.info(
+            "Walacor delivery worker started: bounded WAL→Walacor drain "
+            "(backoff + DLQ); request path is WAL-only and never blocks "
+            "on Walacor"
+        )
 
 
 def _init_content_analyzers(settings, ctx) -> None:
@@ -1894,21 +1926,39 @@ async def on_startup() -> None:
         except Exception as e:
             logger.warning("Field registry init failed (non-fatal): %s", e)
 
-        # Background LLM intelligence worker (only if Ollama is configured)
-        if settings.gateway_provider == "ollama" or settings.provider_ollama_url:
+        # Background LLM intelligence worker. Previously gated on Ollama
+        # being configured; now drives off `intelligence_judge_url` which
+        # defaults to gateway self-loopback so the worker always has a
+        # judge available (Claude via Anthropic upstream by default).
+        if settings.intelligence_enabled and settings.intelligence_judge_url:
             try:
                 from gateway.intelligence.worker import IntelligenceWorker
-                _ollama_url = settings.provider_ollama_url or "http://localhost:11434"
+                # Pick a default API key for self-loopback: first entry in
+                # WALACOR_GATEWAY_API_KEYS (strip any `:tenant_id` suffix).
+                _key = settings.intelligence_judge_api_key.strip()
+                if not _key and settings.gateway_api_keys:
+                    _key = settings.gateway_api_keys.split(",")[0].split(":")[0].strip()
                 ctx.intelligence_worker = IntelligenceWorker(
-                    ollama_url=_ollama_url,
+                    judge_url=settings.intelligence_judge_url,
+                    judge_model=settings.intelligence_judge_model,
+                    judge_api_key=_key,
                     enabled=True,
                 )
                 ctx.intelligence_worker_task = asyncio.create_task(ctx.intelligence_worker.run())
-                logger.info("Intelligence worker started (ollama=%s)", _ollama_url)
+                logger.info(
+                    "Intelligence worker started (judge=%s model=%s)",
+                    settings.intelligence_judge_url,
+                    settings.intelligence_judge_model,
+                )
 
-                # AuditLLM probe generator for active consistency testing
+                # AuditLLM probe generator for active consistency testing.
+                # ProbeGenerator still takes the legacy `ollama_url=` kwarg;
+                # we pass the judge URL — works for the gateway-loopback
+                # case (it'll just hit the gateway's own /api/chat shim if
+                # one exists, or fail fast for the OpenAI shape since
+                # probes aren't critical).
                 from gateway.intelligence.consistency import ProbeGenerator
-                ctx.probe_generator = ProbeGenerator(ollama_url=_ollama_url)
+                ctx.probe_generator = ProbeGenerator(ollama_url=settings.intelligence_judge_url)
             except Exception as e:
                 logger.warning("Intelligence worker init failed (non-fatal): %s", e)
 
@@ -1992,12 +2042,6 @@ async def on_shutdown() -> None:
             # Data-loss risk: WAL records in flight may not be flushed.
             logger.error("Gateway shutdown: delivery_worker.stop failed — WAL records may not be flushed", exc_info=True)
             errors.append(f"delivery_worker.stop: {e}")
-
-    if ctx.walacor_redelivery_worker:
-        try:
-            await ctx.walacor_redelivery_worker.stop(timeout=5.0)
-        except Exception as e:
-            errors.append(f"walacor_redelivery_worker.stop: {e}")
 
     if ctx.sync_client:
         try:

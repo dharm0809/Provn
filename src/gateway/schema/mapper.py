@@ -169,18 +169,58 @@ _PROVIDER_PATH_MAP: dict[str, str] = {
     "eval_duration": "timing_value",
     "load_duration": "timing_value",
     "total_duration": "timing_value",
-    # ── OpenAI tool calls (first call, index 0) ─────────────────
-    # These paths are not in the shallow training data, so ONNX
-    # misclassifies them (e.g. `id` → `envelope`). Deterministic
-    # rules here prevent that at index 0; ONNX serves index 1+.
+    # ── Canonical-content paths (deterministic-first expansion) ──
+    # These previously fell through to the ONNX residual. The label set
+    # here is intentionally decoupled from the 19-class ONNX
+    # `schema_mapper_labels.json` (the map already emits `reasoning_tokens`,
+    # which isn't an ONNX label) — `_assemble` keys off the canonical
+    # label, not the ONNX index, so no retrain is needed.
+    #
+    # Envelope boilerplate (`object`, `created`, `role`, `index`,
+    # `system_fingerprint`, …) is deliberately NOT added here: those are
+    # already tagged `envelope` by `_apply_path_fallbacks`/`_is_envelope_field`
+    # and excluded from overflow. Remapping them would be a behavior
+    # change for known providers, which this expansion explicitly avoids.
+    #
+    # Array paths are always `.0.`: `flatten_json` only recurses into the
+    # first element of any list ("providers use consistent array
+    # structures"), so an exact-match dict suffices — no globbing/
+    # normalization. Caveat: when an Anthropic `content[]` has block 0 =
+    # tool_use and a later block = text, the text block is not flattened
+    # at all (pre-existing `flatten_json` element-0-only limitation, out
+    # of scope here).
+    #
+    # Shared top-level identity fields (OpenAI + Anthropic):
+    "id": "response_id",
+    "model": "model",
+    # OpenAI Chat Completions:
+    "choices.0.message.content": "content",
+    "choices.0.message.reasoning_content": "thinking_content",
+    "choices.0.finish_reason": "finish_reason",
     "choices.0.message.tool_calls.0.id": "tool_call_id",
     "choices.0.message.tool_calls.0.type": "tool_call_type",
     "choices.0.message.tool_calls.0.function.name": "tool_call_name",
     "choices.0.message.tool_calls.0.function.arguments": "tool_call_arguments",
-    # ── DeepSeek-R1 reasoning trace ─────────────────────────────
-    # ONNX confidently misclassifies `reasoning_content` as `content`
-    # (the value reads like an answer). Pin it deterministically.
-    "choices.0.message.reasoning_content": "thinking_content",
+    # Anthropic /v1/messages (content block 0 is exactly one type, so
+    # these paths are mutually exclusive and self-disambiguating):
+    "content.0.text": "content",
+    "content.0.thinking": "thinking_content",
+    "content.0.id": "tool_call_id",
+    "content.0.name": "tool_call_name",
+    # Anthropic tool_use `input` is an OBJECT (vs OpenAI's stringified
+    # args). Tagging the container as tool_call_arguments is still
+    # strictly better than the prior ONNX→overflow path; sub-keys
+    # overflow harmlessly (raw value is hashed by Walacor regardless).
+    "content.0.input": "tool_call_arguments",
+    "content.0.citations.0.url": "citation_url",
+    "stop_reason": "finish_reason",
+    # Ollama /api/chat (distinct paths from OpenAI's choices[].message):
+    "message.content": "content",
+    "message.thinking": "thinking_content",
+    "message.reasoning_content": "thinking_content",
+    "done_reason": "finish_reason",
+    "message.tool_calls.0.function.name": "tool_call_name",
+    "message.tool_calls.0.function.arguments": "tool_call_arguments",
 }
 
 
@@ -275,6 +315,16 @@ class SchemaMapper:
         # Per-instance, not global, so test isolation works.
         from collections import deque
         self._timeout_events: deque[float] = deque(maxlen=512)
+        # Schema-shape drift tracker. A stable fingerprint of the
+        # response's (path, value_type) skeleton. The first time an
+        # unseen skeleton appears AND it produced overflow (an unmapped
+        # field), we log once + bump a Prometheus counter and tick a 60s
+        # deque (read via `novel_shapes_60s()`) — the signal that a
+        # provider changed its response shape. Per-instance (test
+        # isolation); the seen-set is capped so a stream of unique
+        # shapes can't grow memory without bound.
+        self._seen_shape_fingerprints: set[str] = set()
+        self._novel_shape_events: deque[float] = deque(maxlen=512)
 
         # optional `ModelRegistry` wiring — see `intelligence/reload.py`.
         from gateway.intelligence.reload import ReloadState
@@ -424,6 +474,62 @@ class SchemaMapper:
             self._timeout_events.popleft()
         return len(self._timeout_events)
 
+    def _record_novel_shape(self, fields: list[FlatField], overflow_keys) -> None:
+        """Log once + tick the drift deque when a never-seen response
+        skeleton appears alongside an unmapped (overflow) field.
+
+        Fail-safe: any error here is swallowed — drift tracking must
+        never break canonical mapping (same discipline as per-field
+        verdict emission).
+        """
+        try:
+            import hashlib
+            import time as _t
+            skeleton = "\n".join(
+                sorted(f"{f.path}:{f.value_type}" for f in fields)
+            )
+            fp = hashlib.sha256(skeleton.encode()).hexdigest()[:16]
+            if fp in self._seen_shape_fingerprints:
+                return
+            # Cap the seen-set so a stream of unique shapes can't grow
+            # it unbounded; once capped we stop deduping (worst case: a
+            # few extra log lines, never memory growth).
+            if len(self._seen_shape_fingerprints) < 4096:
+                self._seen_shape_fingerprints.add(fp)
+            overflow = list(overflow_keys or [])
+            if not overflow:
+                return
+            self._novel_shape_events.append(_t.time())
+            logger.warning(
+                "schema_mapper: novel response shape fp=%s with %d unmapped "
+                "path(s) — possible provider schema drift; sample=%s",
+                fp, len(overflow), overflow[:5],
+            )
+            try:
+                from gateway.metrics.prometheus import (
+                    schema_mapper_novel_shapes_total,
+                )
+                schema_mapper_novel_shapes_total.inc()
+            except Exception:
+                pass
+        except Exception:
+            logger.debug("novel-shape tracking failed", exc_info=True)
+
+    def novel_shapes_60s(self) -> int:
+        """Novel-shape-with-overflow events in the trailing 60s window.
+
+        Window-scoped like ``timeout_count_60s`` (drops events older than
+        60s on read, so it decays without a prune thread). Public
+        accessor for a future ``schema_mapper`` connections tile / health
+        surface; the always-on drift signals are the WARNING log and the
+        ``schema_mapper_novel_shapes_total`` Prometheus counter.
+        """
+        import time as _t
+        cutoff = _t.time() - 60.0
+        while self._novel_shape_events and self._novel_shape_events[0] < cutoff:
+            self._novel_shape_events.popleft()
+        return len(self._novel_shape_events)
+
     def map_response(self, raw: dict[str, Any]) -> CanonicalResponse:
         """Map a raw LLM API response to the canonical schema.
 
@@ -451,6 +557,8 @@ class SchemaMapper:
                 classifications = self._apply_path_fallbacks(fields, classifications)
                 # 4. Assemble canonical response
                 result = self._assemble(fields, classifications, raw)
+                # 5. Schema-drift signal (fail-safe; never breaks mapping)
+                self._record_novel_shape(fields, result.overflow.keys())
 
         # Per-field verdicts are recorded inside `_classify_onnx` —
         # they carry the 139-d feature vector and a heuristic teacher

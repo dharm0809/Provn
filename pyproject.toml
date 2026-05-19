@@ -42,6 +42,11 @@ presidio = ["presidio-analyzer>=2.2"]
 ocr = ["pytesseract>=0.3", "Pillow>=9.0"]
 signing = ["cryptography>=42.0"]
 compliance = ["weasyprint>=62.0", "jinja2>=3.1"]
+# SSM-backed secret hydration at container start. Without boto3 the
+# `gateway.entrypoint` module falls back to reading secrets from env
+# (legacy `.env.gateway` path) — safe for local dev. Required in any
+# runtime image where `WALACOR_SSM_PREFIX` is set.
+secrets = ["boto3>=1.34"]
 # Intelligence layer — training and shadow-metric stats (Phase 25 self-learning
 # distillation). Inference-time deps (numpy, onnxruntime) live in core; this
 # extra adds what's only needed when users train or replace ONNX models.
@@ -64,6 +69,7 @@ dev = [
   "cryptography>=42.0",
   "jinja2>=3.1",
   "weasyprint>=62.0",
+  "boto3>=1.34",
 ]
 
 [tool.pytest.ini_options]
@@ -84,4 +90,28 @@ walacor-gateway = "gateway.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-gateway = ["lineage/static/**"]
+# Every non-Python data file the gateway loads at runtime. Bundling these
+# in the wheel is what lets a fresh container start without pre-populated
+# volume state — without these globs the SafetyClassifier, SchemaMapper,
+# IntentClassifier, sanity runner, and compliance template loader all
+# fail at boot trying to open files that aren't on disk.
+gateway = [
+  "lineage/static/**",
+  # Safety classifier: ONNX model + TF-IDF vocab/IDF + SVD components + labels.
+  # Missing any of these → 200-d feature vector can't be computed → ONNX
+  # raises INVALID_ARGUMENT and the analyzer fails-open on every request.
+  "content/*.json",
+  "content/*.npy",
+  "content/*.onnx",
+  # Schema mapper: 139-d ONNX + label list. Without these the mapper can't
+  # bootstrap and per-field verdict capture is empty.
+  "schema/*.json",
+  "schema/*.onnx",
+  # Intent classifier: ONNX + label list + threshold params.
+  "classifier/*.json",
+  "classifier/*.onnx",
+  # Sanity tests run pre-promotion on candidate models.
+  "intelligence/sanity_tests/*.json",
+  # Compliance/policy templates (SOC2, HIPAA, OWASP-LLM-Top-10, EU AI Act).
+  "control/templates/*.json",
+]

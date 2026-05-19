@@ -152,6 +152,11 @@ rate_limit_hits_total = Counter(
     "Rate limit 429 responses by model",
     ["model"],
 )
+schema_mapper_novel_shapes_total = Counter(
+    "walacor_gateway_schema_mapper_novel_shapes_total",
+    "Never-before-seen response skeletons that produced an unmapped "
+    "(overflow) field — provider schema-drift signal",
+)
 
 # intelligence-layer observability.
 # `verdict_buffer_size` is intentionally label-less because the buffer
