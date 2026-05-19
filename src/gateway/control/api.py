@@ -584,13 +584,17 @@ async def control_status(request: Request) -> JSONResponse:
 
     # Caller identity — resolved from request headers / JWT so the dashboard
     # can surface the actual operator identity in audit-trail modals.
-    from gateway.auth.identity import resolve_identity_from_headers
-    identity = resolve_identity_from_headers(request)
-    status["caller_identity"] = {
-        "user_id": identity.user_id,
-        "email": identity.email or None,
-        "source": identity.source,
-    }
+    # Best-effort: never let identity resolution break the status endpoint.
+    try:
+        from gateway.auth.identity import resolve_identity_from_headers
+        identity = resolve_identity_from_headers(request)
+        status["caller_identity"] = {
+            "user_id": identity.user_id,
+            "email": identity.email or None,
+            "source": identity.source,
+        }
+    except Exception:
+        logger.debug("control_status: caller_identity unavailable", exc_info=True)
 
     return JSONResponse(status)
 

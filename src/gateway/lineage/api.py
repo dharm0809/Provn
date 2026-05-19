@@ -516,6 +516,21 @@ async def lineage_envelope(request: Request) -> JSONResponse:
                if local_anchor["walacor_dh"] and remote_dh else None,
     }
     match["all_ok"] = all(v is True for v in (match["block_id"], match["trans_id"], match["dh"]))
+    # Distinguish "not yet anchored" (Walacor anchoring is async — local anchor
+    # fields are still null) from a genuine integrity mismatch. Without this the
+    # SealDrawer shows every freshly written record as a seal failure until the
+    # backend anchors it minutes later.
+    _local_unanchored = not any((
+        local_anchor["walacor_block_id"],
+        local_anchor["walacor_trans_id"],
+        local_anchor["walacor_dh"],
+    ))
+    if not match["all_ok"]:
+        match["pending"] = _local_unanchored and not any(
+            v is False for v in (match["block_id"], match["trans_id"], match["dh"])
+        )
+    else:
+        match["pending"] = False
 
     return JSONResponse({
         "execution_id": execution_id,

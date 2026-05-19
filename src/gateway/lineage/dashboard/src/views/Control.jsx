@@ -1083,8 +1083,15 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
     return acc;
   }, {});
 
+  const [resyncing, setResyncing] = useState(null);
   const onDiscover = async () => {
     try { await discoverModels(); onRefresh(); } catch (e) { alert(e.message); }
+  };
+  const onResync = async (providerName) => {
+    setResyncing(providerName);
+    try { await discoverModels(); onRefresh(); }
+    catch (e) { alert(e.message); }
+    finally { setResyncing(null); }
   };
 
   const onAttestOne = async (m) => {
@@ -1170,7 +1177,9 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
                             onClick={() => setExpandedProvider(isOpen ? null : p.name)}
                             aria-expanded={isOpen}
                           >{isOpen ? 'hide' : 'view'}</button>
-                          <button className="cp-btn cp-btn-sm" disabled={!canWrite}>re-sync</button>
+                          <button className="cp-btn cp-btn-sm" disabled={!canWrite || resyncing === p.name}
+                            onClick={() => onResync(p.name)}>
+                            {resyncing === p.name ? 'syncing…' : 're-sync'}</button>
                         </div>
                       </td>
                     </tr>

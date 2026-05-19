@@ -23,9 +23,9 @@ import '../styles/intelligence.css';
    description/architecture/parameters are client-side lookups so the
    registry stays implementation-agnostic. */
 const MODEL_META = {
-  intent:        { description: 'Classifies user intent across 14 action categories',      architecture: 'DistilBERT-multi',   parameters: '22M' },
-  schema_mapper: { description: 'Maps freeform queries → structured schema fields',        architecture: 'T5-small-distilled', parameters: '44M' },
-  safety:        { description: 'Policy violation + prompt-injection detection',           architecture: 'MiniLM-v6',          parameters: '14M' },
+  intent:        { description: 'Classifies request intent (normal, web_search, reasoning, system_task, …)', architecture: 'TF-IDF + LogisticRegression',          parameters: '—' },
+  schema_mapper: { description: 'Maps any LLM response format to the canonical schema',                     architecture: 'GradientBoosting (value-aware)',       parameters: '—' },
+  safety:        { description: 'Content safety classification across 8 categories',                       architecture: 'TF-IDF char n-grams + GradientBoosting', parameters: '—' },
 };
 
 function enrichModel(m) {
@@ -249,7 +249,7 @@ function GateBadge({ shadow }) {
   return <span className="badge-wal badge-warn">? unknown</span>;
 }
 
-function CandidatesView({ candidates, onPromote, onReject }) {
+function CandidatesView({ candidates, onPromote, onReject, onInspect }) {
   if (candidates.length === 0) {
     return <div className="card"><div className="empty">No candidates. Trigger Force Retrain or wait for the distillation worker.</div></div>;
   }
@@ -353,7 +353,8 @@ function CandidatesView({ candidates, onPromote, onReject }) {
               <button className="btn-wal btn-danger" onClick={() => onReject(c)}>
                 <span className="btn-icon">✕</span> Reject
               </button>
-              <button className="btn-wal btn-ghost" title="Open candidate details">Inspect</button>
+              <button className="btn-wal btn-ghost" title="Open candidate details"
+                onClick={() => onInspect(c)}>Inspect</button>
             </div>
           </div>
         );
@@ -733,6 +734,30 @@ function RejectModal({ candidate, onClose, onConfirm }) {
   );
 }
 
+function InspectModal({ candidate, onClose }) {
+  const c = candidate;
+  return (
+    <div className="wal-modal-overlay" onClick={onClose}>
+      <div className="wal-modal wal-modal-wide" onClick={e => e.stopPropagation()}>
+        <div className="wal-modal-head">
+          <div>
+            <div className="wal-modal-eyebrow">◆ CANDIDATE DETAIL</div>
+            <div className="wal-modal-title">{c.model_name} → <span className="mono">{c.version}</span></div>
+          </div>
+          <button className="wal-modal-close" onClick={onClose}>✕</button>
+        </div>
+        <pre className="mono small" style={{
+          maxHeight: '60vh', overflow: 'auto', background: 'var(--bg-elev, #111)',
+          padding: 12, borderRadius: 6, fontSize: 11, lineHeight: 1.5,
+        }}>{JSON.stringify(c, null, 2)}</pre>
+        <div className="wal-modal-actions">
+          <button className="btn-wal btn-ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RollbackModal({ model, onClose, onConfirm }) {
   const [busy, setBusy] = useState(false);
   const confirm = async () => { setBusy(true); try { await onConfirm(); } finally { setBusy(false); } };
@@ -850,6 +875,7 @@ export default function Intelligence() {
   const [promoteTarget, setPromoteTarget] = useState(null);
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [inspectTarget, setInspectTarget] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [callerIdentity, setCallerIdentity] = useState(null);
 
@@ -981,7 +1007,7 @@ export default function Intelligence() {
       )}
 
       {sub === 'production' && <ProductionView models={models} onForceRetrain={handleForceRetrainFromProd} />}
-      {sub === 'candidates' && <CandidatesView candidates={candidates} onPromote={setPromoteTarget} onReject={setRejectTarget} />}
+      {sub === 'candidates' && <CandidatesView candidates={candidates} onPromote={setPromoteTarget} onReject={setRejectTarget} onInspect={setInspectTarget} />}
       {sub === 'history' && <HistoryView model={historyModel} setModel={setHistoryModel} events={historyEvents} onRollback={() => setRollbackOpen(true)} />}
       {sub === 'verdicts' && <VerdictsView model={verdictModel} setModel={setVerdictModel}
                                            divergenceOnly={divergenceOnly} setDivergenceOnly={setDivergenceOnly}
@@ -993,6 +1019,7 @@ export default function Intelligence() {
       {promoteTarget && <PromoteModal candidate={promoteTarget} onClose={() => setPromoteTarget(null)} onConfirm={handlePromote} callerIdentity={callerIdentity} />}
       {rejectTarget && <RejectModal candidate={rejectTarget} onClose={() => setRejectTarget(null)} onConfirm={handleReject} />}
       {rollbackOpen && <RollbackModal model={historyModel} onClose={() => setRollbackOpen(false)} onConfirm={handleRollback} />}
+      {inspectTarget && <InspectModal candidate={inspectTarget} onClose={() => setInspectTarget(null)} />}
 
       {toast.node}
     </div>
