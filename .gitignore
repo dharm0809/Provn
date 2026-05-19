@@ -109,3 +109,7 @@ CLAUDE.md
 
 # --- Open WebUI (separate project, runs locally only) ---
 /open-webui/
+
+# Private keys / VPN installer — never commit
+prod_key/
+.env.live*
