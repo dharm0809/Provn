@@ -66,15 +66,25 @@ async def _write_attempt_bg(storage, record: dict, timeout: float) -> None:
 
     Completeness is a best-effort invariant (failures already log and continue).
     Running this off the request critical path removes the slow Walacor HTTP POST
-    from tail latency — WAL backend already returns in microseconds via enqueue,
-    and the HTTP-backed Walacor backend can take hundreds of ms under load.
+    from tail latency. ``StorageRouter.write_attempt`` awaits only the durable
+    WAL enqueue (microseconds) and decouples the remote Walacor POST into its
+    own task, so this ``wait_for`` now gates *only* the local durable write.
+    A timeout here therefore means the local WAL enqueue itself stalled — a
+    genuine attempt-record loss — not merely a slow remote sink (which can no
+    longer cause one). The message reflects that so logs stop implying audit
+    loss when the row is in fact durably recorded.
     """
     try:
         await asyncio.wait_for(storage.write_attempt(record), timeout=timeout)
         disp = record.get("disposition", "unknown")
         gateway_attempts_total.labels(disposition=disp).inc()
     except asyncio.TimeoutError:
-        logger.warning("write_attempt timed out after %.1fs — skipping", timeout)
+        logger.warning(
+            "write_attempt: durable WAL enqueue did not complete within %.1fs "
+            "— attempt record LOST (request_id=%s). Remote delivery is "
+            "decoupled and cannot cause this; investigate WAL writer health.",
+            timeout, record.get("request_id"),
+        )
     except Exception as e:
         logger.warning("Failed to write gateway_attempt: %s", e)
 
