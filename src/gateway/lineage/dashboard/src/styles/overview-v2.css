@@ -253,6 +253,46 @@ html[data-theme="light"] {
   position: relative;
 }
 
+/* ── Chart refinement (editorial / data-publication aesthetic) ──
+   Distinctive details that match the audit context:
+   - Lines draw in left-to-right on mount via stroke-dasharray, then
+     the area gradient fades in — gives a sense of "data being plotted"
+     rather than appearing fully-formed (a fintech-publication touch).
+   - A thin filter-based glow under the primary stroke gives the line
+     a luminous quality without changing its silhouette.
+   - Axis labels get tracking (letter-spacing) and uppercase treatment
+     for an editorial feel.
+*/
+.chart-wrap svg text,
+.throughput-chart-wrap svg text {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  fill-opacity: 0.78;
+}
+.chart-wrap svg path[stroke]:not([stroke="none"]),
+.throughput-chart-wrap svg path[stroke]:not([stroke="none"]) {
+  filter: drop-shadow(0 0 1.5px currentColor);
+  animation: chart-line-draw 900ms cubic-bezier(.22,.61,.36,1) both;
+  stroke-dasharray: 2400;
+  stroke-dashoffset: 0;
+}
+.chart-wrap svg path[fill^="url"],
+.throughput-chart-wrap svg path[fill^="url"] {
+  animation: chart-fill-fade 700ms ease-out 350ms both;
+}
+@keyframes chart-line-draw {
+  from { stroke-dashoffset: 2400; }
+  to   { stroke-dashoffset: 0; }
+}
+@keyframes chart-fill-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-wrap svg path,
+  .throughput-chart-wrap svg path { animation: none !important; }
+}
+
 .counters {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
