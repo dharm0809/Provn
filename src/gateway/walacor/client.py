@@ -351,6 +351,21 @@ class WalacorClient:
         "variant_id", "retry_of",
     })
 
+    # Top-level execution-record keys that are *deliberately* not sent to
+    # Walacor and not rehomed into metadata_json. The schema-field strip
+    # below logs + audit-marks ANY other non-None key it discards, so a
+    # field added for a new dashboard panel (the way ``timings`` was lost
+    # for months — visible locally via LineageReader, silently dropped on
+    # the Walacor path) can never again vanish without a trace. Adding a
+    # new intentional drop is a conscious one-line edit here.
+    #   prompt_hash / response_hash: gateway sends full text; Walacor
+    #     hashes on ingest (see CLAUDE.md "Gateway does NOT compute hashes").
+    #   metadata / file_metadata / timings: rehomed into metadata_json above.
+    _INTENTIONAL_NON_SCHEMA_KEYS = frozenset({
+        "prompt_hash", "response_hash",
+        "metadata", "file_metadata", "timings",
+    })
+
     # Audit-critical fields the orchestrator stuffs into ``metadata`` that
     # MUST survive ``metadata_json`` truncation. Anything not in this set
     # is dropped first when the serialised JSON exceeds the size cap, and
@@ -479,10 +494,42 @@ class WalacorClient:
                 pruned["metadata_truncated_keys"] = dropped
                 raw = json.dumps(pruned, default=str)
             data["metadata_json"] = raw
-        # Strip fields not in the Walacor schema (timings, cache_hit, etc.)
+        # Strip fields not in the Walacor schema. Before discarding, detect
+        # any non-None key that is being lost *unexpectedly* — i.e. not in
+        # the schema AND not on the intentional-drop list. This is the
+        # self-revealing guard for the ``timings`` class of bug: a field
+        # added to the execution record for a new dashboard panel that
+        # nobody added to the allowlist would otherwise vanish only on the
+        # Walacor read path (LineageReader still has it locally), making it
+        # a prod-only, test-invisible regression. Now it screams in the
+        # logs and embeds forensic evidence in the record itself.
+        unexpected_drops = sorted(
+            k for k, v in data.items()
+            if v is not None
+            and k not in self._EXECUTION_SCHEMA_FIELDS
+            and k not in self._INTENTIONAL_NON_SCHEMA_KEYS
+        )
+        eid = data.get("execution_id", "?")
+        if unexpected_drops:
+            logger.warning(
+                "Walacor schema strip dropped UNEXPECTED non-None fields "
+                "execution_id=%s keys=%s — add to _EXECUTION_SCHEMA_FIELDS "
+                "(if Walacor should store it), rehome into metadata_json, or "
+                "add to _INTENTIONAL_NON_SCHEMA_KEYS. Until then this field "
+                "is LOST on the Walacor read path.",
+                eid, unexpected_drops,
+            )
+            # Embed audit evidence inside metadata_json so the loss is
+            # discoverable by querying the record, not just by catching the
+            # log line at write time. Mirrors metadata_truncated_keys.
+            try:
+                _mj = json.loads(data["metadata_json"]) if data.get("metadata_json") else {}
+                _mj["schema_stripped_keys"] = unexpected_drops
+                data["metadata_json"] = json.dumps(_mj, default=str)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
         data = {k: v for k, v in data.items()
                 if v is not None and k in self._EXECUTION_SCHEMA_FIELDS}
-        eid = data.get("execution_id", "?")
         try:
             await self._submit(self._executions_etid, [data])
             self._record_delivery("write_execution", ok=True, detail=None)

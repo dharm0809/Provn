@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      - name: Dashboard placeholder / dead-control guard
+        run: python scripts/check_dashboard_placeholders.py
+
       - name: Run unit tests
         run: python -m pytest tests/unit/ -x -q --tb=short 2>&1 | tail -20
 
