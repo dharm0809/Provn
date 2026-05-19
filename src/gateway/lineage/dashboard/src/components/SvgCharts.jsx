@@ -180,6 +180,21 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
         {blockedBandP && <path d={blockedBandP} fill={`url(#tg-blocked-${id})`} />}
         {totalLineP && <path d={totalLineP} fill="none" stroke={P.gold} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
 
+        {/* Live-tick: a pulsing dot at the rightmost data point. Tells
+            you at a glance that the chart is updating in near-real-time. */}
+        {totalLine && totalLine.length > 0 && (() => {
+          const [lx, ly] = totalLine[totalLine.length - 1];
+          return (
+            <g>
+              <circle cx={lx} cy={ly} r="3" fill={P.gold}>
+                <animate attributeName="r" values="3;6;3" dur="2s" repeatCount="indefinite" />
+                <animate attributeName="fill-opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
+              </circle>
+              <circle cx={lx} cy={ly} r="2" fill={P.gold} />
+            </g>
+          );
+        })()}
+
         {hoverLine && (
           <g>
             <line x1={hoverLine.x} y1={padding.top} x2={hoverLine.x} y2={H - padding.bottom}
@@ -241,7 +256,7 @@ export function TokenChart({ data, isLight }) {
   const padding = { left: 44, right: 10, top: 10, bottom: 22 };
   const id = isLight ? 'light' : 'dark';
 
-  const { promptLineP, totalLineP, promptStackArea, completionStackArea, xLabels, yTicks } = useMemo(() => {
+  const { promptLineP, totalLineP, promptStackArea, completionStackArea, xLabels, yTicks, lastPt } = useMemo(() => {
     if (!data.length) return {};
     const prompt = data.map(d => d.prompt || 0);
     const completion = data.map(d => d.completion || 0);
@@ -250,6 +265,7 @@ export function TokenChart({ data, isLight }) {
 
     const promptLine = scalePoints(prompt, W, H, padding, yMax);
     const totalLine = scalePoints(total, W, H, padding, yMax);
+    const lastPt = totalLine[totalLine.length - 1] || null;
 
     // Completion area is the band between promptLine (below) and
     // totalLine (above) — i.e. the stacked completion contribution.
@@ -286,7 +302,7 @@ export function TokenChart({ data, isLight }) {
       totalLineP: smoothPath(totalLine),
       promptStackArea: promptAreaPath,
       completionStackArea: completionBand,
-      xLabels, yTicks,
+      xLabels, yTicks, lastPt,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, isLight]);
@@ -318,6 +334,15 @@ export function TokenChart({ data, isLight }) {
         {completionStackArea && <path d={completionStackArea} fill={`url(#tk-completion-${id})`} />}
         {promptLineP && <path d={promptLineP} fill="none" stroke={P.blue} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />}
         {totalLineP && <path d={totalLineP} fill="none" stroke={P.gold} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
+        {lastPt && (
+          <g>
+            <circle cx={lastPt[0]} cy={lastPt[1]} r="3" fill={P.gold}>
+              <animate attributeName="r" values="3;6;3" dur="2s" repeatCount="indefinite" />
+              <animate attributeName="fill-opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={lastPt[0]} cy={lastPt[1]} r="2" fill={P.gold} />
+          </g>
+        )}
       </svg>
     </div>
   );
@@ -330,11 +355,12 @@ export function LatencyChart({ data, isLight }) {
   const padding = { left: 44, right: 10, top: 10, bottom: 22 };
   const id = isLight ? 'light' : 'dark';
 
-  const { area, line, xLabels, yTicks, spikeIdx, spike } = useMemo(() => {
-    if (!data.length) return { area: '', line: '', xLabels: [], yTicks: [], spikeIdx: null, spike: null };
+  const { area, line, xLabels, yTicks, spikeIdx, spike, lastPt } = useMemo(() => {
+    if (!data.length) return { area: '', line: '', xLabels: [], yTicks: [], spikeIdx: null, spike: null, lastPt: null };
     const avg = data.map(d => d.avg || 0);
     const yMax = Math.max(...avg) * 1.2 || 1;
     const pts = scalePoints(avg, W, H, padding, yMax);
+    const lastPt = pts[pts.length - 1] || null;
 
     const yTicks = [];
     for (let i = 0; i <= 2; i++) {
@@ -356,7 +382,7 @@ export function LatencyChart({ data, isLight }) {
     let spikeIdx = 0;
     avg.forEach((v, i) => { if (v > avg[spikeIdx]) spikeIdx = i; });
 
-    return { area: areaPath(pts, padding, H), line: smoothPath(pts), xLabels, yTicks, spikeIdx, spike: pts[spikeIdx] };
+    return { area: areaPath(pts, padding, H), line: smoothPath(pts), xLabels, yTicks, spikeIdx, spike: pts[spikeIdx], lastPt };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, isLight]);
 
@@ -388,6 +414,15 @@ export function LatencyChart({ data, isLight }) {
             <text x={spike[0]} y={padding.top} textAnchor="middle" fontFamily="var(--mono)" fontSize="9" fill={P.gold}>
               ↑ {data[spikeIdx].avg}ms
             </text>
+          </g>
+        )}
+        {lastPt && lastPt[0] !== spike?.[0] && (
+          <g>
+            <circle cx={lastPt[0]} cy={lastPt[1]} r="3" fill={P.gold}>
+              <animate attributeName="r" values="3;6;3" dur="2s" repeatCount="indefinite" />
+              <animate attributeName="fill-opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={lastPt[0]} cy={lastPt[1]} r="2" fill={P.gold} />
           </g>
         )}
       </svg>
