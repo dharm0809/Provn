@@ -36,10 +36,17 @@ dependencies = [
   # advertised behaviour.
   "numpy>=1.24",
   "onnxruntime>=1.16",
+  # Promoted from `[redis]` extras to core (3b Phase 2): once docker-compose
+  # ships a Redis service and FEA-06 readiness check actively warns on
+  # multi-worker-without-Redis, treating it as "optional" was misleading —
+  # the prod image was built without it and the gateway crashed on startup
+  # when WALACOR_REDIS_URL was set. Single-worker deploys still don't USE
+  # Redis (the URL is empty so _init_redis returns None and in-memory
+  # trackers stay in use); the dep just needs to be importable.
+  "redis>=5.0",
 ]
 
 [project.optional-dependencies]
-redis = ["redis>=5.0"]
 auth = ["pyjwt[crypto]>=2.8"]
 telemetry = [
   "opentelemetry-sdk>=1.30",
