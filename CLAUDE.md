@@ -87,6 +87,12 @@ Bidirectional translator for OpenAI `/v1/chat/completions` ↔ Anthropic `/v1/me
 ### OpenWebUI integration (`src/gateway/ollama_proxy.py`, `src/gateway/openwebui/governance.py`)
 4 Ollama-shape handlers (`/api/tags|ps|version|show`) proxy to `provider_ollama_url` so OpenWebUI registers the gateway as an *Ollama* connection. `/api/` and `/v1/openwebui/` are exempted in `api_key_middleware._plugin_paths` and `completeness_middleware`. Plugin event governance reproduces the proxy-path pipeline for events that bypassed the proxy (outlet=full, inlet=lightweight, sessions namespaced `owui:{chat_id}`, blocks surface as `blocked_post_facto`). **Source of truth for chain logic is `pipeline/orchestrator.py:_apply_session_chain`** — never reintroduce the old SHA3 Merkle helpers.
 
+## Multi-worker shared state (3b Phase 2)
+- Redis is now part of `docker-compose.yml` (`redis:7-alpine`, 256 MB max, allkeys-lru). The gateway depends on it being healthy at startup. Single-worker deployments simply don't set `WALACOR_REDIS_URL` and ignore it.
+- To enable multi-worker safely: set BOTH `WALACOR_UVICORN_WORKERS=N` AND `WALACOR_REDIS_URL=redis://redis:6379/0` in `.env.gateway`. The factories `make_session_chain_tracker(redis_client, settings)` and `make_budget_tracker(redis_client, settings, ...)` pick the Redis-backed variant when `redis_client` is set; session chain state and token budget are then shared across all workers — no desync.
+- `FEA-06` readiness check fires red when `uvicorn_workers>1` and `redis_url` is empty. Don't bump workers without the URL.
+- Production-tested on Linux EC2 (4 CPU): with `gunicorn --reuse-port` + `workers=4` + Redis, kernel `SO_REUSEPORT` distributes 20/23/33/24% across workers (essentially even); 0 audit loss, 0 SQLite corruption, integrity_check ok on every per-PID file under 13k-request sustained load.
+
 ## Multi-worker WAL (3b Phase 1)
 - `WALACOR_UVICORN_WORKERS=1` (default): WAL file is `{wal_path}/wal.db` — byte-identical to pre-Phase-1.
 - `WALACOR_UVICORN_WORKERS>1`: each worker writes its own `{wal_path}/wal-<pid>.db` (SQLite multi-writer to one file is unsafe even with the internal lock; per-PID files eliminate it). The control-plane `DeliveryWorker` / #34 Walacor sink in each worker drains *its own* file — no cross-worker drain races.
