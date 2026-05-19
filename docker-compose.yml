@@ -35,6 +35,25 @@
 # endpoint pointed at via WALACOR_PROVIDER_OLLAMA_URL in .env.gateway.
 
 services:
+  # 3b Phase 2: shared state for multi-worker (session chain, token budget).
+  # In single-worker mode the gateway uses its in-memory trackers and ignores
+  # this service — Redis is only consulted when WALACOR_REDIS_URL is set in
+  # .env.gateway (the multi-worker production config). Kept always-on so a
+  # later workers bump is a single env edit, not an infra change.
+  redis:
+    image: redis:7-alpine
+    container_name: gateway-redis
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+
   gateway:
     image: ${GATEWAY_IMAGE:-}
     container_name: gateway-app
@@ -51,6 +70,12 @@ services:
       - .env.gateway
     volumes:
       - gateway-wal:/var/walacor/wal
+    # Wait for Redis before starting so that when .env.gateway sets
+    # WALACOR_REDIS_URL=redis://redis:6379/0 the first connect succeeds
+    # cleanly. Single-worker deployments without the URL set are unaffected.
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -85,3 +110,4 @@ services:
 volumes:
   gateway-wal: {}
   webui-data: {}
+  redis-data: {}
