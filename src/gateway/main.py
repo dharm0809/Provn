@@ -626,10 +626,25 @@ def _init_wal(settings, ctx) -> None:
         ctx.delivery_worker = DeliveryWorker(ctx.wal_writer)
         ctx.delivery_worker.start()
     elif settings.walacor_storage_enabled:
+        # StorageRouter's inline write covers the happy path, but a single
+        # inline POST has no retry: a live-backend stress test proved that
+        # executions whose inline Walacor write fails under a load spike
+        # stay delivered=0 forever (102 orphaned rows that never drained).
+        # This sweep is the missing retry for exactly that failure tail;
+        # it never touches successfully-delivered rows, so the happy path
+        # is unchanged. The control-plane DeliveryWorker is still the wrong
+        # tool here (different destination) and stays skipped.
         logger.info(
-            "Delivery worker skipped: Walacor backend handles durability — "
-            "StorageRouter marks WAL records delivered on Walacor success"
+            "Delivery worker skipped (control-plane shipper). Walacor "
+            "durability: StorageRouter marks WAL rows delivered on inline "
+            "success; WalacorRedeliveryWorker retries the failure tail."
         )
+        if ctx.walacor_client is not None:
+            from gateway.wal.walacor_redelivery import WalacorRedeliveryWorker
+            ctx.walacor_redelivery_worker = WalacorRedeliveryWorker(
+                ctx.wal_writer, ctx.walacor_client
+            )
+            ctx.walacor_redelivery_worker.start()
     else:
         logger.info("Delivery worker skipped: no Walacor backend or control plane configured")
 
@@ -1977,6 +1992,12 @@ async def on_shutdown() -> None:
             # Data-loss risk: WAL records in flight may not be flushed.
             logger.error("Gateway shutdown: delivery_worker.stop failed — WAL records may not be flushed", exc_info=True)
             errors.append(f"delivery_worker.stop: {e}")
+
+    if ctx.walacor_redelivery_worker:
+        try:
+            await ctx.walacor_redelivery_worker.stop(timeout=5.0)
+        except Exception as e:
+            errors.append(f"walacor_redelivery_worker.stop: {e}")
 
     if ctx.sync_client:
         try:
