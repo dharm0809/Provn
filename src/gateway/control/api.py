@@ -582,6 +582,16 @@ async def control_status(request: Request) -> JSONResponse:
     if intelligence:
         status["intelligence"] = intelligence
 
+    # Caller identity — resolved from request headers / JWT so the dashboard
+    # can surface the actual operator identity in audit-trail modals.
+    from gateway.auth.identity import resolve_identity_from_headers
+    identity = resolve_identity_from_headers(request)
+    status["caller_identity"] = {
+        "user_id": identity.user_id,
+        "email": identity.email or None,
+        "source": identity.source,
+    }
+
     return JSONResponse(status)
 
 

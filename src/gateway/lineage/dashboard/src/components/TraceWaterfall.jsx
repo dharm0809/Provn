@@ -32,9 +32,9 @@ const STEP_META = {
     desc: 'Post-inference content scanning: PII detection, toxicity analysis, and Llama Guard safety classification.',
   },
   chain_ms: {
-    label: 'Merkle Chain',
+    label: 'Session Chain',
     color: '#c084fc',
-    desc: 'Appends this execution to the session\'s Merkle hash chain for tamper-evident audit logging.',
+    desc: 'Appends this execution to the session\'s ID-pointer chain for tamper-evident audit logging.',
   },
   write_ms: {
     label: 'Audit Write',

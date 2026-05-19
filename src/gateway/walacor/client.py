@@ -384,6 +384,8 @@ class WalacorClient:
         "input_analysis", "enforcement_mode", "content_analysis",
         # Delivery / completeness
         "delivery_error",
+        # Pipeline timings (for dashboard waterfall trace)
+        "timings",
         # File audit
         "file_metadata",
         # Tool audit (the row-level copy lives in gateway_tool_events;
@@ -423,6 +425,15 @@ class WalacorClient:
         data = validate_execution(data)
         meta = data.pop("metadata", None)
         fm = data.pop("file_metadata", None)
+        # Timings are not in the Walacor schema but are needed for the dashboard
+        # Pipeline Trace waterfall. Rehome them into metadata_json (the documented
+        # extension point) so they survive the round-trip via WalacorLineageReader.
+        timings = data.pop("timings", None)
+        if timings:
+            if meta is not None:
+                meta["timings"] = timings
+            else:
+                meta = {"timings": timings}
         # Extract tool_strategy and tool_count from metadata to top-level fields
         if meta:
             if meta.get("tool_strategy") and "tool_strategy" not in data:

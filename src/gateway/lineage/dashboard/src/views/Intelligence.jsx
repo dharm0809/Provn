@@ -591,7 +591,7 @@ function VerdictsView({ model, setModel, divergenceOnly, setDivergenceOnly, limi
   );
 }
 
-function PromoteModal({ candidate, onClose, onConfirm }) {
+function PromoteModal({ candidate, onClose, onConfirm, callerIdentity }) {
   const [busy, setBusy] = useState(false);
   const c = candidate;
   const m = c.shadow_validation?.metrics || {};
@@ -654,8 +654,14 @@ function PromoteModal({ candidate, onClose, onConfirm }) {
 
         <div className="modal-approver">
           <span className="mono small txt-muted">APPROVER</span>
-          <span className="approver-chip">alex.chen@acme.io</span>
-          <span className="small txt-muted">identity taken from X-User-Id / JWT subject</span>
+          <span className="approver-chip">
+            {callerIdentity?.email || callerIdentity?.user_id || 'unknown'}
+          </span>
+          <span className="small txt-muted">
+            {callerIdentity?.source === 'jwt' ? 'JWT subject' :
+             callerIdentity?.source === 'anonymous' ? 'anonymous — no identity header' :
+             'X-User-Id / X-User-Email header'}
+          </span>
         </div>
 
         <div className="wal-modal-actions">
@@ -845,6 +851,7 @@ export default function Intelligence() {
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [loadError, setLoadError] = useState(null);
+  const [callerIdentity, setCallerIdentity] = useState(null);
 
   const toast = useToast();
 
@@ -860,6 +867,13 @@ export default function Intelligence() {
       if (e.message === 'AUTH') { setAuthed(false); return; }
       setLoadError(e.message);
     }
+  }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    getControlStatus().then(s => {
+      if (s?.caller_identity) setCallerIdentity(s.caller_identity);
+    }).catch(() => {});
   }, [authed]);
 
   useEffect(() => { loadModelsAndCandidates(); }, [loadModelsAndCandidates]);
@@ -976,7 +990,7 @@ export default function Intelligence() {
                                            onRetrain={handleRetrain}
                                            retrainStatus={retrainStatus} />}
 
-      {promoteTarget && <PromoteModal candidate={promoteTarget} onClose={() => setPromoteTarget(null)} onConfirm={handlePromote} />}
+      {promoteTarget && <PromoteModal candidate={promoteTarget} onClose={() => setPromoteTarget(null)} onConfirm={handlePromote} callerIdentity={callerIdentity} />}
       {rejectTarget && <RejectModal candidate={rejectTarget} onClose={() => setRejectTarget(null)} onConfirm={handleReject} />}
       {rollbackOpen && <RollbackModal model={historyModel} onClose={() => setRollbackOpen(false)} onConfirm={handleRollback} />}
 
