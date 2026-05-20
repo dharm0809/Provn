@@ -1084,6 +1084,31 @@ def _init_compliance_precompute(settings, ctx) -> None:
         ctx.compliance_precompute_worker = None
 
 
+def _init_observability_precompute(settings, ctx) -> None:
+    """Pre-warm the readiness + connections caches.
+
+    Both endpoints back the dashboard ops views. Without pre-warming, an
+    operator opening the dashboard after their tab has been idle pays the
+    full cold-compute latency (readiness ~200-600 ms, connections ~50-300
+    ms). The worker ticks every 30 s and refreshes both module-level TTL
+    caches in place, so dashboard navigations always hit a warm cache.
+
+    Fail-open: if the worker can't start, the request path is unaffected
+    — the endpoints simply compute on demand as they did before.
+    """
+    try:
+        from gateway.observability.precompute import ObservabilityPrecomputeWorker
+        worker = ObservabilityPrecomputeWorker(ctx)
+        worker.start()
+        ctx.observability_precompute_worker = worker
+        logger.info(
+            "Observability precompute worker started (readiness+connections, tick=30s)"
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open per docstring
+        logger.warning("Observability precompute init failed (non-fatal): %s", exc)
+        ctx.observability_precompute_worker = None
+
+
 def _init_otel(settings, ctx) -> None:
     """Phase 17: OpenTelemetry tracer (optional; fail-open if SDK not installed)."""
     from gateway.telemetry.otel import init_tracer
@@ -1804,6 +1829,9 @@ async def on_startup() -> None:
         # default RangePicker windows, so dashboard cold-loads drop from
         # ~5s to ~50ms after the first tick.
         _init_compliance_precompute(settings, ctx)
+        # Pre-warm readiness + connections so dashboard ops views always
+        # land on a cache hit instead of a cold compute.
+        _init_observability_precompute(settings, ctx)
         ctx.redis_client = await _init_redis(settings)
         # Intelligence verdict capture must init BEFORE any ONNX client
         # (SafetyClassifier, SchemaMapper) so the buffer is available for wiring.
@@ -2304,6 +2332,17 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"compliance_precompute_worker: {e}")
         ctx.compliance_precompute_worker = None
+
+    # Stop the observability precompute worker. Idempotent — safe to
+    # call even if the worker never started.
+    if getattr(ctx, "observability_precompute_worker", None) is not None:
+        try:
+            await asyncio.wait_for(ctx.observability_precompute_worker.stop(), timeout=2.0)
+        except asyncio.TimeoutError:
+            errors.append("observability_precompute_worker: stop timed out")
+        except Exception as e:
+            errors.append(f"observability_precompute_worker: {e}")
+        ctx.observability_precompute_worker = None
 
     # drain the harvester runner. stop() injects a
     # sentinel so the background task wakes from its queue-get and exits;
