@@ -115,6 +115,11 @@ class PipelineContext:
         # consults this to distinguish auto-generated keys from
         # operator-supplied ones whose names start with wgk-.
         self.auto_generated_bootstrap_key: str | None = None
+        # Background worker that pre-warms the compliance report cache for
+        # the dashboard's default RangePicker windows. None until
+        # _init_compliance_precompute runs; remains None on deployments
+        # without a lineage_reader. See gateway/compliance/precompute.py.
+        self.compliance_precompute_worker: Any | None = None
         # shadow inference runner. When a candidate
         # model is registered via `ModelRegistry.enable_shadow`, every
         # production inference fires a parallel candidate run and
