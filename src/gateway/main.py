@@ -1846,6 +1846,13 @@ async def on_startup() -> None:
             from gateway.auth.bootstrap_key import ensure_bootstrap_key
             auto_key, stable = ensure_bootstrap_key(settings.wal_path)
             settings.gateway_api_keys = auto_key
+            # Record on ctx so SEC-01 can distinguish "the gateway minted
+            # this key this boot" (apply persistence diagnostic) from
+            # "the operator provided this key via env" (treat as
+            # operator-supplied even if it starts with the wgk- naming
+            # convention). The pre-fix SEC-01 keyed off the prefix alone,
+            # which is just a convention and mislabels env-supplied keys.
+            ctx.auto_generated_bootstrap_key = auto_key
             if stable:
                 logger.warning(
                     "SECURITY: Control plane enabled without API keys. "

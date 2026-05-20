@@ -9,7 +9,15 @@ import pytest
 
 
 def _make_ctx(**kwargs):
-    defaults = dict(wal_writer=None, walacor_client=None)
+    defaults = dict(
+        wal_writer=None,
+        walacor_client=None,
+        # SEC-01 keys off ctx.auto_generated_bootstrap_key to tell apart
+        # "the gateway minted this key" from "operator pre-supplied this
+        # key via env"; default None matches the "operator supplied"
+        # scenario most existing tests exercise.
+        auto_generated_bootstrap_key=None,
+    )
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
 
@@ -41,29 +49,45 @@ def test_sec01_amber_no_keys(monkeypatch):
     assert "No API keys" in result.detail
 
 
-def test_sec01_amber_when_wgk_only_and_persistence_broken(monkeypatch, tmp_path):
-    """wgk- only key + no persisted file → amber with the diagnostic reason
-    in evidence so an operator can fix the underlying cause (volume mount,
-    perms) without grepping logs.
+def test_sec01_green_when_wgk_prefix_is_operator_supplied(monkeypatch, tmp_path):
+    """An operator can perfectly well configure WALACOR_GATEWAY_API_KEYS=wgk-...
+    via env. The wgk- prefix is a naming convention, not a marker of
+    auto-generation. The pre-fix SEC-01 conflated the two and red-lit
+    operator-supplied keys whose names happened to start with wgk-,
+    which kept prod's rollup DEGRADED forever. New semantic: only keys
+    that match ctx.auto_generated_bootstrap_key count as auto-generated;
+    everything else is operator-supplied → green.
     """
     monkeypatch.setattr(
         "gateway.readiness.checks.security.get_settings",
-        lambda: types.SimpleNamespace(api_keys_list=["wgk-abc123def456"], wal_path=str(tmp_path)),
+        lambda: types.SimpleNamespace(api_keys_list=["wgk-walacor-prod-abc123def456"], wal_path=str(tmp_path)),
     )
     from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
-    result = _run(_Sec01ApiKeyEnforced().run(_make_ctx()))
+    # ctx.auto_generated_bootstrap_key=None → ensure_bootstrap_key didn't
+    # run this boot → the wgk- key is operator-supplied.
+    result = _run(_Sec01ApiKeyEnforced().run(_make_ctx(auto_generated_bootstrap_key=None)))
+    assert result.status == "green"
+
+
+def test_sec01_amber_when_auto_generated_and_persistence_broken(monkeypatch, tmp_path):
+    """Only when ctx.auto_generated_bootstrap_key matches the key in use
+    AND the persistence file is missing do we report amber. That's the
+    real session-instability scenario."""
+    auto_key = "wgk-auto-generated-abc123def456"
+    monkeypatch.setattr(
+        "gateway.readiness.checks.security.get_settings",
+        lambda: types.SimpleNamespace(api_keys_list=[auto_key], wal_path=str(tmp_path)),
+    )
+    from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
+    result = _run(_Sec01ApiKeyEnforced().run(_make_ctx(auto_generated_bootstrap_key=auto_key)))
     assert result.status == "amber"
     assert "persistence broken" in result.detail
     assert result.evidence["bootstrap_key_stable"] is False
     assert "bootstrap_key_reason" in result.evidence
 
 
-def test_sec01_green_when_wgk_only_and_persistence_stable(monkeypatch, tmp_path):
-    """A wgk- key persisted to disk is operationally fine — sessions don't
-    break across restarts. SEC-01 used to be amber here unconditionally,
-    which kept the readiness rollup DEGRADED on healthy default-config
-    deployments. New semantic: green with an info nudge to migrate.
-    """
+def test_sec01_green_when_auto_generated_and_persistence_stable(monkeypatch, tmp_path):
+    """Auto-generated key that persists across restarts → green with nudge."""
     from gateway.auth.bootstrap_key import ensure_bootstrap_key
     key, _ = ensure_bootstrap_key(str(tmp_path))
     monkeypatch.setattr(
@@ -71,7 +95,7 @@ def test_sec01_green_when_wgk_only_and_persistence_stable(monkeypatch, tmp_path)
         lambda: types.SimpleNamespace(api_keys_list=[key], wal_path=str(tmp_path)),
     )
     from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
-    result = _run(_Sec01ApiKeyEnforced().run(_make_ctx()))
+    result = _run(_Sec01ApiKeyEnforced().run(_make_ctx(auto_generated_bootstrap_key=key)))
     assert result.status == "green"
     assert result.evidence["bootstrap_key_stable"] is True
     assert "migrating to a managed secret" in result.detail
@@ -80,9 +104,10 @@ def test_sec01_green_when_wgk_only_and_persistence_stable(monkeypatch, tmp_path)
 def test_sec01_amber_when_wal_dir_unwritable(monkeypatch, tmp_path):
     """If the wal directory is read-only on a live probe, name the blocker
     in the remediation so it's actionable from the dashboard alone."""
+    auto_key = "wgk-auto-generated-abc123def456"
     monkeypatch.setattr(
         "gateway.readiness.checks.security.get_settings",
-        lambda: types.SimpleNamespace(api_keys_list=["wgk-abc123def456"], wal_path=str(tmp_path)),
+        lambda: types.SimpleNamespace(api_keys_list=[auto_key], wal_path=str(tmp_path)),
     )
     import unittest.mock as mock
     from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
@@ -91,7 +116,7 @@ def test_sec01_amber_when_wal_dir_unwritable(monkeypatch, tmp_path):
         "gateway.auth.bootstrap_key.os.open",
         side_effect=PermissionError("read-only mount"),
     ):
-        result = _run(_Sec01ApiKeyEnforced().run(_make_ctx()))
+        result = _run(_Sec01ApiKeyEnforced().run(_make_ctx(auto_generated_bootstrap_key=auto_key)))
     assert result.status == "amber"
     assert result.evidence["bootstrap_key_stable"] is False
     assert result.evidence.get("wal_dir_writable") is False

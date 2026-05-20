@@ -38,8 +38,22 @@ class _Sec01ApiKeyEnforced:
                 evidence={"key_count": 0},
                 elapsed_ms=elapsed,
             )
-        auto_generated = [k for k in keys if k.startswith("wgk-")]
-        if len(auto_generated) == len(keys):
+        # An auto-generated key was minted only when ensure_bootstrap_key()
+        # ran this boot — i.e. when control_plane_enabled and no operator
+        # keys were configured. The pre-fix logic detected "auto-generated"
+        # by the wgk- prefix, but that's just a naming convention; an
+        # operator can perfectly well set WALACOR_GATEWAY_API_KEYS=wgk-...
+        # via .env, in which case the key is operator-supplied (stable by
+        # construction) and the SEC-01 persistence diagnostic doesn't
+        # apply. Read ctx.auto_generated_bootstrap_key as the source of
+        # truth: it's only set when this boot actually generated a key.
+        auto_bootstrap_key = getattr(ctx, "auto_generated_bootstrap_key", None)
+        auto_generated = (
+            [k for k in keys if k == auto_bootstrap_key]
+            if auto_bootstrap_key
+            else []
+        )
+        if auto_generated and len(auto_generated) == len(keys):
             # Refined semantic: amber fires only when there's a real, actionable
             # problem. The previous "always amber on wgk-* keys" conflated two
             # very different situations:

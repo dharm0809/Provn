@@ -107,6 +107,14 @@ class PipelineContext:
         # verdict log. Signals are enqueued fire-and-forget from the
         # orchestrator's audit-finalization path.
         self.harvester_runner: HarvesterRunner | None = None
+        # The API key minted by `ensure_bootstrap_key()` *this boot*, if the
+        # auto-generation branch ran. None when the operator pre-supplied
+        # keys via WALACOR_GATEWAY_API_KEYS (the gateway didn't generate
+        # anything — every key in api_keys_list is operator-supplied, even
+        # if it happens to start with the wgk- naming convention). SEC-01
+        # consults this to distinguish auto-generated keys from
+        # operator-supplied ones whose names start with wgk-.
+        self.auto_generated_bootstrap_key: str | None = None
         # shadow inference runner. When a candidate
         # model is registered via `ModelRegistry.enable_shadow`, every
         # production inference fires a parallel candidate run and
