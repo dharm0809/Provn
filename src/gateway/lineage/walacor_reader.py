@@ -1113,23 +1113,20 @@ class WalacorLineageReader:
     async def get_chain_verification_report(
         self, start: str, end: str, sample_limit: int = 50,
     ) -> list[dict]:
-        """Verify chain integrity for a bounded SAMPLE of sessions in [start, end).
+        """Verify chain integrity for a bounded sample of sessions in [start, end).
 
-        The pre-fix version verified EVERY session in the window. Prod
-        accumulates ~6k+ sessions, and a `verify_chain` call is a
-        Walacor round-trip per session — even with concurrency 8 that's
-        ~6k/8 = 750+ batches per page load, completely unviable. The
-        compliance dashboard timed out at 45s here.
+        Still works for ad-hoc one-offs (CLI debugging, custom scripts,
+        the background ``ChainIntegrityWorker`` which passes a very
+        large ``sample_limit`` to get a census). The compliance
+        dashboard NO LONGER calls this directly — ``/v1/compliance/export``
+        reads precomputed results from
+        ``gateway.compliance.chain_store.ChainVerificationStore``,
+        populated by ``gateway.compliance.chain_worker.ChainIntegrityWorker``
+        on a periodic tick.
 
-        New behavior: verify the most-recent `sample_limit` sessions
-        (default 50). The shape of the result is unchanged so callers
-        keep working, but the contract is now "a sample, not a census."
-        Callers that need a census should rely on a background
-        verification job (not yet built — separate work).
-
-        Parallelized with Semaphore(8): even 50 sessions × per-call
-        latency adds up, so we still want concurrency, just bounded so
-        we don't hammer Walacor.
+        Parallelized with ``Semaphore(8)`` to bound concurrent
+        ``verify_chain`` Walacor round-trips; the worker reuses this
+        bound implicitly by calling through this method.
         """
         import asyncio
         pipeline = [

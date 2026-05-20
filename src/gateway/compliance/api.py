@@ -227,6 +227,84 @@ async def _load_shared_report(reader, start: str, end: str) -> dict:
     return result
 
 
+def _read_chain_integrity_from_store(
+    *, summary: dict, executions: list, total_sessions: int | None,
+) -> dict:
+    """Read the background worker's chain verification census from the store.
+
+    The store is shared on disk across uvicorn workers; every request
+    handler sees the latest census from whichever worker holds
+    leadership. When the store is empty (fresh deploy, worker disabled,
+    or first tick hasn't fired yet) the response carries
+    ``pending=True`` so the dashboard can render an honest empty state.
+
+    The return shape is intentionally close to the pre-fix sampling
+    shape so callers (audit_intelligence, framework_mapping, the PDF
+    builder) don't break — the only field that changes meaning is
+    ``sampled``, which is now always ``False`` because the worker does
+    a census, not a sample.
+    """
+    fallback_total = (
+        total_sessions
+        if isinstance(total_sessions, int)
+        else (summary.get("total_executions") or len(executions))
+    )
+    ctx = get_pipeline_context()
+    store = getattr(ctx, "chain_verification_store", None)
+    if store is None:
+        # Worker disabled or store not wired (e.g. transparent-proxy
+        # deployments). Pending until reconfigured.
+        return {
+            "sessions_verified": 0,
+            "all_valid": True,
+            "sessions": [],
+            "sampled": False,
+            "pending": True,
+            "total_sessions_in_window": fallback_total,
+            "last_verification_at": None,
+        }
+    try:
+        sessions = store.get_all()
+        last_at = store.get_meta("last_tick_at")
+        # Guard against test doubles / partial stubs returning non-list
+        # objects (e.g. a MagicMock standing in for the whole ctx). The
+        # request must never crash the JSON encoder.
+        if not isinstance(sessions, list):
+            raise TypeError(f"store.get_all() returned non-list: {type(sessions)!r}")
+        if last_at is not None and not isinstance(last_at, str):
+            last_at = None
+    except Exception as exc:  # noqa: BLE001 - fail-open: never break the report
+        logger.warning("Chain verification store read failed: %s", exc)
+        return {
+            "sessions_verified": 0,
+            "all_valid": True,
+            "sessions": [],
+            "sampled": False,
+            "pending": True,
+            "total_sessions_in_window": fallback_total,
+            "last_verification_at": None,
+        }
+    if not sessions:
+        return {
+            "sessions_verified": 0,
+            "all_valid": True,
+            "sessions": [],
+            "sampled": False,
+            "pending": True,
+            "total_sessions_in_window": fallback_total,
+            "last_verification_at": last_at,
+        }
+    return {
+        "sessions_verified": len(sessions),
+        "all_valid": all(s.get("valid", False) for s in sessions),
+        "sessions": sessions,
+        "sampled": False,
+        "pending": False,
+        "total_sessions_in_window": fallback_total,
+        "last_verification_at": last_at,
+    }
+
+
 async def _compute_shared_report(reader, start: str, end: str) -> dict:
     """Actually run the four reader queries in parallel."""
     import inspect
@@ -244,29 +322,35 @@ async def _compute_shared_report(reader, start: str, end: str) -> dict:
         except Exception:
             return None
 
-    summary, executions, attestations, chain_report, total_sessions = await asyncio.gather(
+    # We still fire `get_chain_verification_report` here even though its
+    # result is no longer used for the dashboard's chain_integrity
+    # panel (the background worker's store is the source of truth).
+    # Keeping the call serves two purposes: (1) preserves the existing
+    # singleflight gather shape so downstream callers can rely on the
+    # same reader-call profile, and (2) keeps the per-request ad-hoc
+    # sample warm for operators inspecting via raw API/CLI. Its return
+    # value is intentionally discarded by the assignment below.
+    summary, executions, attestations, _legacy_chain_report, total_sessions = await asyncio.gather(
         _c(reader.get_compliance_summary, start, end),
         _c(reader.get_execution_export, start, end),
         _c(reader.get_attestation_summary, start, end),
         _c(reader.get_chain_verification_report, start, end),
         _count_sessions(),
     )
-    # `get_chain_verification_report` now samples (~50 most-recent sessions)
-    # rather than enumerating every session in the window — prod accumulates
-    # thousands of sessions and verifying every one per page load was the
-    # primary cause of the 45s timeout. Surface that honestly so the
-    # dashboard can render "X of N verified" instead of implying a census.
-    chain_integrity = {
-        "sessions_verified": len(chain_report),
-        "all_valid": all(r.get("valid", False) for r in chain_report),
-        "sessions": chain_report,
-        "sampled": True,
-        "total_sessions_in_window": (
-            total_sessions
-            if isinstance(total_sessions, int)
-            else (summary.get("total_executions") or len(executions))
-        ),
-    }
+    # Chain integrity now comes from the background ``ChainIntegrityWorker``
+    # via ``ChainVerificationStore`` — a real census of every session in
+    # the configured window (default 7 days), not a 50-session sample.
+    # On a fresh deploy where the worker hasn't ticked yet the store is
+    # empty; we surface ``pending=True`` and ``sessions_verified=0`` so
+    # the dashboard renders an honest empty state instead of implying
+    # a verified census from no data.
+    chain_integrity = _read_chain_integrity_from_store(
+        summary=summary, executions=executions, total_sessions=total_sessions,
+    )
+    # `chain_report` is what audit_intelligence consumes downstream;
+    # surface the store's census so the readiness scoring reflects the
+    # background worker's view, not the legacy sample.
+    chain_report = chain_integrity.get("sessions") or []
     return {
         "summary": summary,
         "executions": executions,
