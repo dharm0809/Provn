@@ -104,12 +104,70 @@ def ensure_bootstrap_key(wal_path: str) -> tuple[str, bool]:
 
 
 def bootstrap_key_stable(wal_path: str) -> bool:
-    """True when a persisted bootstrap key file exists and is readable."""
+    """True when a persisted bootstrap key file exists and is readable.
+
+    Thin wrapper over `bootstrap_key_status` — kept because several callers
+    (dashboard tiles, legacy tests) only need the boolean answer.
+    """
+    return bootstrap_key_status(wal_path)["stable"]
+
+
+def bootstrap_key_status(wal_path: str) -> dict[str, object]:
+    """Inspect bootstrap-key persistence + surface the failure reason.
+
+    Returns a dict with:
+      * ``stable``  — True iff the persisted key file exists and is well-formed.
+      * ``reason``  — human-readable explanation of why ``stable`` is False
+        (None when stable). Covers the operator-visible failure modes:
+        missing file, malformed contents, unreadable, AND a live write-probe
+        if the file is missing — so the dashboard can distinguish "never
+        written" from "wal directory is read-only right now."
+      * ``path``    — the absolute path probed (handy in failure messages).
+      * ``writable`` — True when a tiny probe write into ``wal_path``
+        succeeded just now. Only computed when the key file is missing
+        (avoids unnecessary disk churn on the happy path). The boot-time
+        ``ensure_bootstrap_key`` log line gives the original failure; this
+        live probe answers "is it STILL broken right now?" which is what an
+        operator looking at the dashboard actually needs.
+    """
     path = _key_path(wal_path)
-    if not path.exists():
-        return False
+    result: dict[str, object] = {"path": str(path), "stable": False, "reason": None}
+
+    if path.exists():
+        try:
+            key = path.read_text().strip()
+        except OSError as exc:
+            result["reason"] = f"key file exists but is unreadable: {exc}"
+            return result
+        if not key.startswith(_KEY_PREFIX) or len(key) < len(_KEY_PREFIX) + 16:
+            result["reason"] = f"key file at {path} is malformed (wrong prefix or too short)"
+            return result
+        result["stable"] = True
+        return result
+
+    # File is missing. Live-probe writability so the dashboard can name the
+    # actual blocker (read-only mount, EACCES, ENOSPC) instead of leaving the
+    # operator to grep boot logs from a prior restart.
+    probe = path.parent / f".bootstrap_key_probe.{os.getpid()}"
     try:
-        key = path.read_text().strip()
-        return key.startswith(_KEY_PREFIX) and len(key) >= len(_KEY_PREFIX) + 16
-    except Exception:
-        return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(probe), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        try:
+            probe.unlink()
+        except FileNotFoundError:
+            pass
+        result["writable"] = True
+        result["reason"] = (
+            f"key file not present at {path} (wal directory is writable now — "
+            f"the boot-time persistence may have been skipped or the file was "
+            f"deleted; check the gateway log for the boot-time bootstrap_key entry)"
+        )
+    except OSError as exc:
+        result["writable"] = False
+        result["reason"] = (
+            f"wal directory {path.parent} is not writable: {exc} "
+            f"(fix permissions or volume mount; key will rotate every restart "
+            f"until this is resolved)"
+        )
+    return result

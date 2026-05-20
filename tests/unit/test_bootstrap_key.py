@@ -79,6 +79,58 @@ def test_bootstrap_key_stable_false_when_malformed(tmp_path):
     assert bootstrap_key_stable(str(tmp_path)) is False
 
 
+def test_status_stable_when_key_present(tmp_path):
+    """Persisted, well-formed key → stable + no reason."""
+    from gateway.auth.bootstrap_key import ensure_bootstrap_key, bootstrap_key_status
+
+    ensure_bootstrap_key(str(tmp_path))
+    status = bootstrap_key_status(str(tmp_path))
+    assert status["stable"] is True
+    assert status["reason"] is None
+    assert "gateway-bootstrap-key.txt" in status["path"]
+
+
+def test_status_missing_file_writable_dir_reports_skipped(tmp_path):
+    """Empty wal dir that's writable → unstable + reason names the path."""
+    from gateway.auth.bootstrap_key import bootstrap_key_status
+
+    status = bootstrap_key_status(str(tmp_path))
+    assert status["stable"] is False
+    assert status["reason"]
+    assert "key file not present" in status["reason"]
+    # Live probe should have confirmed writability so an operator looking at
+    # the dashboard knows the directory is fine — the problem is something
+    # at boot time, not a read-only mount.
+    assert status.get("writable") is True
+
+
+def test_status_missing_file_unwritable_dir_names_the_blocker(tmp_path, monkeypatch):
+    """Read-only wal dir → unstable + reason names the OSError so the
+    operator can fix the mount/perms without grepping logs."""
+    from gateway.auth.bootstrap_key import bootstrap_key_status
+
+    import unittest.mock as mock
+    with mock.patch(
+        "gateway.auth.bootstrap_key.os.open",
+        side_effect=PermissionError("[Errno 13] read-only"),
+    ):
+        status = bootstrap_key_status(str(tmp_path))
+    assert status["stable"] is False
+    assert status.get("writable") is False
+    assert "not writable" in status["reason"]
+    assert "read-only" in status["reason"] or "Errno 13" in status["reason"]
+
+
+def test_status_malformed_file_says_so(tmp_path):
+    """Wrong-prefix or short file → unstable + reason names the file."""
+    from gateway.auth.bootstrap_key import bootstrap_key_status
+
+    (tmp_path / "gateway-bootstrap-key.txt").write_text("not-a-wgk")
+    status = bootstrap_key_status(str(tmp_path))
+    assert status["stable"] is False
+    assert "malformed" in status["reason"]
+
+
 def test_file_mode_is_0600_under_loose_umask(tmp_path, monkeypatch):
     """SECURITY: even with a permissive umask (022) inherited from the environment,
     the bootstrap key file must be born 0600 thanks to the explicit umask 077 set

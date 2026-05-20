@@ -41,20 +41,29 @@ def test_sec01_amber_no_keys(monkeypatch):
     assert "No API keys" in result.detail
 
 
-def test_sec01_amber_auto_generated(monkeypatch, tmp_path):
+def test_sec01_amber_when_wgk_only_and_persistence_broken(monkeypatch, tmp_path):
+    """wgk- only key + no persisted file → amber with the diagnostic reason
+    in evidence so an operator can fix the underlying cause (volume mount,
+    perms) without grepping logs.
+    """
     monkeypatch.setattr(
         "gateway.readiness.checks.security.get_settings",
-        lambda: types.SimpleNamespace(api_keys_list=["wgk-abc123"], wal_path=str(tmp_path)),
+        lambda: types.SimpleNamespace(api_keys_list=["wgk-abc123def456"], wal_path=str(tmp_path)),
     )
     from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
     result = _run(_Sec01ApiKeyEnforced().run(_make_ctx()))
     assert result.status == "amber"
-    # Phase 5: SEC-01 reports bootstrap_key_stable in evidence.
-    assert "bootstrap_key_stable" in result.evidence
+    assert "persistence broken" in result.detail
+    assert result.evidence["bootstrap_key_stable"] is False
+    assert "bootstrap_key_reason" in result.evidence
 
 
-def test_sec01_amber_auto_generated_key_stable(monkeypatch, tmp_path):
-    """When a persisted bootstrap key file exists, SEC-01 reports bootstrap_key_stable=true."""
+def test_sec01_green_when_wgk_only_and_persistence_stable(monkeypatch, tmp_path):
+    """A wgk- key persisted to disk is operationally fine — sessions don't
+    break across restarts. SEC-01 used to be amber here unconditionally,
+    which kept the readiness rollup DEGRADED on healthy default-config
+    deployments. New semantic: green with an info nudge to migrate.
+    """
     from gateway.auth.bootstrap_key import ensure_bootstrap_key
     key, _ = ensure_bootstrap_key(str(tmp_path))
     monkeypatch.setattr(
@@ -63,9 +72,30 @@ def test_sec01_amber_auto_generated_key_stable(monkeypatch, tmp_path):
     )
     from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
     result = _run(_Sec01ApiKeyEnforced().run(_make_ctx()))
-    assert result.status == "amber"
+    assert result.status == "green"
     assert result.evidence["bootstrap_key_stable"] is True
-    assert "recommend moving to a secret store" in result.detail
+    assert "migrating to a managed secret" in result.detail
+
+
+def test_sec01_amber_when_wal_dir_unwritable(monkeypatch, tmp_path):
+    """If the wal directory is read-only on a live probe, name the blocker
+    in the remediation so it's actionable from the dashboard alone."""
+    monkeypatch.setattr(
+        "gateway.readiness.checks.security.get_settings",
+        lambda: types.SimpleNamespace(api_keys_list=["wgk-abc123def456"], wal_path=str(tmp_path)),
+    )
+    import unittest.mock as mock
+    from gateway.readiness.checks.security import _Sec01ApiKeyEnforced
+
+    with mock.patch(
+        "gateway.auth.bootstrap_key.os.open",
+        side_effect=PermissionError("read-only mount"),
+    ):
+        result = _run(_Sec01ApiKeyEnforced().run(_make_ctx()))
+    assert result.status == "amber"
+    assert result.evidence["bootstrap_key_stable"] is False
+    assert result.evidence.get("wal_dir_writable") is False
+    assert "Restore the wal volume mount" in result.remediation
 
 
 # ─── SEC-02 ───────────────────────────────────────────────────────────────────
