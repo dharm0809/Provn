@@ -418,6 +418,25 @@ class WalacorClient:
         "_internal",
     })
 
+    @classmethod
+    def unexpected_execution_keys(cls, record: dict[str, Any]) -> list[str]:
+        """Return non-None top-level keys that would be silently dropped.
+
+        Same predicate used by ``write_execution`` to detect drift, but
+        exposed for CI contract tests: every field the orchestrator
+        constructs into an execution record MUST be in
+        ``_EXECUTION_SCHEMA_FIELDS`` OR ``_INTENTIONAL_NON_SCHEMA_KEYS``,
+        otherwise it vanishes only on the Walacor read path and stays
+        visible locally — the exact prod-only regression class that lost
+        ``timings`` for months. See CLAUDE.md "Failure modes & guards".
+        """
+        return sorted(
+            k for k, v in record.items()
+            if v is not None
+            and k not in cls._EXECUTION_SCHEMA_FIELDS
+            and k not in cls._INTENTIONAL_NON_SCHEMA_KEYS
+        )
+
     async def write_execution(self, record: ExecutionRecord | dict[str, Any]) -> None:
         """Persist one execution record to Walacor (ETId=walacor_executions_etid).
 

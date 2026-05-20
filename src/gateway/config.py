@@ -73,7 +73,16 @@ class Settings(BaseSettings):
 
     # WAL
     wal_path: str = Field(default="/var/walacor/wal", description="WAL storage directory")
-    wal_max_size_gb: float = Field(default=10.0, description="Max WAL disk usage GB before action")
+    wal_max_size_gb: float = Field(
+        default=10.0,
+        description=(
+            "Max WAL disk usage GB before backpressure (503). Default 10 GB. "
+            "On a typical EC2 m6a.xlarge with a 50 GB volume, this leaves "
+            "headroom for OS + intelligence.db + control.db + delivery worker "
+            "backlog. Set to 0 to disable the disk-bytes ceiling (the "
+            "high-water pending-count ceiling still applies)."
+        ),
+    )
     wal_max_age_hours: float = Field(default=72.0, description="Max WAL record age hours before action")
     wal_high_water_mark: int = Field(default=10000, description="Max undelivered records before rejecting new requests (enforced mode)")
     max_stream_buffer_bytes: int = Field(default=10_485_760, description="Max stream buffer for hashing (10MB)")
