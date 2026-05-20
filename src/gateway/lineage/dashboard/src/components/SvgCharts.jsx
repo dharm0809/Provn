@@ -98,16 +98,12 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
   const W = 600, H = 200;
   const padding = { left: 44, right: 10, top: 22, bottom: 26 };
 
-  // Empty-state — every bucket is zero (e.g. right after a worker restart).
-  // Without this the bars vanish and the card looks broken.
+  // HOOKS MUST RUN BEFORE ANY EARLY RETURN — React Error #310 otherwise
+  // (CLAUDE.md "Dashboard React Rules"). The empty-state path used to sit
+  // above the useMemo + useRafHover calls; when the range selector flipped
+  // between an empty 1h window and a populated 24h/7d/30d window, the hook
+  // count between renders changed and React bailed → blank chart.
   const isFlat = !data.length || data.every(d => !d.allowed && !d.blocked);
-  if (isFlat) {
-    return (
-      <div className="throughput-chart-wrap chart-wrap-empty">
-        <div className="chart-empty-text">Waiting for traffic in this window</div>
-      </div>
-    );
-  }
 
   const memo = useMemo(() => {
     if (!data.length) return null;
@@ -165,6 +161,15 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
   }, [data, hoverIdx, isLight]);
 
   const onMove = useRafHover(setHoverIdx, W, padding, data.length);
+
+  // All hooks above this line — early returns may follow safely now.
+  if (isFlat) {
+    return (
+      <div className="throughput-chart-wrap chart-wrap-empty">
+        <div className="chart-empty-text">Waiting for traffic in this window</div>
+      </div>
+    );
+  }
   if (!memo) return null;
   const { bars, yTicks, xLabels, spikeIdx, spikeBar, spikeTotal, lastBar, hover } = memo;
 
@@ -285,14 +290,8 @@ export function TokenChart({ data, isLight }) {
   const W = 600, H = 170;
   const padding = { left: 44, right: 10, top: 20, bottom: 22 };
 
+  // HOOKS BEFORE EARLY RETURN — see ThroughputChart for context.
   const isFlat = !data.length || data.every(d => !d.prompt && !d.completion);
-  if (isFlat) {
-    return (
-      <div className="chart-wrap chart-wrap-empty">
-        <div className="chart-empty-text">Waiting for token activity in this window</div>
-      </div>
-    );
-  }
 
   const memo = useMemo(() => {
     if (!data.length) return null;
@@ -339,6 +338,14 @@ export function TokenChart({ data, isLight }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, isLight]);
 
+  // All hooks above this line — early returns may follow safely now.
+  if (isFlat) {
+    return (
+      <div className="chart-wrap chart-wrap-empty">
+        <div className="chart-empty-text">Waiting for token activity in this window</div>
+      </div>
+    );
+  }
   if (!memo) return null;
   const { bars, yTicks, xLabels, spikeIdx, spikeBar, spikeTotal, lastBar } = memo;
 
