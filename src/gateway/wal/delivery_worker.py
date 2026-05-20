@@ -312,6 +312,29 @@ class DeliveryWorker:
                 continue
         return batch_errors >= self._batch_error_budget
 
+    def _walacor_client_for_probe(self):
+        """Return the underlying WalacorClient for existence probes, or None.
+
+        The sink is a duck-typed StorageBackend (see ``__init__``). For the
+        production ``WalacorBackend`` wrapper, the real ``WalacorClient`` is
+        exposed as ``sink._client``. Tests can either inject a sink that
+        already exposes ``execution_exists`` / ``tool_event_exists`` directly,
+        or set ``sink._client`` to a mock. We return whichever object exposes
+        the probe methods; the caller checks for None and falls through to
+        retry if no probe surface is available.
+        """
+        sink = self._sink
+        if sink is None:
+            return None
+        # Direct (test) injection: sink itself implements the probes.
+        if hasattr(sink, "execution_exists") and hasattr(sink, "tool_event_exists"):
+            return sink
+        # Production: WalacorBackend wraps a WalacorClient as ``_client``.
+        inner = getattr(sink, "_client", None)
+        if inner is not None and hasattr(inner, "execution_exists"):
+            return inner
+        return None
+
     async def _deliver_batch_walacor(self) -> bool:
         """Drain a batch of undelivered WAL rows to the Walacor sink.
 
@@ -341,8 +364,9 @@ class DeliveryWorker:
                 self._attempt_counts.pop(execution_id, None)
                 self._dlq_count += 1
                 continue
+            is_tool_event = body.get("event_type") == "tool_call"
             try:
-                if body.get("event_type") == "tool_call":
+                if is_tool_event:
                     ok = await self._sink.write_tool_event(body)  # type: ignore[union-attr]
                 else:
                     ok = await self._sink.write_execution(body)  # type: ignore[union-attr]
@@ -357,6 +381,47 @@ class DeliveryWorker:
                 self._wal.mark_delivered(execution_id)
                 self._attempt_counts.pop(execution_id, None)
                 continue
+            # Write-time idempotency probe — structural fix for the dup-write
+            # class addressed read-side by PR #61. The sink reported failure,
+            # but the failure mode that creates duplicates is "write landed,
+            # ack lost on the return path": the record is *already* in
+            # Walacor and a retry would produce a duplicate record_id.
+            # Probe existence BEFORE the retry path. If the row is present,
+            # mark delivered locally and skip retry entirely. If absent (or
+            # the probe itself errored), fall through to the existing retry
+            # logic — the read-side dedup in WalacorLineageReader remains as
+            # belt-and-braces for any legacy/edge dups.
+            #
+            # Cost: one extra Walacor round-trip per *failed* write (not per
+            # write). Successful writes never reach this branch.
+            client = self._walacor_client_for_probe()
+            probe_key = (
+                body.get("event_id") if is_tool_event else body.get("record_id")
+            )
+            if client is not None and probe_key:
+                try:
+                    if is_tool_event:
+                        already = await client.tool_event_exists(probe_key)
+                    else:
+                        already = await client.execution_exists(probe_key)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "Walacor existence probe raised for %s: %s",
+                        execution_id, e,
+                    )
+                    already = False
+                if already:
+                    delivery_total.labels(result="duplicate").inc()
+                    self._wal.mark_delivered(execution_id)
+                    self._attempt_counts.pop(execution_id, None)
+                    logger.info(
+                        "Walacor write idempotency hit — record already present "
+                        "(no retry scheduled) execution_id=%s probe_key=%s",
+                        execution_id, probe_key,
+                    )
+                    continue
             # Transient failure: retry with per-record counter → DLQ when
             # exhausted, and trip the batch budget so _loop backs off
             # instead of hammering a degraded Walacor backend.

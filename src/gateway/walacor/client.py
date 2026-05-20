@@ -814,3 +814,65 @@ class WalacorClient:
                 return body.get("data", [])
             return body if isinstance(body, list) else []
         return []
+
+    # ── Write-time idempotency probes ────────────────────────────────────────
+    #
+    # The delivery worker retries any write that did not produce a clean ack.
+    # That is correct for *true* failures but produces a duplicate when the
+    # write actually landed and only the *ack* was lost on the return path
+    # (network blip, proxy timeout, etc.) — the record_id is identical, the
+    # row is already in Walacor, but the worker has no way to know and writes
+    # it again. PR #61 added a read-time dedup band-aid; these probes are the
+    # structural fix.
+    #
+    # Usage contract:
+    #   The worker should only call these after a write attempt has failed
+    #   in a way that *could* be a lost-ack. A True return means "Walacor
+    #   already has this record_id; do NOT retry, mark delivered." A False
+    #   return means "Walacor does not have it; retry is safe." On a probe
+    #   error (network/auth) we conservatively return False so the worker
+    #   falls back to its normal retry path — the existing read-side dedup
+    #   still catches whatever duplicate that path produces.
+
+    async def execution_exists(self, record_id: str) -> bool:
+        """Return True iff an execution row with ``record_id`` is already in Walacor.
+
+        Issues a one-row ``query_complex`` against the executions ETId. Errors
+        are swallowed and return False — the caller treats False as
+        "retry is safe", and the read-time dedup in ``WalacorLineageReader``
+        is the belt-and-braces fallback (see PR #61).
+        """
+        if not record_id:
+            return False
+        try:
+            rows = await self.query_complex(
+                self._executions_etid,
+                [{"$match": {"record_id": record_id}}, {"$limit": 1}],
+            )
+        except Exception as e:
+            logger.debug(
+                "execution_exists probe failed record_id=%s: %s", record_id, e
+            )
+            return False
+        return bool(rows)
+
+    async def tool_event_exists(self, event_id: str) -> bool:
+        """Return True iff a tool_event row with ``event_id`` is already in Walacor.
+
+        Same contract as ``execution_exists`` but keyed on the tool_events
+        schema's ``event_id`` column (executions are keyed on ``record_id``;
+        tool events use a distinct identifier — see ``_TOOL_EVENT_SCHEMA_FIELDS``).
+        """
+        if not event_id:
+            return False
+        try:
+            rows = await self.query_complex(
+                self._tool_events_etid,
+                [{"$match": {"event_id": event_id}}, {"$limit": 1}],
+            )
+        except Exception as e:
+            logger.debug(
+                "tool_event_exists probe failed event_id=%s: %s", event_id, e
+            )
+            return False
+        return bool(rows)
