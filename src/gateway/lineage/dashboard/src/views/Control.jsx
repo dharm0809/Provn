@@ -1076,7 +1076,15 @@ function BudgetsPanel({ rows, canWrite, onUnlock, onRefresh, pricing, onRefreshP
 }
 
 function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
+  // HOOKS MUST RUN BEFORE ANY EARLY RETURN — React Error #310 otherwise.
+  // Pre-fix this had `useState(null) for resyncing` AFTER the `if (!data)`
+  // early-return below; when `data` flipped from null to populated, the
+  // hook count between renders changed and React bailed → blank page.
+  // The 11.5s discovery latency previously masked it; PR #66 sped that
+  // up to ~0.7s and the bug became immediately visible.
   const [expandedProvider, setExpandedProvider] = useState(null);
+  const [resyncing, setResyncing] = useState(null);
+
   if (!data) return <Loading />;
 
   const providers = data.providers || [];
@@ -1087,8 +1095,6 @@ function ProvidersPanel({ data, canWrite, onUnlock, onRefresh }) {
     (acc[m.provider] = acc[m.provider] || []).push(m);
     return acc;
   }, {});
-
-  const [resyncing, setResyncing] = useState(null);
   const onDiscover = async () => {
     try { await discoverModels(); onRefresh(); } catch (e) { alert(e.message); }
   };
