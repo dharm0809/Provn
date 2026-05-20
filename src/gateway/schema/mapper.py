@@ -307,6 +307,20 @@ class SchemaMapper:
         self._input_name = ""
         self._labels: list[str] = []
         self._label_to_idx: dict[str, int] = {}
+        # The actual labels the LOADED ONNX binary can emit, derived from the
+        # output_probability map keys at session-adoption time. Distinct from
+        # `_label_to_idx`, which is built from `schema_mapper_labels.json`
+        # and can drift ahead of the binary (it did on prod — PR #50). Used
+        # by `_record_per_field_verdicts` to gate the envelope-teacher
+        # suppression: a label that isn't in this set CANNOT be predicted
+        # by the model, so writing it as `divergence_signal` would
+        # guarantee a mismatch on every row.
+        #
+        # Empty default is the safe fail-mode: gates that consult this set
+        # treat "unknown" as "not predictable" and suppress the teacher
+        # signal — refusing to grade is better than grading every row
+        # wrong. Populated by `_validate_labels()` after session adoption.
+        self._model_class_labels: set[str] = set()
         self._verdict_buffer = verdict_buffer
         # D7: bounded deque tracking ONNX-timeout occurrences for the
         # `schema_mapper` tile on `/v1/connections`. We keep timestamps
@@ -431,6 +445,16 @@ class SchemaMapper:
         except Exception as exc:
             logger.debug("SchemaMapper: label validation probe failed: %s", exc)
             return
+
+        # Cache the actual label set the loaded ONNX binary can emit. We
+        # build it from in-bounds class indices only — if the bounds check
+        # below raises, we never reach this assignment and the set stays
+        # empty (the safe fail-mode for gate callers). Out-of-bounds
+        # indices would otherwise IndexError into `self._labels` here.
+        if max_class < len(self._labels):
+            self._model_class_labels = {
+                self._labels[idx] for idx in class_keys if 0 <= idx < len(self._labels)
+            }
 
         if max_class >= len(self._labels):
             msg = (
@@ -769,7 +793,14 @@ class SchemaMapper:
             from gateway.intelligence.types import ModelVerdict
             rid = request_id_var.get() or None
             version = self._reload_state.current_version
-            envelope_trainable = ENVELOPE_LABEL in self._label_to_idx
+            # Source of truth is the ONNX binary's actual output class
+            # set — not labels.json. PR #50 fixed the symptom by removing
+            # `envelope` from labels.json; this gate now makes the metric
+            # robust to a future labels.json that's ahead of (or behind)
+            # the deployed binary. Empty `_model_class_labels` (session
+            # not yet probed, or validation failed) is the safe default:
+            # gate fires → teacher signal suppressed → no false mismatches.
+            envelope_trainable = ENVELOPE_LABEL in self._model_class_labels
             for field, feat_vec, (label, confidence) in zip(
                 fields, feature_vectors, classifications,
             ):
@@ -1141,6 +1172,13 @@ class SchemaMapper:
                 self._input_name = session.get_inputs()[0].name
             except Exception:
                 logger.debug("SchemaMapper.reload: could not refresh input_name", exc_info=True)
+            # Refresh the cached ONNX class-label set whenever a new binary
+            # is hot-swapped in. Without this, a promotion that adds/removes
+            # output classes (e.g. envelope) would leave the per-field
+            # verdict gate stuck on the OLD class set, re-introducing
+            # exactly the skew PR #50 fixed.
+            self._model_class_labels = set()
+            self._validate_labels()
 
         maybe_reload(self._reload_state, _build, _adopt, label="schema_mapper")
 

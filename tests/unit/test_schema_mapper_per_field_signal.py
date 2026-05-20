@@ -196,6 +196,67 @@ def test_per_field_input_hashes_are_unique_within_response():
     assert len(set(hashes)) == len(hashes)
 
 
+def test_envelope_gate_trusts_model_output_not_labels_json():
+    """Regression for the production 0.2% accuracy bug fixed by PR #50.
+
+    Setup: the production ONNX binary doesn't include `envelope` in its
+    output class set. The pre-fix gate at `mapper.py:772` checked
+    `ENVELOPE_LABEL in self._label_to_idx` — i.e. labels.json — so if
+    labels.json listed `envelope` (as it did on prod before PR #50) the
+    suppression never fired, the heuristic teacher emitted
+    `divergence_signal="envelope"` on every envelope key, and the model
+    predicted UNKNOWN → ~0% rolling accuracy.
+
+    The fix: read the actual ONNX output class set via
+    `_model_class_labels`, populated by `_validate_labels()` from the
+    output_probability map keys. This test simulates the prod skew
+    (labels.json knows `envelope`; binary doesn't) by adding `envelope`
+    back to `_label_to_idx` AFTER session init, then verifies the gate
+    still suppresses — i.e. that the gate ignores labels.json drift.
+    """
+    from gateway.schema.canonical import ENVELOPE_LABEL
+
+    buf = VerdictBuffer(max_size=10_000)
+    mapper = SchemaMapper(verdict_buffer=buf)
+    if mapper._session is None:
+        pytest.skip("ONNX session unavailable")
+
+    # Production binary (post-PR #50) shouldn't list envelope in its
+    # output class set. If a future retrain adds envelope, this test
+    # becomes a vacuous pass — skip to surface that.
+    if ENVELOPE_LABEL in mapper._model_class_labels:
+        pytest.skip(
+            "ONNX binary now predicts envelope; gate-trust test is vacuous. "
+            "Replace with a test against a different non-trainable label."
+        )
+
+    # Simulate the prod-skew condition: labels.json knows envelope but
+    # the binary doesn't. The old gate would read True here; the new
+    # gate must still read False because it consults `_model_class_labels`.
+    mapper._label_to_idx[ENVELOPE_LABEL] = len(mapper._labels)
+    mapper._labels.append(ENVELOPE_LABEL)
+
+    # Envelope-heavy non-standard payload — `object`, `created`, `role`,
+    # `index`, `service_tier` etc. are envelope keys the heuristic teacher
+    # confidently classifies as ENVELOPE_LABEL.
+    resp = {
+        "object": "chat.completion",
+        "created": 1234567890,
+        "service_tier": "default",
+        "x_meta_role": "assistant",
+        "x_meta_index": 0,
+    }
+    mapper.map_response(resp)
+    rows = _drain(buf)
+    envelope_signals = [r for r in rows if r.divergence_signal == ENVELOPE_LABEL]
+    assert not envelope_signals, (
+        f"gate must suppress envelope teacher when the loaded ONNX binary "
+        f"can't predict envelope — got {len(envelope_signals)} rows with "
+        f"divergence_signal='envelope'. labels.json drift broke the metric "
+        f"on prod (PR #50); this gate must be labels.json-independent."
+    )
+
+
 def test_per_field_buffer_overflow_drops_oldest_not_newest():
     """When per-field volume exceeds the buffer, oldest fields drop first.
 
