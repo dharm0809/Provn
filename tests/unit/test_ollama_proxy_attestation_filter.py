@@ -69,7 +69,8 @@ async def test_filters_to_attested_ollama_models_only(monkeypatch):
     http.get = AsyncMock(return_value=response_mock)
     store = _stub_store([
         {"model_id": "llama3.1:8b", "provider": "ollama", "status": "active"},
-        # qwen3 attested but for a different provider — must NOT match.
+        # qwen3 attested for a non-ollama provider — surfaced as a synthetic
+        # tag entry so an OWUI Ollama connection can drive it.
         {"model_id": "qwen3:1.7b", "provider": "openai", "status": "active"},
         # gemma attested for ollama but revoked — must NOT match.
         {"model_id": "gemma4:e2b", "provider": "ollama", "status": "revoked"},
@@ -82,7 +83,14 @@ async def test_filters_to_attested_ollama_models_only(monkeypatch):
 
     resp = await ollama_proxy.ollama_api_tags(_request())
     body = json.loads(resp.body)
-    assert [m["name"] for m in body["models"]] == ["llama3.1:8b"]
+    names = [m["name"] for m in body["models"]]
+    # Ordering: upstream-ollama matches first, then synthetic non-ollama.
+    assert names == ["llama3.1:8b", "qwen3:1.7b"]
+    # Synthetic entry carries the provider in `details.family` so callers
+    # can distinguish gateway-fronted models from real local Ollama ones.
+    synth = next(m for m in body["models"] if m["name"] == "qwen3:1.7b")
+    assert synth["details"]["family"] == "openai"
+    assert synth["digest"].startswith("walacor-attested:")
 
 
 @pytest.mark.anyio

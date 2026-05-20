@@ -45,6 +45,59 @@ def _attested_ollama_models(ctx) -> set[str] | None:
     return {a.get("model_id") for a in active if a.get("model_id")}
 
 
+def _attested_non_ollama_models(ctx) -> list[dict]:
+    """Return active attestations whose provider is NOT ollama.
+
+    OpenWebUI's *Ollama* connection only sees what /api/tags returns, so
+    Anthropic and OpenAI attestations must be surfaced through this
+    endpoint as if they were Ollama-resident models. Otherwise users who
+    register the gateway as a single Ollama connection cannot select
+    Claude or GPT models, and selecting one (via a hand-typed model name)
+    POSTs /api/chat — historically unhandled → 404 → perpetual spinner
+    in OWUI (see ollama_chat_bridge.py for the chat-route fix).
+    """
+    store = getattr(ctx, "control_store", None)
+    if store is None:
+        return []
+    try:
+        return [
+            a for a in store.list_attestations()
+            if a.get("status") == "active" and a.get("provider") != "ollama"
+        ]
+    except Exception:
+        logger.warning("ollama_proxy: list_attestations failed", exc_info=True)
+        return []
+
+
+def _synth_tag_entry(att: dict) -> dict:
+    """Manufacture an Ollama /api/tags entry for a non-ollama attestation.
+
+    Ollama's tag schema requires ``name``, ``model``, ``modified_at``,
+    ``size``, ``digest``, and ``details``. We fill plausible placeholder
+    values — they're only ever rendered as text in OWUI's picker. The
+    crucial field is ``name``/``model`` which OWUI submits back as the
+    request's ``model`` field; the gateway's body-based router then
+    dispatches to the correct provider adapter.
+    """
+    mid = att.get("model_id") or ""
+    provider = att.get("provider") or "unknown"
+    return {
+        "name": mid,
+        "model": mid,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "size": 0,
+        "digest": f"walacor-attested:{provider}",
+        "details": {
+            "parent_model": "",
+            "format": "api",
+            "family": provider,
+            "families": [provider],
+            "parameter_size": "n/a",
+            "quantization_level": "n/a",
+        },
+    }
+
+
 async def _proxy_to_ollama(request: Request, path: str) -> Response:
     """Forward a request to the Ollama backend and return the response."""
     settings = get_settings()
@@ -81,6 +134,13 @@ async def ollama_api_tags(request: Request) -> Response:
     ctx = get_pipeline_context()
     raw = await _proxy_to_ollama(request, "/api/tags")
     if raw.status_code != 200 or raw.body is None:
+        # Ollama backend unreachable — but if we have attested
+        # Anthropic/OpenAI models we can still serve them as synthetic
+        # tags so OWUI's picker remains usable. Without this an Ollama
+        # outage takes Claude/GPT down in the OWUI Ollama-connection mode.
+        synthetic = [_synth_tag_entry(a) for a in _attested_non_ollama_models(ctx)]
+        if synthetic:
+            return JSONResponse({"models": synthetic})
         return raw
 
     attested = _attested_ollama_models(ctx)
@@ -104,6 +164,11 @@ async def ollama_api_tags(request: Request) -> Response:
         m for m in models
         if (m.get("name") in attested or m.get("model") in attested)
     ]
+    # Surface non-ollama attestations (Anthropic / OpenAI) as synthetic
+    # tag entries so a single OWUI Ollama connection can drive any
+    # attested model. See _synth_tag_entry for schema rationale.
+    for att in _attested_non_ollama_models(ctx):
+        filtered.append(_synth_tag_entry(att))
     payload["models"] = filtered
     return JSONResponse(payload)
 
