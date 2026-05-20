@@ -259,7 +259,14 @@ function PreviewDrawer({ framework, report, onClose }) {
           <>
             <div className="intel-card-sub" style={{ marginBottom: 8 }}>◇ chain integrity</div>
             <div style={{ fontFamily: 'var(--mono)', fontSize: 12, marginBottom: 16 }}>
-              <div>{chain.sessions_verified} session(s) verified · {chain.all_valid ? 'all valid' : 'failures present'}</div>
+              <div>
+                {chain.sessions_verified} session(s) verified · {chain.all_valid ? 'all valid' : 'failures present'}
+                {chain.sampled && chain.total_sessions_in_window > chain.sessions_verified && (
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    {' '}(sampled {chain.sessions_verified} of {chain.total_sessions_in_window})
+                  </span>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -477,7 +484,10 @@ export default function Compliance() {
         </div>
         {chainPanel && (
           <div style={{ padding: '8px 2px 2px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
-            {chainPanel.sessions_verified} session(s) verified in window.
+            {chainPanel.sessions_verified} session(s) verified in window
+            {chainPanel.sampled && chainPanel.total_sessions_in_window > chainPanel.sessions_verified
+              ? ` (sampled ${chainPanel.sessions_verified} of ${chainPanel.total_sessions_in_window}).`
+              : '.'}
             {!chainPanel.all_valid && ' Some sessions have chain errors — open the Sessions view to drill in.'}
           </div>
         )}

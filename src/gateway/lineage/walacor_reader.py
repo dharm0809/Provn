@@ -613,94 +613,143 @@ class WalacorLineageReader:
 
     # ── Metrics history ───────────────────────────────────────────────────
 
+    # ── Bucket-prefix width per range_key ──
+    # ISO-8601 timestamps look like "YYYY-MM-DDTHH:MM:SS...".  We bucket by
+    # *prefix length*: 16 → minute (YYYY-MM-DDTHH:MM), 13 → hour
+    # (YYYY-MM-DDTHH).  Pushing the prefix-cut into Walacor via $substr keeps
+    # the aggregation server-side: at most ``num_buckets * |dispositions|``
+    # rows come back instead of one row per attempt.
+    _RANGE_BUCKET_CFG = {
+        # range_key -> (hours_window, num_buckets, substr_len, py_strftime_fmt)
+        "1h":  (1,   60,  16, "%Y-%m-%dT%H:%M"),
+        "24h": (24,  24,  13, "%Y-%m-%dT%H"),
+        "7d":  (168, 168, 13, "%Y-%m-%dT%H"),
+        "30d": (720, 720, 13, "%Y-%m-%dT%H"),
+    }
+
     async def get_metrics_history(self, range_key: str) -> dict:
-        """Time-bucketed attempt counts for throughput chart."""
-        cfg = {"1h": (1, 60, "%Y-%m-%dT%H:%M:00"), "24h": (24, 24, "%Y-%m-%dT%H:00:00"),
-               "7d": (168, 168, "%Y-%m-%dT%H:00:00"), "30d": (720, 720, "%Y-%m-%dT%H:00:00")}
-        hours, num_buckets, fmt = cfg.get(range_key, cfg["1h"])
+        """Time-bucketed attempt counts for throughput chart.
+
+        Server-side aggregation: pushes ``$group`` with a ``$substr``-based
+        bucket key into Walacor so the wire payload is at most
+        ``num_buckets * |dispositions|`` rows — not one row per attempt.
+        A 30d range used to scan and return every matching doc; this version
+        returns ≤ ~720 * 2 rows.
+        """
+        cfg = self._RANGE_BUCKET_CFG
+        hours, num_buckets, substr_len, fmt = cfg.get(range_key, cfg["1h"])
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(hours=hours)).isoformat()
 
         pipeline = [
             {"$match": {"timestamp": {"$gte": cutoff}}},
-            {"$project": {"timestamp": 1, "disposition": 1}},
+            {"$group": {
+                "_id": {
+                    "bucket": {"$substr": ["$timestamp", 0, substr_len]},
+                    "disposition": "$disposition",
+                },
+                "count": {"$sum": 1},
+            }},
         ]
         rows = await self._client.query_complex(self._att_etid, pipeline)
 
-        # Build time buckets in Python
         step = timedelta(hours=hours) / num_buckets
         start = now - timedelta(hours=hours)
-        labels = [(start + step * i).strftime(fmt) for i in range(num_buckets)]
+        # The native bucket label keeps the legacy ISO-with-seconds shape the
+        # dashboard already understands (":MM:00" or ":00:00").
+        legacy_fmt = "%Y-%m-%dT%H:%M:00" if substr_len == 16 else "%Y-%m-%dT%H:00:00"
+        labels = [(start + step * i).strftime(legacy_fmt) for i in range(num_buckets)]
         by_t: dict[str, dict] = {t: {"t": t, "total": 0, "allowed": 0, "blocked": 0} for t in labels}
 
         for r in rows:
-            ts = r.get("timestamp", "")
+            _id = r.get("_id") or {}
+            prefix = _id.get("bucket") or ""
+            disp = _id.get("disposition")
+            count = r.get("count", 0) or 0
+            # Re-expand the substr prefix into the legacy label shape.
             try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                key = dt.strftime(fmt)
+                # Parse a partial ISO date safely by completing the missing fields.
+                full = prefix + ("00:00" if substr_len == 13 else ":00")
+                # substr_len 16 → "YYYY-MM-DDTHH:MM", needs ":00" tail.
+                # substr_len 13 → "YYYY-MM-DDTHH", needs ":00:00" tail.
+                if substr_len == 13:
+                    full = prefix + ":00:00"
+                else:
+                    full = prefix + ":00"
+                dt = datetime.fromisoformat(full)
+                key = dt.strftime(legacy_fmt)
             except (ValueError, TypeError):
                 continue
             bucket = by_t.get(key)
-            if bucket:
-                bucket["total"] += 1
-                if r.get("disposition") in ("allowed", "forwarded"):
-                    bucket["allowed"] += 1
-                else:
-                    bucket["blocked"] += 1
+            if not bucket:
+                continue
+            bucket["total"] += count
+            if disp in ("allowed", "forwarded"):
+                bucket["allowed"] += count
+            else:
+                bucket["blocked"] += count
 
         return {"buckets": [by_t[t] for t in labels], "range": range_key}
 
     # ── Token / latency history ───────────────────────────────────────────
 
     async def get_token_latency_history(self, range_key: str) -> dict:
-        """Time-bucketed token usage and latency for charts."""
-        cfg = {"1h": (1, 60, "%Y-%m-%dT%H:%M:00"), "24h": (24, 24, "%Y-%m-%dT%H:00:00"),
-               "7d": (168, 168, "%Y-%m-%dT%H:00:00"), "30d": (720, 720, "%Y-%m-%dT%H:00:00")}
-        hours, num_buckets, fmt = cfg.get(range_key, cfg["1h"])
+        """Time-bucketed token usage and latency for charts.
+
+        Server-side aggregation: pushes ``$group`` with a ``$substr``-based
+        bucket key into Walacor.  Latency is summarized to ``avg`` / ``max``
+        on the server (``$avg`` / ``$max``) so we never ship the raw
+        per-request latency list back to the gateway.
+        """
+        cfg = self._RANGE_BUCKET_CFG
+        hours, num_buckets, substr_len, _ = cfg.get(range_key, cfg["1h"])
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(hours=hours)).isoformat()
 
         pipeline = [
             {"$match": {"timestamp": {"$gte": cutoff}}},
-            {"$project": {"timestamp": 1, "prompt_tokens": 1, "completion_tokens": 1,
-                          "total_tokens": 1, "latency_ms": 1}},
+            {"$group": {
+                "_id": {"$substr": ["$timestamp", 0, substr_len]},
+                "prompt_tokens": {"$sum": "$prompt_tokens"},
+                "completion_tokens": {"$sum": "$completion_tokens"},
+                "total_tokens": {"$sum": "$total_tokens"},
+                "avg_latency_ms": {"$avg": "$latency_ms"},
+                "max_latency_ms": {"$max": "$latency_ms"},
+                "request_count": {"$sum": 1},
+            }},
         ]
         rows = await self._client.query_complex(self._exec_etid, pipeline)
 
         step = timedelta(hours=hours) / num_buckets
         start = now - timedelta(hours=hours)
-        labels = [(start + step * i).strftime(fmt) for i in range(num_buckets)]
-        by_t: dict[str, dict] = {}
-        for t in labels:
-            by_t[t] = {"t": t, "prompt_tokens": 0, "completion_tokens": 0,
-                       "total_tokens": 0, "latencies": [], "request_count": 0}
+        legacy_fmt = "%Y-%m-%dT%H:%M:00" if substr_len == 16 else "%Y-%m-%dT%H:00:00"
+        labels = [(start + step * i).strftime(legacy_fmt) for i in range(num_buckets)]
+        by_t: dict[str, dict] = {
+            t: {"t": t, "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "avg_latency_ms": 0, "max_latency_ms": 0,
+                "request_count": 0}
+            for t in labels
+        }
 
         for r in rows:
-            ts = r.get("timestamp", "")
+            prefix = r.get("_id") or ""
             try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                key = dt.strftime(fmt)
+                full = prefix + (":00:00" if substr_len == 13 else ":00")
+                dt = datetime.fromisoformat(full)
+                key = dt.strftime(legacy_fmt)
             except (ValueError, TypeError):
                 continue
             bucket = by_t.get(key)
-            if bucket:
-                bucket["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
-                bucket["completion_tokens"] += r.get("completion_tokens", 0) or 0
-                bucket["total_tokens"] += r.get("total_tokens", 0) or 0
-                lat = r.get("latency_ms")
-                if lat:
-                    bucket["latencies"].append(lat)
-                bucket["request_count"] += 1
+            if not bucket:
+                continue
+            bucket["prompt_tokens"] = r.get("prompt_tokens", 0) or 0
+            bucket["completion_tokens"] = r.get("completion_tokens", 0) or 0
+            bucket["total_tokens"] = r.get("total_tokens", 0) or 0
+            bucket["avg_latency_ms"] = round(r.get("avg_latency_ms") or 0, 1)
+            bucket["max_latency_ms"] = round(r.get("max_latency_ms") or 0, 1)
+            bucket["request_count"] = r.get("request_count", 0) or 0
 
-        buckets = []
-        for t in labels:
-            b = by_t[t]
-            lats = b.pop("latencies")
-            b["avg_latency_ms"] = round(sum(lats) / len(lats), 1) if lats else 0
-            b["max_latency_ms"] = round(max(lats), 1) if lats else 0
-            buckets.append(b)
-
-        return {"buckets": buckets, "range": range_key}
+        return {"buckets": [by_t[t] for t in labels], "range": range_key}
 
     # ── Chain verification ────────────────────────────────────────────────
 
@@ -1107,6 +1156,23 @@ class WalacorLineageReader:
                 return await self.verify_chain(sid)
 
         return await asyncio.gather(*[_verify(sid) for sid in session_ids])
+
+    async def count_sessions_in_window(self, start: str, end: str) -> int:
+        """Distinct sessions with an execution record in [start, end).
+
+        Surfaced by the compliance endpoint alongside the sampled chain
+        verification report so the dashboard can render
+        "(sampled N of M)".
+        """
+        pipeline = [
+            {"$match": {"timestamp": {"$gte": start, "$lt": end}, "session_id": {"$ne": None}}},
+            {"$group": {"_id": "$session_id"}},
+            {"$count": "n"},
+        ]
+        rows = await self._client.query_complex(self._exec_etid, pipeline)
+        if not rows:
+            return 0
+        return int(rows[0].get("n") or 0)
 
     async def get_cost_summary(self, range_key: str = "24h", group_by: str = "model") -> dict:
         interval_map = {"1h": "-1 hour", "24h": "-1 day", "7d": "-7 days", "30d": "-30 days"}

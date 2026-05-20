@@ -235,11 +235,21 @@ async def _compute_shared_report(reader, start: str, end: str) -> dict:
         result = method(*args)
         return await result if inspect.isawaitable(result) else result
 
-    summary, executions, attestations, chain_report = await asyncio.gather(
+    async def _count_sessions():
+        fn = getattr(reader, "count_sessions_in_window", None)
+        if fn is None:
+            return None
+        try:
+            return await _c(fn, start, end)
+        except Exception:
+            return None
+
+    summary, executions, attestations, chain_report, total_sessions = await asyncio.gather(
         _c(reader.get_compliance_summary, start, end),
         _c(reader.get_execution_export, start, end),
         _c(reader.get_attestation_summary, start, end),
         _c(reader.get_chain_verification_report, start, end),
+        _count_sessions(),
     )
     # `get_chain_verification_report` now samples (~50 most-recent sessions)
     # rather than enumerating every session in the window — prod accumulates
@@ -251,7 +261,11 @@ async def _compute_shared_report(reader, start: str, end: str) -> dict:
         "all_valid": all(r.get("valid", False) for r in chain_report),
         "sessions": chain_report,
         "sampled": True,
-        "total_sessions_in_window": summary.get("total_executions") or len(executions),
+        "total_sessions_in_window": (
+            total_sessions
+            if isinstance(total_sessions, int)
+            else (summary.get("total_executions") or len(executions))
+        ),
     }
     return {
         "summary": summary,
