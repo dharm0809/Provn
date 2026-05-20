@@ -202,7 +202,7 @@ function PreviewDrawer({ framework, report, onClose }) {
   const sectionCount = controlRows.filter(r => r.kind === 'section').length;
   const chain = report?.chain_integrity || null;
   return (
-    <div className="cx-overlay-wrap" onClick={onClose}>
+    <div className="cx-overlay" onClick={onClose}>
       <div
         className="card"
         style={{
