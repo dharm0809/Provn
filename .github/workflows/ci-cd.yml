@@ -57,6 +57,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Rebuild the lineage dashboard on every deploy so the shipped
+      # static/ bundle is always derived from the JSX/CSS in this commit.
+      # Without this step, dashboard PRs only ship if the author also
+      # manually committed `src/gateway/lineage/static/assets/*` produced
+      # by a local `npm run build` — a footgun: PR #47 and #48 shipped
+      # source-only and the bundle on prod stayed pinned to the previous
+      # build, silently masking the chart redesign + the hook-order fix.
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: src/gateway/lineage/dashboard/package-lock.json
+
+      - name: Build lineage dashboard (writes src/gateway/lineage/static/)
+        working-directory: src/gateway/lineage/dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
