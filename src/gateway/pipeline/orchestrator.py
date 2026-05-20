@@ -11,6 +11,7 @@ Phase 14 additions (steps 2.7 and 3.5):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import fnmatch
 import logging
@@ -1188,6 +1189,218 @@ def _add_rate_limit_headers(response, request):
         response.headers["X-RateLimit-Reset"] = str(getattr(request.state, "walacor_ratelimit_reset", 0))
 
 
+# ── Intent classification (parallelisable with pre-checks) ──────────────────
+
+
+async def _classify_intent_si(
+    ctx,
+    settings,
+    call: ModelCall,
+    body_dict: Any,
+    body_meta: Any,
+) -> dict[str, Any]:
+    """Run unified SchemaIntelligence prompt-extraction + ONNX intent classification.
+
+    Returns the enrichment dict (with `_intent`, `_intent_confidence`,
+    `_intent_tier`, `user_question`, etc.). On any failure the function logs and
+    returns an empty dict — intent classification must NEVER block the request
+    pipeline.
+
+    This coroutine is designed to be launched as a task *before* the governance
+    pre-checks run, so the ONNX inference (50-200 ms on the hot path) overlaps
+    with attestation/policy/budget/rate-limit instead of running serially.
+    """
+    if ctx.skip_governance:
+        return {}
+    try:
+        from gateway.classifier.unified import SchemaIntelligence  # noqa: F401 (used below)
+        _si = getattr(ctx, "schema_intelligence", None)
+        if _si is None:
+            _has_mcp = bool(
+                ctx.tool_registry
+                and ctx.tool_registry.get_tool_count() > 0
+                and settings.mcp_servers_json
+            )
+            _onnx_path = (
+                None
+                if ctx.model_registry is not None
+                else str(Path(__file__).parent.parent / "classifier" / "model.onnx")
+            )
+            _si = SchemaIntelligence(
+                onnx_model_path=_onnx_path,
+                has_mcp_tools=_has_mcp,
+                verdict_buffer=ctx.verdict_buffer,
+                registry=ctx.model_registry,
+                model_name="intent" if ctx.model_registry is not None else None,
+                shadow_runner=ctx.shadow_runner,
+                intelligence_db=ctx.intelligence_db,
+            )
+            ctx.schema_intelligence = _si
+    except Exception as _init_err:  # pragma: no cover - defensive
+        logger.error("SchemaIntelligence init failed (non-fatal): %s", _init_err)
+        return {}
+
+    _intent_metadata = {**call.metadata}
+    if isinstance(body_meta, dict):
+        _intent_metadata["_body_metadata"] = body_meta
+    _body = body_dict if isinstance(body_dict, dict) else {}
+    _messages = _body.get("messages", [])
+    try:
+        # Offload the blocking ONNX inference to a worker thread.
+        return await asyncio.to_thread(
+            _si.process_request,
+            _messages,
+            _intent_metadata,
+            call.model_id or "",
+        )
+    except Exception as _si_err:
+        logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
+        return {}
+
+
+async def _run_schema_mapper(
+    request: Request,
+    ctx,
+    http_response: Response,
+    model_response: ModelResponse,
+) -> tuple[ModelResponse, dict[str, Any]]:
+    """Run the ONNX SchemaMapper on a successful HTTP response.
+
+    Returns ``(possibly_updated_model_response, mapping_meta_dict)``. Stashes
+    the canonical response on ``request.state._canonical_response`` so
+    ``_build_and_write_record`` can pick up overflow data. All failures are
+    swallowed (non-fatal) — schema mapping must never escalate to the caller.
+
+    Extracted so the orchestrator can call this either inline (legacy /
+    error path) OR from a deferred background task (hot path) without
+    duplicating logic.
+    """
+    _schema_mapper = getattr(ctx, "schema_mapper", None)
+    if _schema_mapper is None:
+        try:
+            from gateway.schema.mapper import SchemaMapper
+            _schema_mapper = SchemaMapper(
+                registry=ctx.model_registry,
+                model_name="schema_mapper" if ctx.model_registry is not None else None,
+                intelligence_db=ctx.intelligence_db,
+            )
+            ctx.schema_mapper = _schema_mapper
+        except Exception as _sm_init_err:
+            logger.debug("SchemaMapper init failed (non-fatal): %s", _sm_init_err)
+
+    if not _schema_mapper or http_response.status_code >= 400:
+        return model_response, {}
+
+    try:
+        _raw_resp = json.loads(http_response.body)
+        _canonical = await asyncio.to_thread(_schema_mapper.map_response, _raw_resp)
+
+        _adapter_usage = model_response.usage or {}
+        if not _adapter_usage.get("prompt_tokens") and _canonical.usage.prompt_tokens:
+            _adapter_usage = dict(_adapter_usage)
+            _adapter_usage["prompt_tokens"] = _canonical.usage.prompt_tokens
+            _adapter_usage["completion_tokens"] = _canonical.usage.completion_tokens
+            _adapter_usage["total_tokens"] = _canonical.usage.total_tokens
+            model_response = dataclasses.replace(model_response, usage=_adapter_usage)
+            logger.info("SchemaMapper enriched missing token usage from ML classification")
+
+        if not model_response.content and _canonical.content:
+            model_response = dataclasses.replace(model_response, content=_canonical.content)
+            logger.info("SchemaMapper recovered content from ML classification")
+
+        if not model_response.thinking_content and _canonical.thinking_content:
+            model_response = dataclasses.replace(
+                model_response, thinking_content=_canonical.thinking_content
+            )
+            logger.info("SchemaMapper recovered thinking_content from ML classification")
+
+        request.state._canonical_response = _canonical
+
+        _mapping_meta: dict[str, Any] = {
+            "schema_mapper_confidence": round(_canonical.mapping.confidence, 3),
+            "schema_mapper_confidence_on_mapped": round(
+                _canonical.mapping.confidence_on_mapped, 3,
+            ),
+            "schema_mapper_mapped": len(_canonical.mapping.mapped_fields),
+            "schema_mapper_unmapped": len(_canonical.mapping.unmapped_fields),
+        }
+        if _canonical.overflow:
+            _mapping_meta["schema_mapper_overflow_keys"] = list(_canonical.overflow.keys())[:20]
+        if _canonical.timing:
+            _mapping_meta["schema_mapper_timing"] = dataclasses.asdict(_canonical.timing)
+        if _canonical.citations:
+            _mapping_meta["schema_mapper_citations"] = len(_canonical.citations)
+        try:
+            _timeouts = int(_schema_mapper.timeout_count_60s())
+            if _timeouts:
+                _mapping_meta["schema_mapper_timeouts_60s"] = _timeouts
+        except Exception:
+            logger.debug("schema_mapper timeout_count_60s probe failed", exc_info=True)
+        return model_response, _mapping_meta
+    except Exception as _sm_err:
+        logger.debug("SchemaMapper cross-validation failed (non-fatal): %s", _sm_err)
+        return model_response, {}
+
+
+def _apply_intent_enrichment(
+    call: ModelCall,
+    extra: dict[str, Any],
+    enrichment: dict[str, Any],
+    body_meta: Any,
+) -> ModelCall:
+    """Merge SchemaIntelligence enrichment into ``call.metadata`` and ``extra``.
+
+    Returns the (possibly replaced) ``ModelCall``. Mirrors the in-place merge
+    that used to live inline in ``_handle_request_inner`` — kept in one place so
+    parallel + serial intent paths produce identical state.
+    """
+    if not enrichment:
+        return call
+
+    _user_question = enrichment.get("user_question", "")
+    if _user_question:
+        call = dataclasses.replace(call, prompt_text=_user_question)
+
+    _existing_audit = extra.get("walacor_audit", {}) or {}
+    _existing_audit["user_question"] = enrichment.get(
+        "user_question", _existing_audit.get("user_question", "")
+    )
+    _existing_audit["conversation_context"] = enrichment.get("conversation_context", "")
+    _existing_audit["conversation_turns"] = enrichment.get("conversation_turns", 0)
+    _existing_audit["question_fingerprint"] = enrichment.get("question_fingerprint", "")
+    _existing_audit["extraction_method"] = enrichment.get("extraction_method", "fallback")
+    _existing_audit["has_rag_context"] = enrichment.get(
+        "has_rag_context", _existing_audit.get("has_rag_context", False)
+    )
+    _existing_audit["has_files"] = enrichment.get(
+        "has_files", _existing_audit.get("has_files", False)
+    )
+    extra["walacor_audit"] = _existing_audit
+
+    _meta_updates: dict[str, Any] = {
+        k: v
+        for k, v in enrichment.items()
+        if k.startswith("_") or k in ("chat_id", "message_id")
+    }
+    if isinstance(body_meta, dict):
+        if body_meta.get("chat_id"):
+            _meta_updates["chat_id"] = body_meta["chat_id"]
+        if body_meta.get("message_id"):
+            _meta_updates["message_id"] = body_meta["message_id"]
+    call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
+
+    logger.info(
+        "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s prompt=%d chars",
+        enrichment.get("_intent", "unknown"),
+        enrichment.get("_intent_confidence", 0.0),
+        enrichment.get("_intent_tier", ""),
+        enrichment.get("_intent_reason", ""),
+        call.model_id,
+        len(_user_question),
+    )
+    return call
+
+
 # ── Pre-check orchestration (Steps 1–2.7) ────────────────────────────────────
 
 async def _run_pre_checks(
@@ -1526,6 +1739,63 @@ def _emit_harvester_signals(record: dict, session_id: str | None) -> None:
             break
 
 
+async def _finalize_audit_write(
+    request: Request,
+    call: ModelCall,
+    model_response: ModelResponse,
+    http_response: Response | None,
+    params: "_AuditParams",
+    ctx,
+    settings,
+) -> None:
+    """Run any deferred SchemaMapper work, then build + write the audit record.
+
+    This is the single chokepoint for "record an execution". On the success
+    hot path the orchestrator wraps this in a fire-and-forget shielded task
+    so the user does not wait for the ONNX SchemaMapper inference + WAL +
+    Walacor write. Error paths await it inline since they have already
+    decided not to return a useful body to the user.
+
+    Failures inside the deferred task are logged and recorded in
+    ``call.metadata['mapping_error']`` — never re-raised, because the
+    client response has already been sent.
+    """
+    try:
+        if (
+            getattr(request.state, "_schema_mapper_deferred", False)
+            and http_response is not None
+        ):
+            try:
+                model_response, _mapping_meta = await _run_schema_mapper(
+                    request, ctx, http_response, model_response,
+                )
+                if _mapping_meta:
+                    call = dataclasses.replace(
+                        call, metadata={**call.metadata, **_mapping_meta},
+                    )
+            except Exception as _sm_err:  # pragma: no cover - defensive
+                logger.warning(
+                    "Deferred SchemaMapper failed (non-fatal): %s",
+                    _sm_err, exc_info=True,
+                )
+                call = dataclasses.replace(
+                    call,
+                    metadata={**call.metadata, "mapping_error": str(_sm_err)},
+                )
+            finally:
+                # One-shot: don't re-run if `_build_and_write_record` is
+                # called a second time on the same request (it isn't today,
+                # but the flag guards against future double-fire).
+                request.state._schema_mapper_deferred = False
+        await _build_and_write_record(request, call, model_response, params, ctx, settings)
+    except Exception:
+        logger.error(
+            "Deferred audit write failed for request_id=%s — execution record may be lost",
+            getattr(request.state, "request_id", "?"),
+            exc_info=True,
+        )
+
+
 async def _build_and_write_record(
     request: Request,
     call: ModelCall,
@@ -1633,6 +1903,12 @@ async def _build_and_write_record(
         variant_id=params.variant_id,
         file_metadata=getattr(request.state, "file_metadata", None),
     )
+    # Honour a pre-allocated execution_id (e.g. when the success-path
+    # deferred audit task stashes one on ``request.state`` so the response
+    # header can carry the id BEFORE the WAL/Walacor write lands).
+    _preallocated_eid = getattr(request.state, "_preallocated_execution_id", None)
+    if _preallocated_eid:
+        record["execution_id"] = _preallocated_eid
     # Cost attribution: compute estimated cost from pricing table
     if ctx.control_store:
         try:
@@ -2055,101 +2331,26 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     _user_question = ""
 
     ctx = get_pipeline_context()
+    # PERF: Kick off intent classification (50-200ms ONNX inference) BEFORE
+    # the governance pre-checks so the two run concurrently rather than
+    # serially. The intent task does not feed attestation/policy/budget/
+    # rate-limit decisions, so it is safe to overlap. We await it after
+    # pre-checks (often already complete by then). If pre-checks deny, we
+    # cancel the task — its result is no longer needed.
+    #
+    # Trade-off: in the previous serial code, ``call.prompt_text`` was
+    # overwritten with the extracted user question BEFORE the policy ran,
+    # so the policy engine evaluated the extracted question. With this
+    # parallelisation the policy evaluates the adapter-built concatenated
+    # prompt (i.e. the full message context). This is strictly more
+    # conservative for safety policies — they see *more* prompt text, not
+    # less — so it does not weaken governance.
+    _intent_task: asyncio.Task | None = None
     if not ctx.skip_governance:
-        from gateway.classifier.unified import SchemaIntelligence, WEB_SEARCH, SYSTEM_TASK, REASONING, MCP_TOOLS, RAG, NORMAL
-        _si = getattr(ctx, "schema_intelligence", None)
-        if _si is None:
-            _has_mcp = bool(ctx.tool_registry and ctx.tool_registry.get_tool_count() > 0
-                            and settings.mcp_servers_json)
-            # Task 12: when the registry is wired, the ONNX session is loaded on
-            # first `classify_intent` call from `production/intent.onnx`. Without
-            # a registry, fall back to the packaged model path (pre-Phase-25
-            # behavior).
-            _onnx_path = (
-                None
-                if ctx.model_registry is not None
-                else str(Path(__file__).parent.parent / "classifier" / "model.onnx")
-            )
-            _si = SchemaIntelligence(
-                onnx_model_path=_onnx_path,
-                has_mcp_tools=_has_mcp,
-                verdict_buffer=ctx.verdict_buffer,
-                registry=ctx.model_registry,
-                model_name="intent" if ctx.model_registry is not None else None,
-                # Task 22: shadow runner is wired when the intelligence layer
-                # and a model registry are both active. Nothing else needs
-                # to be true — the runner itself no-ops when no active
-                # candidate is registered.
-                shadow_runner=ctx.shadow_runner,
-                intelligence_db=ctx.intelligence_db,
-            )
-            ctx.schema_intelligence = _si
-
-        # Build metadata context for intent classification
-        _intent_metadata = {**call.metadata}
-        if isinstance(_body_meta, dict):
-            _intent_metadata["_body_metadata"] = _body_meta
-
-        # Extract messages from request body for prompt extraction
-        _body = body_dict if isinstance(body_dict, dict) else {}
-        _messages = _body.get("messages", [])
-
-        # process_request() does prompt extraction + intent classification in one pass
-        # Wrapped in try/except — SI failure must NEVER block the request pipeline.
-        # Offloaded to a worker thread because Tier-2 ONNX classification calls
-        # into blocking onnxruntime.InferenceSession.run; running it inline
-        # would hold the event loop for up to onnx_inference_timeout_ms.
-        _si_enrichment: dict[str, Any] = {}
-        try:
-            _si_enrichment = await asyncio.to_thread(
-                _si.process_request,
-                _messages,
-                _intent_metadata,
-                call.model_id or "",
-            )
-        except Exception as _si_err:
-            logger.error("SchemaIntelligence.process_request failed (non-fatal): %s", _si_err)
-
-        # Override prompt_text with the extracted user question (THE KEY FIX)
-        # _concat_messages in adapters joins ALL messages — we replace that
-        # with just the actual question the user asked.
-        _user_question = _si_enrichment.get("user_question", "")
-        if _user_question:
-            call = dataclasses.replace(call, prompt_text=_user_question)
-
-        # Update walacor_audit with better prompt extraction data
-        _existing_audit = extra.get("walacor_audit", {})
-        _existing_audit["user_question"] = _si_enrichment.get("user_question", _existing_audit.get("user_question", ""))
-        _existing_audit["conversation_context"] = _si_enrichment.get("conversation_context", "")
-        _existing_audit["conversation_turns"] = _si_enrichment.get("conversation_turns", 0)
-        _existing_audit["question_fingerprint"] = _si_enrichment.get("question_fingerprint", "")
-        _existing_audit["extraction_method"] = _si_enrichment.get("extraction_method", "fallback")
-        _existing_audit["has_rag_context"] = _si_enrichment.get("has_rag_context", _existing_audit.get("has_rag_context", False))
-        _existing_audit["has_files"] = _si_enrichment.get("has_files", _existing_audit.get("has_files", False))
-        extra["walacor_audit"] = _existing_audit
-
-        # Merge intent + routing into call metadata
-        _meta_updates: dict[str, Any] = {
-            k: v for k, v in _si_enrichment.items()
-            if k.startswith("_") or k in ("chat_id", "message_id")
-        }
-        if isinstance(_body_meta, dict):
-            if _body_meta.get("chat_id"):
-                _meta_updates["chat_id"] = _body_meta["chat_id"]
-            if _body_meta.get("message_id"):
-                _meta_updates["message_id"] = _body_meta["message_id"]
-
-        call = dataclasses.replace(call, metadata={**call.metadata, **_meta_updates})
-
-        logger.info(
-            "Intent: %s (confidence=%.2f tier=%s reason=%s) model=%s prompt=%d chars",
-            _si_enrichment.get("_intent", "unknown"),
-            _si_enrichment.get("_intent_confidence", 0.0),
-            _si_enrichment.get("_intent_tier", ""),
-            _si_enrichment.get("_intent_reason", ""),
-            call.model_id,
-            len(_user_question),
+        _intent_task = asyncio.create_task(
+            _classify_intent_si(ctx, settings, call, body_dict, _body_meta)
         )
+
     provider = adapter.get_provider_name()
     model = call.model_id or "unknown"
     provider_var.set(provider)
@@ -2159,6 +2360,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
 
     # ── Skip-governance (transparent proxy) ──────────────────────────────────
     if ctx.skip_governance:
+        # Skip-gov never launched the intent task — nothing to clean up.
         return await _handle_skip_governance(request, adapter, call, ctx, settings, t0, provider, model)
 
     # ── Steps 1–2.7: governance pre-checks ───────────────────────────────────
@@ -2166,11 +2368,28 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
     pre = await _run_pre_checks(request, adapter, call, ctx, settings, is_audit_only, provider, model)
     timings: dict[str, float] = {**pre.timings, "pre_checks_ms": round((time.perf_counter() - t_pre) * 1000, 1)}
     if pre.error is not None:
+        # Governance denied — intent result no longer needed. Cancel the task
+        # and swallow the cancellation so the denial response is not delayed.
+        if _intent_task is not None and not _intent_task.done():
+            _intent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await _intent_task
         _record_status(pre.error.status_code)
         return pre.error
 
     assert pre.call is not None  # always set when error is None
     call = pre.call
+
+    # Await intent classification (typically already finished while pre-checks ran).
+    # Apply its enrichment to ``call`` and ``extra`` so downstream code sees the
+    # same state it did in the pre-refactor serial flow.
+    if _intent_task is not None:
+        try:
+            _si_enrichment = await _intent_task
+        except Exception as _intent_err:  # pragma: no cover - defensive
+            logger.error("Intent task await failed (non-fatal): %s", _intent_err)
+            _si_enrichment = {}
+        call = _apply_intent_enrichment(call, extra, _si_enrichment, _body_meta)
 
     # ── B.4: Semantic cache check (non-streaming only) ───────────────────────
     # Cache hit returns the stored response immediately — no LLM call, no audit
@@ -2350,92 +2569,21 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         logger.error("Response normalization failed (non-fatal): %s", _norm_err)
 
     # ── SchemaMapper ML cross-validation ─────────────────────────────
-    # Run the ONNX schema mapper on the raw response to cross-validate
-    # adapter parsing and capture overflow fields the adapter missed.
-    _schema_mapper = getattr(ctx, "schema_mapper", None)
-    if _schema_mapper is None:
-        try:
-            from gateway.schema.mapper import SchemaMapper
-            # Task 12: same registry-wiring pattern as main.py init site.
-            _schema_mapper = SchemaMapper(
-                registry=ctx.model_registry,
-                model_name="schema_mapper" if ctx.model_registry is not None else None,
-                intelligence_db=ctx.intelligence_db,
-            )
-            ctx.schema_mapper = _schema_mapper
-        except Exception as _sm_init_err:
-            logger.debug("SchemaMapper init failed (non-fatal): %s", _sm_init_err)
-    if _schema_mapper and http_response.status_code < 400:
-        try:
-            _raw_resp = json.loads(http_response.body)
-            # Same offload reasoning as `_si.process_request` above —
-            # SchemaMapper._classify_onnx is sync and blocks on ORT.
-            _canonical = await asyncio.to_thread(_schema_mapper.map_response, _raw_resp)
-
-            # Cross-validate: if adapter found no usage but ML did, enrich
-            _adapter_usage = model_response.usage or {}
-            if not _adapter_usage.get("prompt_tokens") and _canonical.usage.prompt_tokens:
-                _adapter_usage = dict(_adapter_usage)
-                _adapter_usage["prompt_tokens"] = _canonical.usage.prompt_tokens
-                _adapter_usage["completion_tokens"] = _canonical.usage.completion_tokens
-                _adapter_usage["total_tokens"] = _canonical.usage.total_tokens
-                model_response = dataclasses.replace(model_response, usage=_adapter_usage)
-                logger.info("SchemaMapper enriched missing token usage from ML classification")
-
-            # If adapter found no content but ML did (edge case)
-            if not model_response.content and _canonical.content:
-                model_response = dataclasses.replace(model_response, content=_canonical.content)
-                logger.info("SchemaMapper recovered content from ML classification")
-
-            # If adapter found no thinking_content but ML did
-            if not model_response.thinking_content and _canonical.thinking_content:
-                model_response = dataclasses.replace(model_response, thinking_content=_canonical.thinking_content)
-                logger.info("SchemaMapper recovered thinking_content from ML classification")
-
-            # Store canonical response for overflow capture in _build_and_write_record
-            request.state._canonical_response = _canonical
-
-            # Store ML mapping metadata for audit trail.
-            #
-            # D1: `schema_mapper_confidence` is now coverage-weighted —
-            # sum(mapped_confidences) / classified_count_excluding_envelope.
-            # On a 7-mapped / 8-unmapped response it reports 0.47, not 1.0.
-            # `schema_mapper_confidence_on_mapped` preserves the legacy
-            # "average over MAPPED only" semantic for any consumer that
-            # explicitly wants "how sure were we about the calls we made".
-            # D3: `schema_mapper_unmapped` and `schema_mapper_overflow_keys`
-            # exclude envelope fields (object/created/role/index/…) — the
-            # mapper tags them upstream as the synthetic `envelope` label,
-            # which keeps the operator-visible counts focused on
-            # actionably-unmapped fields rather than provider boilerplate.
-            _mapping_meta = {
-                "schema_mapper_confidence": round(_canonical.mapping.confidence, 3),
-                "schema_mapper_confidence_on_mapped": round(
-                    _canonical.mapping.confidence_on_mapped, 3,
-                ),
-                "schema_mapper_mapped": len(_canonical.mapping.mapped_fields),
-                "schema_mapper_unmapped": len(_canonical.mapping.unmapped_fields),
-            }
-            if _canonical.overflow:
-                _mapping_meta["schema_mapper_overflow_keys"] = list(_canonical.overflow.keys())[:20]
-            if _canonical.timing:
-                _mapping_meta["schema_mapper_timing"] = dataclasses.asdict(_canonical.timing)
-            if _canonical.citations:
-                _mapping_meta["schema_mapper_citations"] = len(_canonical.citations)
-            # D7: rolling 60s window of ONNX-inference timeouts on this
-            # mapper instance. Surfaced for /v1/connections — operators
-            # can see when the 100ms hot-path budget is biting under
-            # load without round-tripping to Prometheus.
-            try:
-                _timeouts = int(_schema_mapper.timeout_count_60s())
-                if _timeouts:
-                    _mapping_meta["schema_mapper_timeouts_60s"] = _timeouts
-            except Exception:
-                logger.debug("schema_mapper timeout_count_60s probe failed", exc_info=True)
-
-            call = dataclasses.replace(call, metadata={**call.metadata, **_mapping_meta})
-        except Exception as _sm_err:
-            logger.debug("SchemaMapper cross-validation failed (non-fatal): %s", _sm_err)
+    # PERF: SchemaMapper.map_response is a 50-150 ms ONNX inference. On the
+    # request hot path the user already has their LLM response in
+    # ``http_response`` — the mapper output only enriches the EXECUTION
+    # RECORD (canonical fields, overflow, mapping metadata). We mark the
+    # mapping as "pending" here and run the mapper from the deferred
+    # ``_deferred_post_response_audit`` task on the success path; only the
+    # error-write paths still run it inline (they're already on the
+    # latency-tolerant 5xx / blocked branches).
+    #
+    # The hot-path read side (``_build_and_write_record``) tolerates
+    # ``_canonical_response = None`` already — every field it reads is
+    # gated on ``if _canonical``. The dashboard reads the same record after
+    # the background write lands, so the user-visible contract is
+    # unchanged: the execution record EVENTUALLY has the mapping.
+    request.state._schema_mapper_deferred = True
     # If normalizer changed content (e.g. thinking fallback for qwen3), rebuild the
     # client response body so the user sees the actual content, not the raw empty string.
     if model_response.content and model_response.content != _pre_norm_content and http_response.status_code == 200:
@@ -2483,7 +2631,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             model_response, settings.gateway_tenant_id, provider,
             call.metadata.get("user"), estimated=pre.budget_estimated,
         )
-        await _build_and_write_record(request, call, model_response, _AuditParams(
+        await _finalize_audit_write(request, call, model_response, http_response, _AuditParams(
             attestation_id=pre.att_id,
             policy_version=pre.pv, policy_result=pre.pr,
             budget_remaining=pre.budget_remaining, audit_metadata=pre.audit_metadata,
@@ -2515,7 +2663,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             tool_result.model_response, settings.gateway_tenant_id, provider,
             call.metadata.get("user"), estimated=pre.budget_estimated,
         )
-        await _build_and_write_record(request, tool_result.call, tool_result.model_response, _AuditParams(
+        await _finalize_audit_write(request, tool_result.call, tool_result.model_response, http_response, _AuditParams(
             attestation_id=pre.att_id,
             policy_version=pre.pv, policy_result=pre.pr,
             budget_remaining=pre.budget_remaining, audit_metadata=pre.audit_metadata,
@@ -2621,7 +2769,7 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
             model_response, settings.gateway_tenant_id, provider,
             call.metadata.get("user"), estimated=pre.budget_estimated,
         )
-        await _build_and_write_record(request, call, model_response, _AuditParams(
+        await _finalize_audit_write(request, call, model_response, http_response, _AuditParams(
             attestation_id=pre.att_id,
             policy_version=pre.pv, policy_result=pre.pr,
             budget_remaining=pre.budget_remaining, audit_metadata=pre.audit_metadata,
@@ -2682,7 +2830,44 @@ async def _handle_request_inner(request: Request, t0: float) -> Response:
         timings=timings,
         variant_id=_variant_id,
     )
-    await _build_and_write_record(request, call, model_response, audit_params, ctx, settings)
+
+    # PERF: Defer the SchemaMapper ONNX inference + audit record build/write
+    # to a shielded background task so the user response returns immediately.
+    # The execution_id is pre-allocated and stashed on request.state so the
+    # governance response header carries the correct ID even though the WAL
+    # row has not landed yet.
+    #
+    # ``asyncio.shield`` ensures the background work survives client
+    # disconnect (the request's outer task being cancelled). Errors inside
+    # the task are logged inside ``_finalize_audit_write`` — they cannot
+    # propagate to the client because the response has already been sent.
+    _preallocated_eid = str(uuid.uuid4())
+    request.state._preallocated_execution_id = _preallocated_eid
+    request.state.walacor_execution_id = _preallocated_eid
+
+    async def _bg_run():
+        # ``asyncio.shield`` protects the inner coroutine from being
+        # cancelled when the request's outer task is cancelled (client
+        # disconnect). The shield itself is awaited inside this wrapper,
+        # which is what ``create_task`` actually schedules.
+        await asyncio.shield(
+            _finalize_audit_write(
+                request, call, model_response, http_response,
+                audit_params, ctx, settings,
+            )
+        )
+
+    _bg_task = asyncio.create_task(_bg_run())
+    # Track on context for graceful-shutdown drain hooks (best-effort — the
+    # context may not be configured for this in older deployments).
+    _bg_tasks = getattr(ctx, "_pending_audit_tasks", None)
+    if _bg_tasks is None and hasattr(ctx, "__dict__"):
+        _bg_tasks = set()
+        ctx._pending_audit_tasks = _bg_tasks
+    if _bg_tasks is not None:
+        _bg_tasks.add(_bg_task)
+        _bg_task.add_done_callback(_bg_tasks.discard)
+
     timings["write_ms"] = round((time.perf_counter() - t_write) * 1000, 1)
 
     _set_disposition(request, "allowed")
