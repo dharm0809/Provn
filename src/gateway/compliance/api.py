@@ -87,13 +87,36 @@ async def compliance_export(request: Request) -> Response:
     chain_report = shared["chain_report"]
     chain_integrity = shared["chain_integrity"]
 
-    if fmt == "csv":
-        return _build_csv_response(executions, start, end)
+    # CSV/PDF exports need the FULL census, not the sampled set used for
+    # the dashboard JSON. The shared loader caps executions at the reader's
+    # default (~1000) to keep dashboard refreshes fast; CSV/PDF callers
+    # are explicit user actions, so the extra latency is acceptable.
+    if fmt in ("csv", "pdf"):
+        import inspect as _inspect
+        census_result = ctx.lineage_reader.get_execution_export(start, end, limit=10000)
+        try:
+            if _inspect.isawaitable(census_result):
+                census_executions = await asyncio.wait_for(census_result, timeout=_REPORT_TIMEOUT_S)
+            else:
+                census_executions = census_result
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                {"error": (
+                    f"Compliance export census timed out after {_REPORT_TIMEOUT_S:.0f}s. "
+                    "Narrow the date range and retry — wide windows produce very "
+                    "large exports that exceed the cap."
+                )},
+                status_code=504,
+            )
 
-    if fmt == "pdf":
-        return await _build_pdf_response(
-            summary, attestations, executions, chain_integrity, framework, start, end,
-        )
+        if fmt == "csv":
+            return _build_csv_response(census_executions, start, end)
+
+        if fmt == "pdf":
+            return await _build_pdf_response(
+                summary, attestations, census_executions, chain_integrity,
+                framework, start, end,
+            )
 
     # Default: JSON
     framework_mapping = _get_framework_mapping(framework, summary, attestations, executions)
@@ -212,10 +235,17 @@ async def _compute_shared_report(reader, start: str, end: str) -> dict:
         _c(reader.get_attestation_summary, start, end),
         _c(reader.get_chain_verification_report, start, end),
     )
+    # `get_chain_verification_report` now samples (~50 most-recent sessions)
+    # rather than enumerating every session in the window — prod accumulates
+    # thousands of sessions and verifying every one per page load was the
+    # primary cause of the 45s timeout. Surface that honestly so the
+    # dashboard can render "X of N verified" instead of implying a census.
     chain_integrity = {
         "sessions_verified": len(chain_report),
         "all_valid": all(r.get("valid", False) for r in chain_report),
         "sessions": chain_report,
+        "sampled": True,
+        "total_sessions_in_window": summary.get("total_executions") or len(executions),
     }
     return {
         "summary": summary,
