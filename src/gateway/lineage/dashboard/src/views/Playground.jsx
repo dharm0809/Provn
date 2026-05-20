@@ -40,7 +40,15 @@ function fmtMs(n) {
 export default function Playground({ navigate }) {
   const [prompt, setPrompt] = useState('Summarize the governance posture for our AI gateway in 3 bullets.');
   const [system, setSystem] = useState('');
-  const [model, setModel] = useState('llama3.1:8b');
+  // Default to an attested OpenAI/Anthropic model rather than llama3.1:8b.
+  // On prod, `llama3.1:8b` is attested for ollama but the path-based
+  // router for /v1/chat/completions resolves to the openai provider —
+  // which doesn't list llama3.1:8b in its attestation set, so a fresh
+  // user clicking Send immediately hits a 403 `model_not_attested`.
+  // claude-haiku-4-5 is the cheapest attested option and demonstrates
+  // the full governance pipeline without confusing the operator on
+  // first run.
+  const [model, setModel] = useState('claude-haiku-4-5-20251001');
   const [creativity, setCreativity] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(1024);
   const [busy, setBusy] = useState(false);
@@ -133,11 +141,16 @@ export default function Playground({ navigate }) {
               className="form-input mono"
               value={model}
               onChange={e => setModel(e.target.value)}
-              placeholder="llama3.1:8b"
+              placeholder="claude-haiku-4-5-20251001"
               list="pg-model-suggestions"
             />
+            {/* Suggestions are attested OpenAI/Anthropic models on the
+                default prod attestation set. Ollama-routed models
+                (llama3.1:8b, qwen, mistral, …) require WALACOR_PROVIDER_OLLAMA_URL
+                + matching attestation on the openai provider — the
+                default deployment doesn't ship them, so seeing them
+                in the dropdown sends users into a 403 on first click. */}
             <datalist id="pg-model-suggestions">
-              <option value="llama3.1:8b" />
               <option value="claude-haiku-4-5-20251001" />
               <option value="claude-sonnet-4-6" />
               <option value="claude-opus-4-7" />
