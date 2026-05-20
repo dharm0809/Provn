@@ -83,9 +83,31 @@ class _Dep03OllamaReachable:
         settings = get_settings()
         elapsed_ms = lambda: int((time.monotonic() - t0) * 1000)
 
-        needs_ollama = settings.llama_guard_enabled or bool(settings.provider_ollama_url)
-        if not needs_ollama:
-            return CheckResult(status="green", detail="No Ollama-dependent feature enabled", elapsed_ms=elapsed_ms())
+        # "needs_ollama" was previously driven by the config DEFAULTS, not by
+        # what the operator actually chose. `llama_guard_enabled` defaults to
+        # True and `provider_ollama_url` has a non-empty default of
+        # `http://localhost:11434` — so on any deployment that doesn't run
+        # Ollama (e.g. EC2 prod with OpenAI + Anthropic backends), the check
+        # fired red unconditionally. The intent of DEP-03 is "if THIS
+        # deployment depends on Ollama, is it reachable?" Treat "operator
+        # explicitly opted in" as the signal — checked via pydantic's
+        # `model_fields_set`, which records exactly which fields received
+        # an env/config override versus inheriting the default.
+        explicitly_opted_in = (
+            "llama_guard_enabled" in settings.model_fields_set
+            or "provider_ollama_url" in settings.model_fields_set
+            or "llama_guard_ollama_url" in settings.model_fields_set
+        )
+        if not explicitly_opted_in:
+            return CheckResult(
+                status="green",
+                detail=(
+                    "Ollama not configured for this deployment "
+                    "(set WALACOR_LLAMA_GUARD_ENABLED or WALACOR_PROVIDER_OLLAMA_URL "
+                    "to enable the probe)"
+                ),
+                elapsed_ms=elapsed_ms(),
+            )
 
         url = settings.provider_ollama_url.rstrip("/") + "/api/tags"
         try:
