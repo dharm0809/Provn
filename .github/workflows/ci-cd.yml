@@ -35,6 +35,23 @@ jobs:
       - name: Dashboard placeholder / dead-control guard
         run: python scripts/check_dashboard_placeholders.py
 
+      # Catch React Rules-of-Hooks violations BEFORE they merge.
+      # This session's blank-page bug (PR #67) was a hook placed below
+      # an early return — exactly what this rule flags. Install eslint +
+      # the rules-of-hooks plugin transiently (--no-save so the lockfile
+      # stays stable) and lint the dashboard sources.
+      - name: Set up Node 20 (for dashboard lint)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Lint dashboard (react-hooks/rules-of-hooks)
+        working-directory: src/gateway/lineage/dashboard
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            eslint@^8 eslint-plugin-react-hooks@^4
+          npx eslint 'src/**/*.{js,jsx}' --max-warnings=0
+
       - name: Run unit tests
         run: python -m pytest tests/unit/ -x -q --tb=short 2>&1 | tail -20
 
