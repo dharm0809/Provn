@@ -5,9 +5,12 @@ and record a paired comparison". Three concerns:
 
 1. **Session cache** — each candidate has its own `InferenceSession`;
    loading ORT costs ~10-50ms so we keep a per-(model, version) cache.
-   When a candidate is promoted or rejected the registry's marker moves
-   and the cache entry for the old version stays resident — acceptable,
-   process restart clears it; a dedicated evict path is Phase H work.
+   On promotion, `ShadowRunner` subscribes to the registry's promotion
+   lifecycle and EAGERLY evicts every cached session for that model
+   (old production + losing candidates) so RAM is reclaimed immediately
+   rather than leaking until process restart. Long-running processes
+   that go through many promotions used to accumulate ~5-10 MB per
+   stranded ONNX session; that's gone.
 2. **Row recording** — paired `(production_prediction,
    candidate_prediction)` + errors land in `shadow_comparisons`. This
    is what Task 23's metrics module reads.
@@ -28,6 +31,7 @@ import asyncio
 import hashlib
 import logging
 import sqlite3
+import sys
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -53,7 +57,7 @@ class ShadowRunner:
     shape. This runner stays model-agnostic.
     """
 
-    def __init__(self, db: IntelligenceDB) -> None:
+    def __init__(self, db: IntelligenceDB, registry: Any | None = None) -> None:
         self._db = db
         # Keyed by `(model, version)`. `InferenceSession` objects are
         # safe to share across asyncio tasks on the same loop (ORT
@@ -64,6 +68,52 @@ class ShadowRunner:
         # construct an `InferenceSession` for the same key. The loser's
         # session leaks in ORT's arena. Serialize the check-then-set.
         self._sessions_lock = threading.Lock()
+        if registry is not None:
+            self.attach_to_registry(registry)
+
+    def attach_to_registry(self, registry: Any) -> None:
+        """Subscribe to `registry.promote()` so every promotion eagerly evicts
+        cached sessions for the affected model.
+
+        Idempotent at the registry level only if the registry de-dupes
+        subscribers; `ModelRegistry` does not, so call this once at wire-up.
+        The subscription is the load-bearing eviction path — calling
+        `evict_old_sessions` from a request handler is now redundant but
+        harmless (the dict will already be empty for that model).
+        """
+        registry.subscribe_promotion(self._on_promotion)
+
+    def _on_promotion(self, model: str, version: str) -> None:
+        """Promotion-event callback: drop ALL cached sessions for `model`.
+
+        The just-promoted version is now served from the production
+        session (which is owned by the ONNX client, NOT this cache —
+        clients rebuild via `reload.maybe_reload`). Every candidate
+        session for `model`, including the winner, is dead weight in
+        this cache after promotion: the winner is the new production
+        and is loaded through the client's reload path, and losers are
+        never reused. Evict the lot.
+
+        Synchronous — a dict pop under a brief lock. Runs inside the
+        registry's promotion lock so a concurrent shadow miss can't
+        repopulate the cache before this finishes.
+        """
+        bytes_freed = 0
+        with self._sessions_lock:
+            stale_keys = [k for k in self._sessions if k[0] == model]
+            for key in stale_keys:
+                sess = self._sessions.pop(key, None)
+                if sess is not None:
+                    try:
+                        bytes_freed += sys.getsizeof(sess)
+                    except Exception:
+                        pass
+        if stale_keys:
+            logger.info(
+                "shadow sessions evicted on promotion: model=%s version=%s "
+                "count=%d bytes_freed≈%d",
+                model, version, len(stale_keys), bytes_freed,
+            )
 
     def evict_old_sessions(self, model: str, current_version: str | None = None) -> int:
         """Drop cached `InferenceSession` rows for `model` other than `current_version`.

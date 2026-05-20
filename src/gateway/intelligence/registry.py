@@ -20,8 +20,11 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # Canonical set of model names this registry serves. Matches the `model_name`
 # strings recorded by `ModelVerdict` (see `intelligence/types.py`) and the
@@ -83,6 +86,33 @@ class ModelRegistry:
         # clients can seed `_last_generation=-1` and be guaranteed to reload
         # on first inference after wiring.
         self._generations: dict[str, int] = {m: 0 for m in ALLOWED_MODEL_NAMES}
+        # Promotion lifecycle subscribers. Fired inside `promote()` after the
+        # filesystem swap + generation bump succeed, with `(model, version)`.
+        # Subscribers run synchronously; exceptions are logged + swallowed so
+        # one bad listener can't poison a promotion. Used by `ShadowRunner` to
+        # eagerly evict cached `InferenceSession`s on promotion instead of
+        # leaking them until process restart.
+        self._promotion_listeners: list[Callable[[str, str], None]] = []
+
+    def subscribe_promotion(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback fired after every successful `promote(model, version)`.
+
+        Callback signature: `(model: str, version: str) -> None`. Called
+        synchronously from inside `promote()`'s per-model lock, after the
+        filesystem swap + generation bump. Exceptions are caught and logged
+        — a misbehaving subscriber must not break promotion.
+        """
+        self._promotion_listeners.append(callback)
+
+    def _emit_promotion(self, model: str, version: str) -> None:
+        for cb in self._promotion_listeners:
+            try:
+                cb(model, version)
+            except Exception:
+                logger.exception(
+                    "promotion listener failed for model=%s version=%s",
+                    model, version,
+                )
 
     def ensure_structure(self) -> None:
         for sub in ("production", "candidates", "archive", "archive/failed"):
@@ -304,6 +334,11 @@ class ModelRegistry:
             # Only bump after both renames succeed — partial state must not
             # trigger client reloads onto a half-swapped production file.
             self._generations[model] += 1
+            # Fire promotion subscribers (e.g. `ShadowRunner` session
+            # eviction) under the lock so a concurrent shadow miss can't
+            # repopulate the cache with the just-archived version between
+            # the bump and the evict.
+            self._emit_promotion(model, version)
 
     async def rollback(self, model: str, archived_filename: str) -> None:
         """Restore a previously archived version to production.
