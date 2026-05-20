@@ -40,22 +40,58 @@ class _Sec01ApiKeyEnforced:
             )
         auto_generated = [k for k in keys if k.startswith("wgk-")]
         if len(auto_generated) == len(keys):
-            from gateway.auth.bootstrap_key import bootstrap_key_stable
-            stable = bootstrap_key_stable(settings.wal_path)
-            detail = (
-                f"{len(keys)} auto-generated wgk-* key(s) in use — "
-                + ("recommend moving to a secret store" if stable
-                   else "key rotating on every restart (persistence failed)")
-            )
+            # Refined semantic: amber fires only when there's a real, actionable
+            # problem. The previous "always amber on wgk-* keys" conflated two
+            # very different situations:
+            #
+            #   (1) The bootstrap key persists across restarts but the operator
+            #       hasn't moved to a managed secret. Sessions don't break;
+            #       the credential is just stored locally instead of in a
+            #       secret manager. That's an *info* nudge, not a readiness
+            #       degrade — green with a detail string is the honest answer.
+            #
+            #   (2) The bootstrap key isn't persisting (wal directory not
+            #       writable, was deleted, etc.). Sessions DO break on every
+            #       restart, callers re-auth constantly. That's a real
+            #       operational problem — amber, with the diagnosed reason
+            #       in evidence so the operator can fix the underlying cause
+            #       (volume mount, perms, ENOSPC) without grepping logs.
+            from gateway.auth.bootstrap_key import bootstrap_key_status
+            status = bootstrap_key_status(settings.wal_path)
+            stable = bool(status["stable"])
+            evidence = {
+                "key_count": len(keys),
+                "auto_generated": len(auto_generated),
+                "bootstrap_key_stable": stable,
+                "bootstrap_key_path": status["path"],
+            }
+            if not stable:
+                evidence["bootstrap_key_reason"] = status["reason"]
+                if "writable" in status:
+                    evidence["wal_dir_writable"] = status["writable"]
+                return CheckResult(
+                    status="amber",
+                    detail=(
+                        f"{len(keys)} auto-generated wgk-* key(s) — "
+                        f"persistence broken: {status['reason']}"
+                    ),
+                    remediation=(
+                        "Restore the wal volume mount (or fix permissions on "
+                        f"{status['path']}'s parent) so the bootstrap key "
+                        "survives restarts; OR set WALACOR_GATEWAY_API_KEYS "
+                        "to a credential from your secret manager."
+                    ),
+                    evidence=evidence,
+                    elapsed_ms=elapsed,
+                )
             return CheckResult(
-                status="amber",
-                detail=detail,
-                remediation="Replace auto-generated keys with stable credentials from your secret manager",
-                evidence={
-                    "key_count": len(keys),
-                    "auto_generated": len(auto_generated),
-                    "bootstrap_key_stable": stable,
-                },
+                status="green",
+                detail=(
+                    f"{len(keys)} auto-generated wgk-* key(s) in use, "
+                    "persisted stably across restarts — consider migrating "
+                    "to a managed secret for multi-instance deployments"
+                ),
+                evidence=evidence,
                 elapsed_ms=elapsed,
             )
         return CheckResult(
