@@ -19,7 +19,20 @@ from gateway.connections.builder import build_snapshot
 
 logger = logging.getLogger(__name__)
 
-_TTL_S = 3.0
+# 45s TTL outlives the ObservabilityPrecomputeWorker's 30s tick, so a
+# snapshot warmed by the worker stays fresh for at least one request
+# cycle. Pre-fix the TTL was 3s — the cache expired between every
+# precompute tick, so requests routinely paid a full cold-build (~8s
+# pre-PR for connection tiles built serially; ~1s after that fix). On
+# the dashboard's 3s poll cadence this meant every poll triggered a
+# fresh build, defeating the worker entirely.
+#
+# Bounded-staleness rationale: connections tiles are operational health
+# signals — provider error rates, WAL backlog, attestation count. A
+# 45s-stale snapshot is fine for an operator dashboard. The
+# `snapshot_at` field is surfaced in the response so callers can see
+# the actual freshness.
+_TTL_S = 45.0
 _CACHE: dict = {"snapshot": None, "ts": 0.0}
 _LOCK: asyncio.Lock | None = None
 
