@@ -943,17 +943,35 @@ class WalacorLineageReader:
         # whether analyzers actually RAN on traffic, which is what the
         # compliance score needs — not just whether analyzers were
         # configured at boot time.
+        #
+        # Pre-fix this pulled `metadata_json` for EVERY execution in the
+        # window, then iterated in Python. On prod that's tens of MB
+        # downloaded over HTTP per refresh — the compliance dashboard
+        # timed out at 45s with this and the chain-verification fan-out
+        # together. Cap the sample at SAMPLE_LIMIT to keep the payload
+        # bounded; the percentage is statistically valid on any
+        # reasonable sample. total_exec is reported separately from the
+        # sample size so the UI can disclose "X% based on sample of N".
+        SAMPLE_LIMIT = 500
         ca_pipeline = [
             {"$match": {"timestamp": {"$gte": start, "$lt": end}}},
+            {"$sort": {"timestamp": -1}},  # most recent first — fresher signal
+            {"$limit": SAMPLE_LIMIT},
             {"$project": {"metadata_json": 1, "content_analysis": 1}},
         ]
         ca_rows = await self._client.query_complex(self._exec_etid, ca_pipeline)
-        total_exec = len(ca_rows)
-        analyzed = 0
-        for r in ca_rows:
-            if _has_content_analysis(r):
-                analyzed += 1
-        coverage_pct = round(analyzed / total_exec * 100, 1) if total_exec else 0.0
+        sample_size = len(ca_rows)
+        analyzed = sum(1 for r in ca_rows if _has_content_analysis(r))
+        coverage_pct = round(analyzed / sample_size * 100, 1) if sample_size else 0.0
+
+        # Separate total_executions count (a cheap aggregate) from the
+        # bounded sample used for coverage — they're not the same number.
+        total_exec_pipeline = [
+            {"$match": {"timestamp": {"$gte": start, "$lt": end}}},
+            {"$group": {"_id": None, "count": {"$sum": 1}}},
+        ]
+        total_exec_rows = await self._client.query_complex(self._exec_etid, total_exec_pipeline)
+        total_exec = total_exec_rows[0]["count"] if total_exec_rows else 0
 
         return {
             "total_requests": total,
@@ -963,9 +981,22 @@ class WalacorLineageReader:
             "total_executions": total_exec,
             "content_analysis_coverage_pct": coverage_pct,
             "content_analysis_covered": analyzed,
+            "content_analysis_sample_size": sample_size,
+            "content_analysis_sampled": sample_size < total_exec,
         }
 
-    async def get_execution_export(self, start: str, end: str, limit: int = 10000) -> list[dict]:
+    async def get_execution_export(self, start: str, end: str, limit: int = 1000) -> list[dict]:
+        """Pull executions in [start, end), sorted oldest-first.
+
+        Default limit lowered from 10000 to 1000: the compliance JSON
+        endpoint returns the full execution list inline, and at prod
+        scale 10k full records is megabytes of JSON over the wire per
+        page load. CSV export callers pass an explicit higher limit
+        when they need the census; the compliance dashboard's score
+        only needs a sample, and 1000 is more than enough to derive
+        per-model/per-attestation aggregates for the audit-readiness
+        scorer.
+        """
         pipeline = [
             {"$match": {"timestamp": {"$gte": start, "$lt": end}}},
             {"$sort": {"timestamp": 1}},
@@ -997,30 +1028,45 @@ class WalacorLineageReader:
             for r in rows
         ]
 
-    async def get_chain_verification_report(self, start: str, end: str) -> list[dict]:
-        """Verify chain integrity across every session in [start, end).
+    async def get_chain_verification_report(
+        self, start: str, end: str, sample_limit: int = 50,
+    ) -> list[dict]:
+        """Verify chain integrity for a bounded SAMPLE of sessions in [start, end).
 
-        Each `verify_chain` call is an independent Walacor query; the
-        pre-fix loop awaited them serially, so a 30-day window with N
-        sessions took N × ~per-call-latency to return (frequently >60s
-        on prod, which is exactly the compliance-page hang the user
-        reported). Parallelize with a bounded semaphore so we get
-        concurrency without hammering Walacor with thousands of
-        simultaneous queries.
+        The pre-fix version verified EVERY session in the window. Prod
+        accumulates ~6k+ sessions, and a `verify_chain` call is a
+        Walacor round-trip per session — even with concurrency 8 that's
+        ~6k/8 = 750+ batches per page load, completely unviable. The
+        compliance dashboard timed out at 45s here.
+
+        New behavior: verify the most-recent `sample_limit` sessions
+        (default 50). The shape of the result is unchanged so callers
+        keep working, but the contract is now "a sample, not a census."
+        Callers that need a census should rely on a background
+        verification job (not yet built — separate work).
+
+        Parallelized with Semaphore(8): even 50 sessions × per-call
+        latency adds up, so we still want concurrency, just bounded so
+        we don't hammer Walacor.
         """
         import asyncio
         pipeline = [
             {"$match": {"timestamp": {"$gte": start, "$lt": end}, "session_id": {"$ne": None}}},
-            {"$group": {"_id": "$session_id"}},
+            # Sample the most-recent sessions — the freshest chain state
+            # is the most actionable signal. A truly random sample would
+            # be more statistically defensible but Walacor's $group +
+            # $sample isn't supported and the freshness bias is the
+            # right one for an operational dashboard.
+            {"$sort": {"timestamp": -1}},
+            {"$group": {"_id": "$session_id", "latest_ts": {"$first": "$timestamp"}}},
+            {"$sort": {"latest_ts": -1}},
+            {"$limit": sample_limit},
         ]
         rows = await self._client.query_complex(self._exec_etid, pipeline)
         session_ids = [r.get("_id") for r in rows if r.get("_id")]
         if not session_ids:
             return []
 
-        # Concurrency cap chosen empirically: 8 in-flight verifications
-        # keeps Walacor responsive while still completing a 200-session
-        # window in ~25 batches × per-call-latency rather than 200×.
         sem = asyncio.Semaphore(8)
 
         async def _verify(sid: str) -> dict:
