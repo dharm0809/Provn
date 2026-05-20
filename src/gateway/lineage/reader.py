@@ -186,27 +186,136 @@ class LineageReader:
 
     Opens with `?mode=ro` and `PRAGMA query_only=ON` so the write-path
     WALWriter is never blocked or corrupted by lineage reads.
+
+    **Phase 1.1 — multi-PID WAL aggregation.** When the gateway runs with
+    ``WALACOR_UVICORN_WORKERS>1``, each worker writes its own
+    ``wal-<pid>.db`` (single-file SQLite multi-writer is unsafe). The
+    reader aggregates across every ``wal*.db`` in the same directory
+    using :func:`gateway.wal.path.iter_wal_db_paths` — readiness
+    checks already do this via ``_exec_wal_ro_all``; lineage now mirrors
+    the pattern. Single-worker mode (only ``wal.db`` present) is
+    byte-identical to pre-Phase-1.1: one file → one query → one result.
+
+    Queries that aggregate (``COUNT(*) GROUP BY t``, ``GROUP BY model``,
+    etc.) are executed against each file independently and re-merged in
+    Python so per-worker partitioned aggregates fold correctly.
+    Pagination (``ORDER BY ... LIMIT/OFFSET``) is re-applied after the
+    cross-file union, since each file's slice is meaningless on its own.
     """
 
     def __init__(self, db_path: str) -> None:
         self._path = db_path
-        self._conn: sqlite3.Connection | None = None
+        # Map of db_path -> sqlite3.Connection (lazy). Treat ``self._path``
+        # as the canonical "directory marker" — the parent directory is
+        # what we actually iterate. Keeping ``self._path`` preserves the
+        # legacy constructor signature and the readiness check that
+        # spawns a session-scoped reader against a single file.
+        self._conns: dict[str, sqlite3.Connection] = {}
 
-    def _ensure_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            if not Path(self._path).exists():
-                raise FileNotFoundError(f"WAL database not found: {self._path}")
-            uri = f"file:{self._path}?mode=ro"
-            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-            self._conn.execute("PRAGMA query_only=ON")
-            self._conn.execute("PRAGMA mmap_size=268435456")  # 256MB
-            self._conn.row_factory = sqlite3.Row
-        return self._conn
+    # ── per-file connection management ────────────────────────────────
+
+    def _wal_dir(self) -> Path:
+        """Directory the reader aggregates across (parent of ``self._path``)."""
+        return Path(self._path).parent
+
+    def _db_paths(self) -> list[str]:
+        """Every WAL DB file the reader should query.
+
+        Falls back to ``[self._path]`` when:
+          * the helper returns nothing (directory empty / missing — e.g.
+            in tests that pass a non-WAL path), OR
+          * ``self._path`` is a single-file caller (the readiness
+            integrity check spawns ``LineageReader(session_file)`` for
+            per-session chain verification).
+
+        Mirrors the pattern in ``readiness/checks/integrity.py:_wal_paths``.
+        """
+        from gateway.wal.path import iter_wal_db_paths
+        paths = iter_wal_db_paths(self._wal_dir())
+        if paths:
+            return paths
+        # No files discovered in dir scan — fall back to the explicit
+        # path the caller handed us. Preserves the single-file FileNotFound
+        # semantics so the existing test contract (raise on missing DB)
+        # still holds in ``_open_ro``.
+        return [self._path]
+
+    def _open_ro(self, db_path: str) -> sqlite3.Connection:
+        """Open / fetch the cached read-only connection for ``db_path``.
+
+        Each per-PID file gets its own connection, cached for the
+        lifetime of the reader. ``check_same_thread=False`` so the
+        connection can be shared with the FastAPI thread pool — every
+        query is read-only and SQLite serialises reads internally.
+        """
+        conn = self._conns.get(db_path)
+        if conn is not None:
+            return conn
+        if not Path(db_path).exists():
+            raise FileNotFoundError(f"WAL database not found: {db_path}")
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA mmap_size=268435456")  # 256MB
+        conn.row_factory = sqlite3.Row
+        self._conns[db_path] = conn
+        return conn
+
+    def _iter_conns(self) -> list[sqlite3.Connection]:
+        """All read-only connections, opening on first use.
+
+        Per-file failures (file vanished, schema mismatch on a half-
+        initialised worker DB) are skipped with a warning rather than
+        aborting the whole query — a partial aggregation across the
+        surviving workers beats blanking the dashboard.
+        """
+        conns: list[sqlite3.Connection] = []
+        for p in self._db_paths():
+            try:
+                conns.append(self._open_ro(p))
+            except FileNotFoundError:
+                # Only the first/canonical path is allowed to raise so
+                # we keep the "missing wal.db" error path identical to
+                # pre-Phase-1.1 behaviour. iter_wal_db_paths only ever
+                # returns files it just stat'd, so this branch fires
+                # when the explicit fallback path doesn't exist AND
+                # the directory scan returned nothing.
+                if len(self._db_paths()) == 1:
+                    raise
+                logger.warning("WAL file vanished mid-read: %s", p)
+        return conns
+
+    def _query_all(
+        self,
+        sql: str,
+        params: tuple = (),
+    ) -> list[sqlite3.Row]:
+        """Run a read-only SELECT against every WAL file; return concatenated rows.
+
+        Caller decides how to fold (sum, dedup, sort, paginate). Per-file
+        errors are logged once and skipped (a partial result beats a
+        blanket query failure when one file is briefly unavailable —
+        mirrors ``readiness/checks/integrity.py:_exec_wal_ro_all``).
+        """
+        out: list[sqlite3.Row] = []
+        for conn in self._iter_conns():
+            try:
+                out.extend(conn.execute(sql, params).fetchall())
+            except sqlite3.Error:
+                logger.warning(
+                    "WAL read failed on a worker file (continuing with others)",
+                    exc_info=True,
+                )
+                continue
+        return out
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        for conn in self._conns.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._conns.clear()
 
     def list_sessions(
         self,
@@ -225,6 +334,13 @@ class LineageReader:
         order_sql = "ASC" if str(order).lower() == "asc" else "DESC"
         order_expr = _SESSIONS_SORT_COLUMNS[sort_key]
         where_sql, extra_params = _sessions_search_where(search)
+        # Multi-PID: fetch the full session set from EVERY worker file
+        # (no LIMIT/OFFSET in the SQL), re-merge in Python, then paginate.
+        # A session_id only ever lives in one worker's file (the worker
+        # that handled the first request of the session), so the union
+        # is naturally distinct — no dedup needed. The sort/limit must
+        # be re-applied after the union since each file's slice is
+        # meaningless on its own.
         sql = f"""
             SELECT
                 s.session_id,
@@ -245,12 +361,20 @@ class LineageReader:
             FROM ({_SESSIONS_AGG_SUBQUERY}) s
             LEFT JOIN ({_SESSIONS_TOOL_JOIN_SUBQUERY}) t ON t.session_id = s.session_id
             {where_sql}
-            ORDER BY {order_expr} {order_sql}
-            LIMIT ? OFFSET ?
             """
-        conn = self._ensure_conn()
-        cur = conn.execute(sql, (*extra_params, limit, offset))
-        rows = [dict(row) for row in cur.fetchall()]
+        merged = [dict(r) for r in self._query_all(sql, extra_params)]
+        # Re-apply sort + pagination across the unioned set.
+        reverse = order_sql == "DESC"
+
+        def _sort_key(d: dict):
+            if sort_key == "last_activity":
+                return d.get("last_activity") or ""
+            if sort_key == "record_count":
+                return d.get("record_count") or 0
+            return (d.get("model") or "")
+
+        merged.sort(key=_sort_key, reverse=reverse)
+        rows = merged[offset : offset + limit]
 
         # Batched fallback: one IN-query for ALL sessions that need metadata fallback,
         # instead of one query per session (previously N+1 with up to `limit` roundtrips).
@@ -294,9 +418,12 @@ class LineageReader:
         if not session_ids:
             return {}
         placeholders = ",".join("?" for _ in session_ids)
-        conn = self._ensure_conn()
         try:
-            cur = conn.execute(
+            # Multi-PID: a session lives in exactly one worker's file,
+            # so the union across files is naturally per-session. We
+            # still sort in Python (per-file SQL sort orders within each
+            # file, but the cross-file concat isn't globally ordered).
+            rows = self._query_all(
                 f"""SELECT session_id, sequence_number,
                           json_extract(record_json, '$.record_id') AS record_id,
                           json_extract(record_json, '$.previous_record_id') AS previous_record_id
@@ -307,7 +434,6 @@ class LineageReader:
                             json_extract(record_json, '$.record_id')""",
                 tuple(session_ids),
             )
-            rows = cur.fetchall()
         except Exception:
             logger.warning("chain_status SQL failed (defaulting to verified)", exc_info=True)
             return {}
@@ -320,6 +446,10 @@ class LineageReader:
                 "previous_record_id": row["previous_record_id"],
                 "sequence_number": row["sequence_number"],
             })
+        # Re-sort per session (the cross-file union from _query_all isn't
+        # globally ordered; SQL ORDER BY only applies within each file).
+        for sid, recs in by_session.items():
+            recs.sort(key=lambda r: (r.get("sequence_number") or 0, r.get("record_id") or ""))
 
         status: dict[str, str] = {}
         for sid, recs in by_session.items():
@@ -346,9 +476,9 @@ class LineageReader:
         """
         if not session_ids:
             return {}
-        conn = self._ensure_conn()
         placeholders = ",".join("?" for _ in session_ids)
-        cur = conn.execute(
+        # Multi-PID: union across worker files; a session lives in one file.
+        rows_iter = self._query_all(
             f"""SELECT session_id,
                        json_extract(record_json, '$.metadata.tool_interactions') AS ti
                 FROM wal_records
@@ -361,7 +491,7 @@ class LineageReader:
         # Aggregate across all execution records per session (a session may have
         # multiple tool-augmented turns).
         agg: dict[str, tuple[set, set]] = {}
-        for row in cur.fetchall():
+        for row in rows_iter:
             sid = row["session_id"]
             raw = row["ti"]
             if not raw:
@@ -386,6 +516,9 @@ class LineageReader:
     def count_sessions(self, search: str | None = None) -> int:
         """Count sessions matching the same filters as list_sessions (excluding limit/offset)."""
         where_sql, extra_params = _sessions_search_where(search)
+        # Multi-PID: a session lives in exactly one worker's file, so the
+        # per-file COUNT(*)s are partitioned across the deployment and
+        # sum cleanly. (No re-distinct needed — see ``list_sessions``.)
         sql = f"""
             SELECT COUNT(*) AS c FROM (
                 SELECT s.session_id
@@ -394,9 +527,7 @@ class LineageReader:
                 {where_sql}
             )
             """
-        conn = self._ensure_conn()
-        cur = conn.execute(sql, extra_params)
-        return int(cur.fetchone()[0] or 0)
+        return sum(int(r[0] or 0) for r in self._query_all(sql, extra_params))
 
     def get_session_timeline(self, session_id: str, limit: int = 500) -> list[dict]:
         """Return execution records for a session, ordered by sequence_number.
@@ -406,8 +537,12 @@ class LineageReader:
         view only renders a paged subset; 500 is well above the practical display
         budget. Callers that need the full history can pass a larger value.
         """
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: a session's records live in a single worker's
+        # file, but we still union and re-sort defensively (cheaper than
+        # branching, and protects against the migration corner case
+        # where a session straddles a worker restart with a fresh PID
+        # file). Sort key matches the original SQL ORDER BY.
+        rows = self._query_all(
             """
             SELECT execution_id, record_json, created_at
             FROM wal_records
@@ -420,33 +555,44 @@ class LineageReader:
             (session_id, int(limit)),
         )
         results = []
-        for row in cur.fetchall():
+        for row in rows:
             record = json.loads(row["record_json"])
             record["_wal_created_at"] = row["created_at"]
             _normalize_record(record)
             results.append(record)
-        return results
+        # Re-sort across the union, then re-apply the limit. Records
+        # without sequence_number sort last (None coerced to -1 swaps
+        # them to the front under ASC — use a sentinel that pushes them
+        # to the end the same way SQLite's NULLS LAST default does).
+        results.sort(key=lambda r: (
+            r.get("sequence_number") if r.get("sequence_number") is not None else float("inf"),
+            r.get("_wal_created_at") or "",
+        ))
+        return results[: int(limit)]
 
     def get_execution(self, execution_id: str) -> dict[str, Any] | None:
         """Return full execution record by execution_id."""
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: execution_id is globally unique, but only one
+        # worker has the row. ``_query_all`` returns at most one row in
+        # practice; take the first.
+        rows = self._query_all(
             "SELECT record_json FROM wal_records WHERE execution_id = ?",
             (execution_id,),
         )
-        row = cur.fetchone()
-        if row is None:
+        if not rows:
             return None
-        record = json.loads(row["record_json"])
+        record = json.loads(rows[0]["record_json"])
         _normalize_record(record)
         return record
 
     def get_tool_events(self, execution_id: str) -> list[dict]:
         """Return tool event records linked to an execution."""
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: tool events for an execution all land in the same
+        # worker that handled the execution (the request never crosses
+        # workers mid-call). Union+sort defensively anyway.
+        rows = self._query_all(
             """
-            SELECT record_json
+            SELECT record_json, timestamp
             FROM wal_records
             WHERE parent_execution_id = ?
               AND event_type = 'tool_call'
@@ -454,7 +600,9 @@ class LineageReader:
             """,
             (execution_id,),
         )
-        return [json.loads(row["record_json"]) for row in cur.fetchall()]
+        events = [json.loads(r["record_json"]) for r in rows]
+        events.sort(key=lambda e: e.get("timestamp") or "")
+        return events
 
     def get_execution_trace(self, execution_id: str) -> dict[str, Any] | None:
         """Return execution + tool events + timings for waterfall trace view."""
@@ -496,27 +644,51 @@ class LineageReader:
             extra_params = (*extra_params, disposition)
         base = f"FROM gateway_attempts {where_sql}"
 
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: each worker has its own attempts table partition.
+        # Fetch all rows from every file (no LIMIT/OFFSET in SQL),
+        # re-sort + paginate across the union. Stats and total are
+        # summed across files.
+        items_rows = self._query_all(
             f"""
             SELECT request_id, timestamp, tenant_id, provider, model_id,
                    path, disposition, execution_id, status_code, user, reason
             {base}
-            ORDER BY {order_expr} {order_sql}
-            LIMIT ? OFFSET ?
             """,
-            (*extra_params, limit, offset),
-        )
-        items = [dict(row) for row in cur.fetchall()]
-
-        cur2 = conn.execute(
-            f"SELECT disposition, COUNT(*) AS count {base} GROUP BY disposition",
             extra_params,
         )
-        stats = {row["disposition"]: row["count"] for row in cur2.fetchall()}
+        items_all = [dict(row) for row in items_rows]
+        reverse = order_sql == "DESC"
 
-        total_cur = conn.execute(f"SELECT COUNT(*) AS total {base}", extra_params)
-        total = int(total_cur.fetchone()["total"] or 0)
+        def _attempt_sort_key(d: dict):
+            if sort_key == "timestamp":
+                return d.get("timestamp") or ""
+            if sort_key == "status_code":
+                # NULLs sort low under ASC and high under DESC — match
+                # SQLite's default by coercing to -1 (stable across the
+                # union and identical to the original single-file
+                # ordering for non-null rows).
+                return d.get("status_code") if d.get("status_code") is not None else -1
+            col = sort_key
+            return d.get(col) or ""
+
+        items_all.sort(key=_attempt_sort_key, reverse=reverse)
+        items = items_all[offset : offset + limit]
+
+        # Stats: per-file COUNT(*) GROUP BY disposition, then sum across
+        # files keyed by disposition. (A worker that's never seen a
+        # given disposition contributes 0 implicitly.)
+        stats: dict[str, int] = {}
+        for row in self._query_all(
+            f"SELECT disposition, COUNT(*) AS count {base} GROUP BY disposition",
+            extra_params,
+        ):
+            disp = row["disposition"]
+            stats[disp] = stats.get(disp, 0) + int(row["count"] or 0)
+
+        total = sum(
+            int(r["total"] or 0)
+            for r in self._query_all(f"SELECT COUNT(*) AS total {base}", extra_params)
+        )
 
         return {"items": items, "stats": stats, "total": total}
 
@@ -541,8 +713,10 @@ class LineageReader:
             range_key = "1h"
         _, fmt = self._RANGE_CONFIG[range_key]
         labels, t_low, t_high = _metrics_timeline_labels(range_key)
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: each worker partitions its own attempts by bucket;
+        # the same bucket key may exist in multiple worker files and the
+        # counts must be **summed**, not concatenated.
+        rows = self._query_all(
             f"""
             SELECT
                 strftime('{fmt}', timestamp) AS t,
@@ -556,19 +730,20 @@ class LineageReader:
             """,
             (t_low, t_high),
         )
-        by_t = {row["t"]: row for row in cur.fetchall()}
+        by_t: dict[str, dict[str, int]] = {}
+        for row in rows:
+            key = row["t"]
+            slot = by_t.setdefault(key, {"total": 0, "allowed": 0, "blocked": 0})
+            slot["total"] += int(row["total"] or 0)
+            slot["allowed"] += int(row["allowed"] or 0)
+            slot["blocked"] += int(row["blocked"] or 0)
         buckets = []
         for t in labels:
-            row = by_t.get(t)
-            if row is None:
+            slot = by_t.get(t)
+            if slot is None:
                 buckets.append({"t": t, "total": 0, "allowed": 0, "blocked": 0})
             else:
-                buckets.append({
-                    "t": t,
-                    "total": row["total"],
-                    "allowed": row["allowed"] or 0,
-                    "blocked": row["blocked"] or 0,
-                })
+                buckets.append({"t": t, **slot})
         return {"buckets": buckets, "range": range_key}
 
     def get_token_latency_history(self, range_key: str) -> dict:
@@ -585,15 +760,18 @@ class LineageReader:
             range_key = "1h"
         _, fmt = self._RANGE_CONFIG[range_key]
         labels, t_low, t_high = _metrics_timeline_labels(range_key)
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: per-worker buckets must be re-aggregated. SUM/MAX
+        # are trivially mergeable; AVG must be reconstructed from
+        # ``SUM(latency) / SUM(count)`` — we pull per-file sums via
+        # ``avg * count`` so a worker with zero rows contributes nothing.
+        rows = self._query_all(
             f"""
             SELECT
                 strftime('{fmt}', timestamp) AS t,
                 COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
                 COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
+                COALESCE(SUM(latency_ms), 0) AS sum_latency_ms,
                 COALESCE(MAX(latency_ms), 0) AS max_latency_ms,
                 COUNT(*) AS request_count
             FROM wal_records
@@ -605,11 +783,27 @@ class LineageReader:
             """,
             (t_low, t_high),
         )
-        by_t = {row["t"]: row for row in cur.fetchall()}
+        by_t: dict[str, dict[str, float]] = {}
+        for row in rows:
+            key = row["t"]
+            slot = by_t.setdefault(key, {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "sum_latency_ms": 0.0,
+                "max_latency_ms": 0.0,
+                "request_count": 0,
+            })
+            slot["prompt_tokens"] += int(row["prompt_tokens"] or 0)
+            slot["completion_tokens"] += int(row["completion_tokens"] or 0)
+            slot["total_tokens"] += int(row["total_tokens"] or 0)
+            slot["sum_latency_ms"] += float(row["sum_latency_ms"] or 0.0)
+            slot["max_latency_ms"] = max(slot["max_latency_ms"], float(row["max_latency_ms"] or 0.0))
+            slot["request_count"] += int(row["request_count"] or 0)
         buckets: list[dict[str, Any]] = []
         for t in labels:
-            row = by_t.get(t)
-            if row is None:
+            slot = by_t.get(t)
+            if slot is None:
                 buckets.append({
                     "t": t,
                     "prompt_tokens": 0,
@@ -620,14 +814,16 @@ class LineageReader:
                     "request_count": 0,
                 })
             else:
+                count = slot["request_count"]
+                avg = (slot["sum_latency_ms"] / count) if count else 0.0
                 buckets.append({
                     "t": t,
-                    "prompt_tokens": row["prompt_tokens"] or 0,
-                    "completion_tokens": row["completion_tokens"] or 0,
-                    "total_tokens": row["total_tokens"] or 0,
-                    "avg_latency_ms": round(row["avg_latency_ms"] or 0, 1),
-                    "max_latency_ms": round(row["max_latency_ms"] or 0, 1),
-                    "request_count": row["request_count"] or 0,
+                    "prompt_tokens": slot["prompt_tokens"],
+                    "completion_tokens": slot["completion_tokens"],
+                    "total_tokens": slot["total_tokens"],
+                    "avg_latency_ms": round(avg, 1),
+                    "max_latency_ms": round(slot["max_latency_ms"], 1),
+                    "request_count": count,
                 })
         return {"buckets": buckets, "range": range_key}
 
@@ -636,8 +832,9 @@ class LineageReader:
     def get_compliance_summary(self, start: str, end: str) -> dict:
         """Aggregate stats for compliance report: total requests, pass/fail rates,
         model usage, content analysis summary, chain integrity."""
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: sum scalar aggregates across worker files.
+        total = allowed = denied = 0
+        for row in self._query_all(
             """
             SELECT
                 COUNT(*) AS total,
@@ -647,31 +844,32 @@ class LineageReader:
             WHERE timestamp >= ? AND timestamp < ?
             """,
             (start, end),
-        )
-        row = cur.fetchone()
-        total = row["total"] or 0
-        allowed = row["allowed"] or 0
-        denied = row["denied"] or 0
+        ):
+            total += int(row["total"] or 0)
+            allowed += int(row["allowed"] or 0)
+            denied += int(row["denied"] or 0)
 
-        # Models used in period
-        cur2 = conn.execute(
-            """
-            SELECT DISTINCT model_id
-            FROM wal_records
-            WHERE timestamp >= ? AND timestamp < ?
-              AND event_type = 'execution'
-              AND model_id IS NOT NULL
-            """,
-            (start, end),
-        )
-        models_used = [r["model_id"] for r in cur2.fetchall()]
+        # Models used in period — union of per-worker DISTINCT sets.
+        models_used = sorted({
+            r["model_id"] for r in self._query_all(
+                """
+                SELECT DISTINCT model_id
+                FROM wal_records
+                WHERE timestamp >= ? AND timestamp < ?
+                  AND event_type = 'execution'
+                  AND model_id IS NOT NULL
+                """,
+                (start, end),
+            )
+            if r["model_id"] is not None
+        })
 
         # Content-analysis coverage: percent of window executions whose
         # JSON payload actually carries analyzer output. The local WAL
         # stores the full record body in `record_json`; we probe two
         # shapes — top-level `content_analysis` or
         # `metadata.analyzer_decisions` — that the orchestrator writes.
-        cur3 = conn.execute(
+        rows3 = self._query_all(
             """
             SELECT record_json FROM wal_records
              WHERE timestamp >= ? AND timestamp < ?
@@ -682,7 +880,7 @@ class LineageReader:
         total_exec = 0
         analyzed = 0
         import json as _json
-        for r in cur3.fetchall():
+        for r in rows3:
             total_exec += 1
             try:
                 rec = _json.loads(r["record_json"] or "{}")
@@ -708,10 +906,14 @@ class LineageReader:
 
     def get_execution_export(self, start: str, end: str, limit: int = 10000) -> list[dict]:
         """Full execution records for date range (JSON/CSV export)."""
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: each worker contributes up to ``limit`` rows; union,
+        # re-sort by timestamp, then truncate. Pulling the full per-file
+        # cap and re-applying the limit cross-worker is the only safe
+        # ordering — pulling ``limit / N`` per file could miss recent
+        # rows on a hot worker.
+        rows = self._query_all(
             """
-            SELECT record_json
+            SELECT record_json, timestamp
             FROM wal_records
             WHERE timestamp >= ? AND timestamp < ?
               AND event_type = 'execution'
@@ -720,15 +922,18 @@ class LineageReader:
             """,
             (start, end, limit),
         )
-        records = [json.loads(row["record_json"]) for row in cur.fetchall()]
+        decoded = [(r["timestamp"] or "", json.loads(r["record_json"])) for r in rows]
+        decoded.sort(key=lambda t: t[0])
+        records = [rec for _, rec in decoded[:limit]]
         for r in records:
             _normalize_record(r)
         return records
 
     def get_attestation_summary(self, start: str, end: str) -> list[dict]:
         """Model attestation inventory with usage counts in period."""
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: re-aggregate GROUP BY (model_id, provider) across
+        # worker files (each worker only has its share of requests).
+        rows = self._query_all(
             """
             SELECT
                 model_id,
@@ -745,7 +950,27 @@ class LineageReader:
             """,
             (start, end),
         )
-        return [dict(row) for row in cur.fetchall()]
+        merged: dict[tuple, dict] = {}
+        for row in rows:
+            key = (row["model_id"], row["provider"])
+            slot = merged.get(key)
+            if slot is None:
+                merged[key] = {
+                    "model_id": row["model_id"],
+                    "provider": row["provider"],
+                    "attestation_id": row["attestation_id"],
+                    "request_count": int(row["request_count"] or 0),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                }
+            else:
+                slot["request_count"] += int(row["request_count"] or 0)
+                slot["total_tokens"] += int(row["total_tokens"] or 0)
+                # Keep any non-null attestation_id we see.
+                if not slot["attestation_id"] and row["attestation_id"]:
+                    slot["attestation_id"] = row["attestation_id"]
+        result = list(merged.values())
+        result.sort(key=lambda d: d["request_count"], reverse=True)
+        return result
 
     def get_chain_verification_report(
         self, start: str, end: str, sample_limit: int = 50,
@@ -760,8 +985,11 @@ class LineageReader:
         ``sampled`` / ``total_sessions_in_window`` signal via the caller
         (`compliance.api._compute_shared_report`).
         """
-        conn = self._ensure_conn()
-        cur = conn.execute(
+        # Multi-PID: per-worker LIMITs miss top-N globally. Pull each
+        # worker's top-sample_limit, union, re-sort by latest_ts, take
+        # the global top sample_limit. Per-session aggregation is safe
+        # (a session lives in one worker).
+        rows = self._query_all(
             """
             SELECT session_id, MAX(timestamp) AS latest_ts
             FROM wal_records
@@ -774,7 +1002,9 @@ class LineageReader:
             """,
             (start, end, sample_limit),
         )
-        session_ids = [row["session_id"] for row in cur.fetchall()]
+        unioned = [(r["latest_ts"] or "", r["session_id"]) for r in rows]
+        unioned.sort(key=lambda t: t[0], reverse=True)
+        session_ids = [sid for _, sid in unioned[:sample_limit]]
         return [self.verify_chain(sid) for sid in session_ids]
 
     def count_sessions_in_window(self, start: str, end: str) -> int:
@@ -783,24 +1013,25 @@ class LineageReader:
         Used by the compliance endpoint to disclose how many sessions
         actually fell in the window vs. how many were verified.
         """
-        conn = self._ensure_conn()
-        cur = conn.execute(
-            """
-            SELECT COUNT(DISTINCT session_id) AS n
-            FROM wal_records
-            WHERE timestamp >= ? AND timestamp < ?
-              AND session_id IS NOT NULL
-              AND event_type = 'execution'
-            """,
-            (start, end),
+        # Multi-PID: a session_id lives in exactly one worker file, so
+        # per-file ``COUNT(DISTINCT session_id)`` partitions cleanly and
+        # the sum is the global count. (No cross-file re-distinct.)
+        return sum(
+            int(r["n"] or 0)
+            for r in self._query_all(
+                """
+                SELECT COUNT(DISTINCT session_id) AS n
+                FROM wal_records
+                WHERE timestamp >= ? AND timestamp < ?
+                  AND session_id IS NOT NULL
+                  AND event_type = 'execution'
+                """,
+                (start, end),
+            )
         )
-        row = cur.fetchone()
-        return int(row["n"] or 0) if row else 0
 
     def get_cost_summary(self, range_key: str = "24h", group_by: str = "model") -> dict:
         """Aggregate estimated costs by model or user over a time range."""
-        conn = self._ensure_conn()
-
         interval_map = {"1h": "-1 hour", "24h": "-1 day", "7d": "-7 days", "30d": "-30 days"}
         interval = interval_map.get(range_key, "-1 day")
 
@@ -826,20 +1057,33 @@ class LineageReader:
             ORDER BY total_cost_usd DESC
         """
 
-        cur = conn.execute(sql, (interval,))
-        rows = []
-        grand_total = 0.0
-        for row in cur.fetchall():
-            entry = {
-                group_alias: row["group_key"] or "unknown",
-                "request_count": row["request_count"],
-                "prompt_tokens": row["total_prompt_tokens"],
-                "completion_tokens": row["total_completion_tokens"],
-                "total_tokens": row["total_tokens"],
-                "cost_usd": round(row["total_cost_usd"], 6),
-            }
-            grand_total += row["total_cost_usd"]
-            rows.append(entry)
+        # Multi-PID: merge GROUP BY group_key across worker files; sum
+        # counters, accumulate cost. The original per-file ORDER BY is
+        # meaningless after the union, so we re-sort by cost at the end.
+        merged: dict[Any, dict] = {}
+        for row in self._query_all(sql, (interval,)):
+            key = row["group_key"] or "unknown"
+            slot = merged.get(key)
+            if slot is None:
+                merged[key] = {
+                    group_alias: key,
+                    "request_count": int(row["request_count"] or 0),
+                    "prompt_tokens": int(row["total_prompt_tokens"] or 0),
+                    "completion_tokens": int(row["total_completion_tokens"] or 0),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                    "cost_usd": float(row["total_cost_usd"] or 0.0),
+                }
+            else:
+                slot["request_count"] += int(row["request_count"] or 0)
+                slot["prompt_tokens"] += int(row["total_prompt_tokens"] or 0)
+                slot["completion_tokens"] += int(row["total_completion_tokens"] or 0)
+                slot["total_tokens"] += int(row["total_tokens"] or 0)
+                slot["cost_usd"] += float(row["total_cost_usd"] or 0.0)
+
+        rows = sorted(merged.values(), key=lambda e: e["cost_usd"], reverse=True)
+        grand_total = sum(e["cost_usd"] for e in rows)
+        for e in rows:
+            e["cost_usd"] = round(e["cost_usd"], 6)
 
         return {
             "range": range_key,
@@ -850,14 +1094,15 @@ class LineageReader:
 
     def get_attachments(self, session_id: str) -> list[dict]:
         """Get all file_metadata entries from execution records in a session."""
-        conn = self._ensure_conn()
-        rows = conn.execute(
+        # Multi-PID: a session's records live in one file in practice,
+        # but union defensively for the worker-restart edge case.
+        rows = self._query_all(
             "SELECT record_json FROM wal_records WHERE session_id = ? AND event_type = 'execution'",
             (session_id,),
-        ).fetchall()
+        )
         attachments = []
-        for (record_json,) in rows:
-            record = json.loads(record_json)
+        for row in rows:
+            record = json.loads(row["record_json"])
             for fm in record.get("file_metadata", []):
                 fm["execution_id"] = record.get("execution_id", "")
                 attachments.append(fm)
@@ -1015,36 +1260,57 @@ class LineageReader:
         request counts, average latency, and total token usage so callers
         can compare quality/cost/latency across variants.
         """
-        conn = self._ensure_conn()
-        rows = conn.execute(
+        # Multi-PID: re-aggregate GROUP BY model_id across worker files.
+        # AVG values must be reconstructed from SUM/COUNT, since two
+        # per-file averages can't be combined directly. Pull SUMs only;
+        # derive avgs in Python.
+        rows = self._query_all(
             """
             SELECT
                 model_id                                                   AS model_id,
                 json_extract(record_json, '$.metadata.ab_variant')         AS ab_variant,
                 json_extract(record_json, '$.metadata.ab_original_model')  AS original_model,
                 COUNT(*)                                                   AS request_count,
-                AVG(latency_ms)                                            AS avg_latency_ms,
-                SUM(total_tokens)                                          AS total_tokens,
-                AVG(total_tokens)                                          AS avg_tokens
+                SUM(COALESCE(latency_ms, 0))                               AS sum_latency_ms,
+                SUM(COALESCE(total_tokens, 0))                             AS total_tokens
             FROM wal_records
             WHERE event_type = 'execution'
               AND json_extract(record_json, '$.metadata.ab_variant') = ?
             GROUP BY model_id
-            ORDER BY request_count DESC
             """,
             (test_name,),
-        ).fetchall()
+        )
+        merged: dict[Any, dict] = {}
+        for row in rows:
+            mid = row["model_id"]
+            slot = merged.get(mid)
+            if slot is None:
+                merged[mid] = {
+                    "model_id": mid,
+                    "ab_variant": row["ab_variant"],
+                    "original_model": row["original_model"],
+                    "request_count": int(row["request_count"] or 0),
+                    "sum_latency_ms": float(row["sum_latency_ms"] or 0.0),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                }
+            else:
+                slot["request_count"] += int(row["request_count"] or 0)
+                slot["sum_latency_ms"] += float(row["sum_latency_ms"] or 0.0)
+                slot["total_tokens"] += int(row["total_tokens"] or 0)
 
         variants = []
-        for row in rows:
+        for slot in sorted(merged.values(), key=lambda d: d["request_count"], reverse=True):
+            count = slot["request_count"]
+            avg_lat = (slot["sum_latency_ms"] / count) if count else None
+            avg_tok = (slot["total_tokens"] / count) if count else None
             variants.append({
-                "model_id": row[0],
-                "ab_variant": row[1],
-                "original_model": row[2],
-                "request_count": row[3],
-                "avg_latency_ms": round(row[4], 1) if row[4] is not None else None,
-                "total_tokens": row[5],
-                "avg_tokens": round(row[6], 1) if row[6] is not None else None,
+                "model_id": slot["model_id"],
+                "ab_variant": slot["ab_variant"],
+                "original_model": slot["original_model"],
+                "request_count": count,
+                "avg_latency_ms": round(avg_lat, 1) if avg_lat is not None else None,
+                "total_tokens": slot["total_tokens"],
+                "avg_tokens": round(avg_tok, 1) if avg_tok is not None else None,
             })
 
         return {"test_name": test_name, "variants": variants, "total_requests": sum(v["request_count"] for v in variants)}
