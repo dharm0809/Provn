@@ -747,12 +747,46 @@ class LineageReader:
         )
         return [dict(row) for row in cur.fetchall()]
 
-    def get_chain_verification_report(self, start: str, end: str) -> list[dict]:
-        """Run verify_chain for all sessions active in period, return results."""
+    def get_chain_verification_report(
+        self, start: str, end: str, sample_limit: int = 50,
+    ) -> list[dict]:
+        """Verify chain integrity for a bounded SAMPLE of sessions in [start, end).
+
+        Mirrors ``WalacorLineageReader.get_chain_verification_report``: prior
+        behaviour ran ``verify_chain`` for EVERY session in the window, which
+        for a prod gateway accumulating thousands of sessions made the
+        compliance endpoint quadratic in session count.  We now sample the
+        most-recent ``sample_limit`` sessions (default 50) and surface the
+        ``sampled`` / ``total_sessions_in_window`` signal via the caller
+        (`compliance.api._compute_shared_report`).
+        """
         conn = self._ensure_conn()
         cur = conn.execute(
             """
-            SELECT DISTINCT session_id
+            SELECT session_id, MAX(timestamp) AS latest_ts
+            FROM wal_records
+            WHERE timestamp >= ? AND timestamp < ?
+              AND session_id IS NOT NULL
+              AND event_type = 'execution'
+            GROUP BY session_id
+            ORDER BY latest_ts DESC
+            LIMIT ?
+            """,
+            (start, end, sample_limit),
+        )
+        session_ids = [row["session_id"] for row in cur.fetchall()]
+        return [self.verify_chain(sid) for sid in session_ids]
+
+    def count_sessions_in_window(self, start: str, end: str) -> int:
+        """Total distinct sessions with an execution in [start, end).
+
+        Used by the compliance endpoint to disclose how many sessions
+        actually fell in the window vs. how many were verified.
+        """
+        conn = self._ensure_conn()
+        cur = conn.execute(
+            """
+            SELECT COUNT(DISTINCT session_id) AS n
             FROM wal_records
             WHERE timestamp >= ? AND timestamp < ?
               AND session_id IS NOT NULL
@@ -760,8 +794,8 @@ class LineageReader:
             """,
             (start, end),
         )
-        session_ids = [row["session_id"] for row in cur.fetchall()]
-        return [self.verify_chain(sid) for sid in session_ids]
+        row = cur.fetchone()
+        return int(row["n"] or 0) if row else 0
 
     def get_cost_summary(self, range_key: str = "24h", group_by: str = "model") -> dict:
         """Aggregate estimated costs by model or user over a time range."""
