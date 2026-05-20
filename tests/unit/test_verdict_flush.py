@@ -155,3 +155,108 @@ async def test_flush_survives_sqlite_error(tmp_path, monkeypatch, caplog):
     # Worker must have logged the error, not propagated it
     assert any("simulated failure" in str(r.message) or "verdict flush" in str(r.message).lower()
                for r in caplog.records)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Dead-letter queue regression
+#
+# Pins the bug: `drain()` removes items from the buffer before _write_batch
+# runs, so a failed write previously silently lost the in-flight batch
+# (CLAUDE.md "Failure modes & guards" — same class as the timings/Walacor
+# schema-strip bug). The DLQ parks failed batches and replays on the next
+# tick.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+async def test_failed_write_parks_to_dlq_then_replays_next_tick(tmp_path, monkeypatch):
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    db = IntelligenceDB(str(tmp_path / "int.db"))
+    db.init_schema()
+    buf = VerdictBuffer(max_size=100)
+    for i in range(3):
+        buf.record(
+            ModelVerdict.from_inference(
+                model_name="intent", input_text=f"t{i}",
+                prediction="normal", confidence=0.9,
+            )
+        )
+
+    worker = VerdictFlushWorker(buf, db, flush_interval_s=0.01, batch_size=10)
+
+    calls = {"n": 0}
+    original_write = worker._write_batch
+
+    def flaky_write(verdicts):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _sqlite3.OperationalError("simulated lock — park to DLQ")
+        return original_write(verdicts)
+
+    monkeypatch.setattr(worker, "_write_batch", flaky_write)
+
+    dlq_path = worker._dlq_path
+
+    # Tick #1: fails → DLQ gets the 3 verdicts.
+    task = asyncio.create_task(worker.run())
+    # Wait until the DLQ exists with content, then stop.
+    import os as _os
+    deadline = asyncio.get_event_loop().time() + 1.0
+    while asyncio.get_event_loop().time() < deadline:
+        if _os.path.exists(dlq_path) and _os.path.getsize(dlq_path) > 0:
+            break
+        await asyncio.sleep(0.01)
+    assert _os.path.exists(dlq_path), "DLQ file should exist after failed write"
+    with open(dlq_path) as fh:
+        parked_lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    assert len(parked_lines) == 3, f"expected 3 parked verdicts, got {len(parked_lines)}"
+    parsed = _json.loads(parked_lines[0])
+    assert parsed["model_name"] == "intent"
+    assert parsed["prediction"] == "normal"
+
+    # Tick #N: replay must drain DLQ and write to SQLite.
+    # Worker continues looping (flaky_write only fails the first call). Wait
+    # until the DLQ is cleared, then stop.
+    deadline = asyncio.get_event_loop().time() + 1.0
+    while asyncio.get_event_loop().time() < deadline:
+        if not _os.path.exists(dlq_path):
+            break
+        await asyncio.sleep(0.01)
+    worker.stop()
+    await task
+
+    assert not _os.path.exists(dlq_path), "DLQ should be cleared after successful replay"
+    with _sqlite3.connect(db.path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM onnx_verdicts").fetchone()[0]
+    assert count == 3, f"all 3 parked verdicts must reach SQLite via DLQ replay, got {count}"
+
+
+async def test_dlq_cap_refuses_growth_past_max(tmp_path, monkeypatch, caplog):
+    """At ``_DLQ_MAX_BYTES`` the DLQ stops growing and logs ERROR."""
+    import logging
+    from gateway.intelligence import verdict_flush as vf
+
+    # Shrink the cap so the test is fast.
+    monkeypatch.setattr(vf, "_DLQ_MAX_BYTES", 64)  # ~one verdict's worth
+
+    db = IntelligenceDB(str(tmp_path / "int.db"))
+    db.init_schema()
+    buf = VerdictBuffer(max_size=10)
+    worker = vf.VerdictFlushWorker(buf, db, flush_interval_s=10.0, batch_size=10)
+
+    # Pre-fill the DLQ above the cap.
+    with open(worker._dlq_path, "w") as fh:
+        fh.write("x" * 128 + "\n")
+
+    batch = [
+        ModelVerdict.from_inference(
+            model_name="intent", input_text="x", prediction="normal", confidence=0.5,
+        )
+    ]
+    with caplog.at_level(logging.ERROR):
+        worker._park_to_dlq(batch)
+    # File must not have grown — the dropped batch is logged loudly instead.
+    import os as _os
+    assert _os.path.getsize(worker._dlq_path) == 129
+    assert any("DLQ cap reached" in r.message for r in caplog.records)

@@ -99,6 +99,7 @@ Bidirectional translator for OpenAI `/v1/chat/completions` ↔ Anthropic `/v1/me
 - Readers must aggregate: `gateway.wal.path.iter_wal_db_paths(wal_dir)` returns every `wal*.db` in the dir. Integrity readiness checks (INT-02/03/05/06/07) already use this via `_exec_wal_ro_all` in `readiness/checks/integrity.py` — they union by file then merge by `created_at`.
 - Token budget: in-memory tracker is divided by `uvicorn_workers` at boot (`main._init_budget_tracker`) so aggregate spend stays under the configured cap. Redis-backed tracker is unaffected. Phase 2 (shared store) replaces the divide.
 - **Deferred to Phase 1.1:** `LineageReader` (local-SQLite fallback, only used when Walacor is unavailable) does NOT yet union across worker files. Prod uses `WalacorLineageReader` (HTTP, no SQLite) and is unaffected.
+- **WAL disk ceiling**: `wal_max_size_gb` defaults to `10.0` (10 GB). Sized for an m6a.xlarge / 50 GB volume — leaves headroom for OS + intelligence.db + control.db + delivery backlog. Backpressure fires (503 `denied_wal_full`) in `pipeline/orchestrator.py:_wal_backpressure` when `disk_usage_bytes >= 10 GB` OR `pending >= wal_high_water_mark`. Set to `0` to disable the disk ceiling (pending-count ceiling still applies).
 
 ## Failure modes & guards (do not delete the guards)
 These guards exist because the exact bug shipped to production. Each is a *by-construction* chokepoint — failing loudly beats relying on review/discipline (the originals had docs and still broke). If you touch one, keep the guard or move it; don't just remove it.

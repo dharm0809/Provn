@@ -484,10 +484,36 @@ async def lineage_envelope(request: Request) -> JSONResponse:
     # identity fields (_id, UID, ORGId, SV) that deserialization strips.
     from gateway.config import get_settings
     settings = get_settings()
+    # Bound the direct Walacor call by the same _LINEAGE_READ_TIMEOUT_S used
+    # by _call() for reader methods. Without this guard a stalled Walacor
+    # query_complex pins this coroutine for the httpx default (30s) and the
+    # dashboard envelope drawer wedges the read pool on every retry — the
+    # 8s ceiling is an order of magnitude above a healthy read.
     try:
-        rows = await ctx.walacor_client.query_complex(
-            settings.walacor_executions_etid,
-            [{"$match": {"execution_id": execution_id}}, {"$limit": 1}],
+        rows = await asyncio.wait_for(
+            ctx.walacor_client.query_complex(
+                settings.walacor_executions_etid,
+                [{"$match": {"execution_id": execution_id}}, {"$limit": 1}],
+            ),
+            timeout=_LINEAGE_READ_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "lineage_envelope timed out after %.1fs execution_id=%s",
+            _LINEAGE_READ_TIMEOUT_S, execution_id,
+        )
+        return JSONResponse(
+            {
+                "execution_id": execution_id,
+                "envelope": None,
+                "local": local_anchor,
+                "match": None,
+                "error": (
+                    f"Walacor envelope fetch timed out after "
+                    f"{_LINEAGE_READ_TIMEOUT_S:.0f}s — backend is slow or unreachable"
+                ),
+            },
+            status_code=504,
         )
     except Exception as e:
         logger.warning("lineage_envelope live fetch failed: %s", e, exc_info=True)
