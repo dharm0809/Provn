@@ -334,15 +334,33 @@ export default function Compliance() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all(FRAMEWORKS.map(f =>
-      getComplianceReport(f.id, start, end)
-        .then(r => [f.id, r])
-        .catch(e => [f.id, { __error: e.message }])
-    )).then(entries => {
-      if (cancelled) return;
-      setReports(Object.fromEntries(entries));
-      setLoading(false);
-    });
+    // The score, summary, and chain_integrity are framework-AGNOSTIC —
+    // they're derived from the same underlying execution/attestation data
+    // regardless of which framework is requested (audit_intelligence.py
+    // doesn't take `framework` as input). Only `framework_mapping`
+    // differs per-framework, and that's only needed for the Preview
+    // drawer (lazy-loaded on Preview click).
+    //
+    // The pre-fix code fired 4 parallel requests for the 4 framework
+    // cards, each triggering the full backend reader-waterfall on prod —
+    // sustained >60s timeouts. One shared fetch keeps the cards in sync
+    // and gives the backend a much easier job.
+    getComplianceReport(FRAMEWORKS[0].id, start, end)
+      .then(r => {
+        if (cancelled) return;
+        // Fan out the shared report to all four framework cards. They
+        // render identical score/grade/summary/chain — by design.
+        const entries = FRAMEWORKS.map(f => [f.id, r]);
+        setReports(Object.fromEntries(entries));
+        setLoading(false);
+      })
+      .catch(e => {
+        if (cancelled) return;
+        const errored = { __error: e.message };
+        const entries = FRAMEWORKS.map(f => [f.id, errored]);
+        setReports(Object.fromEntries(entries));
+        setLoading(false);
+      });
     return () => { cancelled = true; };
   }, [start, end]);
 
@@ -409,7 +427,19 @@ export default function Compliance() {
                 <button
                   className="btn-wal btn-ghost btn-sm"
                   disabled={!ready}
-                  onClick={() => setPreview({ framework: f, report: r })}
+                  onClick={() => {
+                    // The shared fetch on page load is framework-agnostic
+                    // and only carries the FRAMEWORKS[0] framework_mapping.
+                    // Lazy-load the requested framework's full report so
+                    // the drawer's control-mapping section is correct for
+                    // the framework the user actually clicked.
+                    setPreview({ framework: f, report: r, loading: true });
+                    getComplianceReport(f.id, start, end)
+                      .then(fr => setPreview({ framework: f, report: fr, loading: false }))
+                      .catch(err => setPreview({
+                        framework: f, report: { ...r, __mapping_error: err.message }, loading: false,
+                      }));
+                  }}
                 >Preview</button>
                 <div className="compliance-downloads">
                   {['json', 'csv', 'pdf'].map(fmt => (

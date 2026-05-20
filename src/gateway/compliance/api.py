@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
+import time
 from datetime import datetime, timezone
 
 from starlette.requests import Request
@@ -13,6 +15,26 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from gateway.pipeline.context import get_pipeline_context
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling on a single compliance report computation. Compliance is a
+# read-only audit endpoint — if the underlying reader takes longer than
+# this, every dashboard refresh hangs the page indefinitely (this is the
+# bug the user reported). Failing fast with a 504 lets the frontend
+# surface "report is slow" instead of an infinite spinner.
+_REPORT_TIMEOUT_S = 45.0
+
+# Singleflight cache. The dashboard fires four parallel /v1/compliance/export
+# requests (one per framework) with the same (start, end) window. Without
+# coalescing, each request independently triggers the full four-reader-call
+# waterfall (16 Walacor queries total). With this cache, the first request
+# computes once and the other three reuse the result — only the per-framework
+# `framework_mapping` is re-derived (it's pure-function over already-fetched
+# data, ~microseconds). 30 s TTL is long enough to absorb the dashboard burst
+# and short enough that a manual refresh sees fresh data.
+_REPORT_TTL_S = 30.0
+_REPORT_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_REPORT_INFLIGHT: dict[tuple[str, str], asyncio.Future] = {}
+_REPORT_LOCK = asyncio.Lock()
 
 _CSV_COLUMNS = [
     "execution_id", "timestamp", "session_id", "model_id", "provider",
@@ -41,23 +63,29 @@ async def compliance_export(request: Request) -> Response:
     fmt = params.get("format", "json")
     framework = params.get("framework", "eu_ai_act")
 
-    import inspect
-    reader = ctx.lineage_reader
+    try:
+        shared = await _load_shared_report(ctx.lineage_reader, start, end)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            {"error": (
+                f"Compliance report timed out after {_REPORT_TIMEOUT_S:.0f}s. "
+                "Try a narrower date range (7d or 30d) — wide windows on a busy "
+                "gateway can take longer than the cap."
+            )},
+            status_code=504,
+        )
+    except Exception as exc:
+        logger.exception("Compliance report build failed for window %s..%s", start, end)
+        return JSONResponse(
+            {"error": f"Compliance report failed: {exc}"},
+            status_code=500,
+        )
 
-    async def _c(method, *args):
-        result = method(*args)
-        return await result if inspect.isawaitable(result) else result
-
-    summary = await _c(reader.get_compliance_summary, start, end)
-    executions = await _c(reader.get_execution_export, start, end)
-    attestations = await _c(reader.get_attestation_summary, start, end)
-    chain_report = await _c(reader.get_chain_verification_report, start, end)
-
-    chain_integrity = {
-        "sessions_verified": len(chain_report),
-        "all_valid": all(r.get("valid", False) for r in chain_report),
-        "sessions": chain_report,
-    }
+    summary = shared["summary"]
+    executions = shared["executions"]
+    attestations = shared["attestations"]
+    chain_report = shared["chain_report"]
+    chain_integrity = shared["chain_integrity"]
 
     if fmt == "csv":
         return _build_csv_response(executions, start, end)
@@ -111,6 +139,91 @@ async def compliance_export(request: Request) -> Response:
         "framework_mapping": framework_mapping,
     }
     return JSONResponse(report)
+
+
+async def _load_shared_report(reader, start: str, end: str) -> dict:
+    """Compute summary/executions/attestations/chain ONCE per (start, end).
+
+    The dashboard fires four parallel /v1/compliance/export calls (one per
+    framework) with the same window. This loader:
+
+      1. Returns a cached result when one is fresh (< _REPORT_TTL_S old).
+      2. Coalesces concurrent requests behind a single in-flight future —
+         the four dashboard fetches share one computation rather than
+         each triggering an independent waterfall.
+      3. Runs the four reader queries CONCURRENTLY (asyncio.gather) with
+         a global timeout — the pre-fix code awaited them serially, so a
+         30-day window on prod accumulated all four latencies sequentially
+         and exceeded 60 s.
+
+    The returned dict is the cross-framework portion of the report; the
+    per-framework `framework_mapping` and `audit_readiness` are derived
+    cheaply by the caller from this shared data.
+    """
+    key = (start, end)
+    now = time.monotonic()
+
+    # Fast path: serve a fresh cached entry without any locking.
+    cached = _REPORT_CACHE.get(key)
+    if cached and (now - cached[0]) < _REPORT_TTL_S:
+        return cached[1]
+
+    # Slow path: coalesce + compute under the lock so concurrent dashboard
+    # fetches don't all start their own waterfall.
+    async with _REPORT_LOCK:
+        cached = _REPORT_CACHE.get(key)
+        if cached and (time.monotonic() - cached[0]) < _REPORT_TTL_S:
+            return cached[1]
+        inflight = _REPORT_INFLIGHT.get(key)
+        if inflight is None:
+            inflight = asyncio.ensure_future(_compute_shared_report(reader, start, end))
+            _REPORT_INFLIGHT[key] = inflight
+
+    try:
+        result = await asyncio.wait_for(asyncio.shield(inflight), timeout=_REPORT_TIMEOUT_S)
+    finally:
+        # Only the originator clears the in-flight slot — followers see
+        # the entry has been cleared and pick up the cache on the next call.
+        async with _REPORT_LOCK:
+            if _REPORT_INFLIGHT.get(key) is inflight and inflight.done():
+                _REPORT_INFLIGHT.pop(key, None)
+                if not inflight.cancelled() and inflight.exception() is None:
+                    _REPORT_CACHE[key] = (time.monotonic(), inflight.result())
+                    # Prune stale entries opportunistically so the cache
+                    # doesn't grow unbounded across many distinct windows.
+                    cutoff = time.monotonic() - _REPORT_TTL_S * 4
+                    stale = [k for k, (ts, _) in _REPORT_CACHE.items() if ts < cutoff]
+                    for k in stale:
+                        _REPORT_CACHE.pop(k, None)
+    return result
+
+
+async def _compute_shared_report(reader, start: str, end: str) -> dict:
+    """Actually run the four reader queries in parallel."""
+    import inspect
+
+    async def _c(method, *args):
+        result = method(*args)
+        return await result if inspect.isawaitable(result) else result
+
+    summary, executions, attestations, chain_report = await asyncio.gather(
+        _c(reader.get_compliance_summary, start, end),
+        _c(reader.get_execution_export, start, end),
+        _c(reader.get_attestation_summary, start, end),
+        _c(reader.get_chain_verification_report, start, end),
+    )
+    chain_integrity = {
+        "sessions_verified": len(chain_report),
+        "all_valid": all(r.get("valid", False) for r in chain_report),
+        "sessions": chain_report,
+    }
+    return {
+        "summary": summary,
+        "executions": executions,
+        "attestations": attestations,
+        "chain_report": chain_report,
+        "chain_integrity": chain_integrity,
+    }
 
 
 def _build_csv_response(executions: list[dict], start: str, end: str) -> StreamingResponse:

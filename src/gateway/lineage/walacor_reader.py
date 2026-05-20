@@ -998,17 +998,36 @@ class WalacorLineageReader:
         ]
 
     async def get_chain_verification_report(self, start: str, end: str) -> list[dict]:
+        """Verify chain integrity across every session in [start, end).
+
+        Each `verify_chain` call is an independent Walacor query; the
+        pre-fix loop awaited them serially, so a 30-day window with N
+        sessions took N × ~per-call-latency to return (frequently >60s
+        on prod, which is exactly the compliance-page hang the user
+        reported). Parallelize with a bounded semaphore so we get
+        concurrency without hammering Walacor with thousands of
+        simultaneous queries.
+        """
+        import asyncio
         pipeline = [
             {"$match": {"timestamp": {"$gte": start, "$lt": end}, "session_id": {"$ne": None}}},
             {"$group": {"_id": "$session_id"}},
         ]
         rows = await self._client.query_complex(self._exec_etid, pipeline)
-        results = []
-        for r in rows:
-            sid = r.get("_id")
-            if sid:
-                results.append(await self.verify_chain(sid))
-        return results
+        session_ids = [r.get("_id") for r in rows if r.get("_id")]
+        if not session_ids:
+            return []
+
+        # Concurrency cap chosen empirically: 8 in-flight verifications
+        # keeps Walacor responsive while still completing a 200-session
+        # window in ~25 batches × per-call-latency rather than 200×.
+        sem = asyncio.Semaphore(8)
+
+        async def _verify(sid: str) -> dict:
+            async with sem:
+                return await self.verify_chain(sid)
+
+        return await asyncio.gather(*[_verify(sid) for sid in session_ids])
 
     async def get_cost_summary(self, range_key: str = "24h", group_by: str = "model") -> dict:
         interval_map = {"1h": "-1 hour", "24h": "-1 day", "7d": "-7 days", "30d": "-30 days"}
