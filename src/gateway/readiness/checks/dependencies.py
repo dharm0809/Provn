@@ -84,13 +84,16 @@ class _Dep03OllamaReachable:
         elapsed_ms = lambda: int((time.monotonic() - t0) * 1000)
 
         # "needs_ollama" was previously driven by the config DEFAULTS, not by
-        # what the operator actually chose. `llama_guard_enabled` defaults to
-        # True and `provider_ollama_url` has a non-empty default of
-        # `http://localhost:11434` — so on any deployment that doesn't run
-        # Ollama (e.g. EC2 prod with OpenAI + Anthropic backends), the check
-        # fired red unconditionally. The intent of DEP-03 is "if THIS
-        # deployment depends on Ollama, is it reachable?" Treat "operator
-        # explicitly opted in" as the signal — checked via pydantic's
+        # what the operator actually chose. `provider_ollama_url` has a
+        # non-empty default of `http://localhost:11434` — so on any deployment
+        # that doesn't run Ollama (e.g. EC2 prod with OpenAI + Anthropic
+        # backends), the check fired red unconditionally. (Note: as of the
+        # prod-safe-defaults change, `llama_guard_enabled` now also defaults
+        # to False — but we still gate on `model_fields_set` so an operator
+        # explicitly setting it to False also counts as a real choice.)
+        # The intent of DEP-03 is "if THIS deployment depends on Ollama, is
+        # it reachable?" Treat "operator explicitly opted in" as the signal
+        # — checked via pydantic's
         # `model_fields_set`, which records exactly which fields received
         # an env/config override versus inheriting the default.
         explicitly_opted_in = (
