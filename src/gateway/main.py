@@ -1455,22 +1455,56 @@ def _init_harvesters(settings, ctx) -> None:
                 )
             try:
                 from gateway.intelligence.harvesters.safety import SafetyHarvester
-                harvesters.append(SafetyHarvester(ctx.intelligence_db))
+                # Detect LlamaGuard by analyzer_id presence in the chain.
+                # When LlamaGuard isn't loaded (no Ollama, no llama-guard
+                # model on this deployment), the harvester registers but
+                # marks itself teacher-inactive so FEA-09 doesn't red-light
+                # safety as "low coverage" — it's honestly inference-only
+                # here, not broken.
+                llama_guard_loaded = any(
+                    getattr(a, "analyzer_id", None) == "walacor.llama_guard.v3"
+                    for a in ctx.content_analyzers
+                )
+                harvesters.append(SafetyHarvester(
+                    ctx.intelligence_db,
+                    llama_guard_loaded=llama_guard_loaded,
+                ))
             except Exception as _sh_err:
                 logger.warning(
                     "SafetyHarvester init failed (non-fatal): %s", _sh_err,
                 )
-            # Task 16: Intent harvester — also optionally consumes the
-            # teacher LLM (costs $$ at high sample rates, so default is
-            # whatever the operator set in config). `http_client` is the
-            # shared `httpx.AsyncClient` already initialized upstream;
-            # falling back to `None` disables sampling cleanly.
+            # Task 16: Intent harvester. Teacher URL precedence:
+            #   1. `WALACOR_TEACHER_LLM_URL` if set explicitly (legacy path).
+            #   2. Else the configured `intelligence_judge_url` + chat path
+            #      (default points at the gateway's own self-loopback, so a
+            #      stock deployment with attested OpenAI/Anthropic models
+            #      gets a working teacher pipeline with zero extra config).
+            # Auth header uses the judge api key (defaults to the first
+            # gateway api key — the self-loopback case).
             try:
                 from gateway.intelligence.harvesters.intent import IntentHarvester
+                teacher_url = settings.teacher_llm_url
+                if not teacher_url and settings.intelligence_judge_url:
+                    base = settings.intelligence_judge_url.rstrip("/")
+                    teacher_url = (
+                        f"{base}/chat/completions"
+                        if base.endswith("/v1")
+                        else f"{base}/v1/chat/completions"
+                    )
+                # API key for the teacher request:
+                #   - explicit intelligence_judge_api_key wins (set when the
+                #     judge points at a third-party provider)
+                #   - else fall back to the first gateway api key (the
+                #     self-loopback default)
+                teacher_api_key = settings.intelligence_judge_api_key
+                if not teacher_api_key and settings.api_keys_list:
+                    teacher_api_key = settings.api_keys_list[0]
                 harvesters.append(IntentHarvester(
                     ctx.intelligence_db,
-                    teacher_url=settings.teacher_llm_url,
+                    teacher_url=teacher_url,
                     teacher_sample_rate=settings.teacher_llm_sample_rate,
+                    teacher_model=settings.intelligence_judge_model,
+                    teacher_api_key=teacher_api_key,
                     http_client=ctx.http_client,
                 ))
             except Exception as _ih_err:

@@ -320,8 +320,32 @@ class _Fea09SignalCoverage:
         now = datetime.now(timezone.utc)
         start = now - timedelta(hours=24)
         unhealthy: list[dict] = []
+        teacher_inactive: list[str] = []
         from gateway.intelligence.registry import ALLOWED_MODEL_NAMES
+
+        # Build the "model has an active teacher" set from the live
+        # harvester runner. A model with no active teacher pipeline can't
+        # produce signal regardless of traffic volume; calling it
+        # "low coverage" is misleading — it's inference-only on this
+        # deployment. FEA-09 reports those models separately in evidence
+        # but doesn't count them toward the unhealthy total.
+        teacher_active_models: set[str] = set()
+        runner = getattr(ctx, "harvester_runner", None)
+        if runner is not None:
+            try:
+                for h in runner.harvesters:
+                    if h.is_teacher_active():
+                        teacher_active_models.add(h.target_model)
+                    else:
+                        teacher_inactive.append(h.target_model)
+            except Exception:
+                # Fail-open: if the runner shape changed, fall back to the
+                # all-models scoring path rather than masking real failures.
+                teacher_active_models = set(ALLOWED_MODEL_NAMES)
+
         for model in sorted(ALLOWED_MODEL_NAMES):
+            if teacher_active_models and model not in teacher_active_models:
+                continue  # No teacher → can't produce signal → out of scope.
             try:
                 snap = db.accuracy_in_window(model, start=start, end=now)
             except Exception as exc:
@@ -337,16 +361,22 @@ class _Fea09SignalCoverage:
                     "total_rows": snap.total_rows,
                 })
         if not unhealthy:
+            detail = "signal coverage healthy across all teacher-active models"
+            evidence: dict = {}
+            if teacher_inactive:
+                detail += f" ({len(teacher_inactive)} model(s) inference-only: {sorted(teacher_inactive)})"
+                evidence["teacher_inactive"] = sorted(teacher_inactive)
             return CheckResult(
                 status="green",
-                detail="signal coverage healthy across all models",
+                detail=detail,
+                evidence=evidence,
                 elapsed_ms=elapsed_ms(),
             )
         return CheckResult(
             status="red",
             detail=f"{len(unhealthy)} model(s) below 0.10 signal coverage",
             remediation="check teacher LLM availability and harvester runner status; coverage drives drift + auto-rollback decisions",
-            evidence={"unhealthy": unhealthy},
+            evidence={"unhealthy": unhealthy, "teacher_inactive": sorted(teacher_inactive)},
             elapsed_ms=elapsed_ms(),
         )
 

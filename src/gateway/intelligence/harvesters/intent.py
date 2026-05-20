@@ -89,6 +89,8 @@ class IntentHarvester(Harvester):
         *,
         teacher_url: str | None = None,
         teacher_sample_rate: float = 0.0,
+        teacher_model: str = "teacher",
+        teacher_api_key: str = "",
         http_client: Any | None = None,
         max_pending: int = 2000,
         rand: random.Random | None = None,
@@ -96,6 +98,13 @@ class IntentHarvester(Harvester):
         self._db = db
         self._teacher_url = (teacher_url or "").strip()
         self._teacher_sample_rate = max(0.0, min(1.0, float(teacher_sample_rate or 0.0)))
+        # Model + auth header for the teacher request. Defaults preserve
+        # the pre-existing behavior (model literal "teacher", no auth),
+        # but a real deployment will pass an OpenAI-compatible model name
+        # (e.g. `claude-haiku-4-5`) plus a Bearer key — the gateway's
+        # judge config is already wired for this.
+        self._teacher_model = teacher_model or "teacher"
+        self._teacher_api_key = (teacher_api_key or "").strip()
         self._http = http_client
         self._pending: "OrderedDict[str, _PendingIntent]" = OrderedDict()
         self._max_pending = max(1, int(max_pending))
@@ -103,6 +112,23 @@ class IntentHarvester(Harvester):
         # use the module-level `random` singleton — fine for production
         # since the outcome is purely statistical (1% sample).
         self._rand = rand or random
+
+    def is_teacher_active(self) -> bool:
+        """True iff the sampled-teacher branch is configured and reachable.
+
+        The two situational branches (immediate-action mismatch,
+        next-turn contradiction) almost never fire in practice — they
+        require either a `web_search` prediction with a missing tool call
+        OR a session-id-tracked follow-up turn with explicit search
+        keywords. Without the teacher LLM sample branch, the harvester
+        produces signal on a vanishing minority of traffic and FEA-09
+        legitimately reports "no teacher."
+        """
+        return bool(
+            self._teacher_url
+            and self._http is not None
+            and self._teacher_sample_rate > 0.0
+        )
 
     async def process(self, signal: HarvesterSignal) -> None:
         if signal.request_id is None:
@@ -210,7 +236,7 @@ class IntentHarvester(Harvester):
         teacher's response doesn't match the known label vocabulary.
         """
         body = {
-            "model": "teacher",
+            "model": self._teacher_model,
             "messages": [
                 {
                     "role": "system",
@@ -226,7 +252,20 @@ class IntentHarvester(Harvester):
             "temperature": 0.0,
             "max_tokens": 16,
         }
-        resp = await self._http.post(self._teacher_url, json=body, timeout=5.0)
+        # Authorization header for the teacher endpoint. The gateway's
+        # self-loopback case (default `intelligence_judge_url`) requires
+        # the same auth as any other gateway client — without this header
+        # the request 401s and every teacher sample fails silently
+        # (caught by the broad except in `_maybe_sample_teacher`). Falls
+        # back to no header when the operator points at an unauthenticated
+        # endpoint.
+        headers = (
+            {"Authorization": f"Bearer {self._teacher_api_key}"}
+            if self._teacher_api_key else None
+        )
+        resp = await self._http.post(
+            self._teacher_url, json=body, headers=headers, timeout=5.0,
+        )
         resp.raise_for_status()
         data = resp.json()
         # OpenAI shape: choices[0].message.content.
