@@ -61,7 +61,7 @@ def test_connections_envelope_has_ten_tiles_in_order():
     assert resp.status_code == 200
     body = resp.json()
     assert set(body.keys()) >= {"generated_at", "ttl_seconds", "overall_status", "tiles", "events"}
-    assert body["ttl_seconds"] == 3
+    assert body["ttl_seconds"] == 45
     assert body["overall_status"] in ("green", "amber", "red")
     tiles = body["tiles"]
     assert len(tiles) == 10
