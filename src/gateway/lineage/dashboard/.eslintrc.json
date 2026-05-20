@@ -1,5 +1,4 @@
 {
-  "_comment": "Minimal config focused on Rules of Hooks. We intentionally do NOT enable react/recommended or any stylistic rules — the goal is to catch the specific class of bug that produces blank pages in production (React Error #310), not to bikeshed style.",
   "root": true,
   "parserOptions": {
     "ecmaVersion": 2022,
