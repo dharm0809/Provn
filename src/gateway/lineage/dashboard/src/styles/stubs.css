@@ -207,6 +207,64 @@
   border-color: var(--border);
 }
 
+/* ── Shared button family (Compliance Preview/close, Playground Send) ───────
+   `.btn-wal` and its variants are defined in intelligence.css for the
+   Intelligence view. The stub pages (Compliance, Playground) use the same
+   button look but import only stubs.css. Duplicated here rather than
+   importing all of intelligence.css (~600 lines of unrelated rules); long
+   term these should move into a shared cards.css/buttons.css. */
+.btn-wal {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+.btn-wal:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-active);
+  background: var(--bg-hover);
+}
+.btn-wal:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-wal.btn-sm { font-size: 10px; padding: 5px 10px; }
+.btn-wal.btn-primary {
+  color: var(--gold);
+  border-color: var(--gold-dim);
+  background: var(--gold-glow);
+}
+.btn-wal.btn-primary:hover:not(:disabled) {
+  background: var(--gold-dim);
+  color: var(--bg-root);
+  border-color: var(--gold);
+}
+.btn-wal.btn-danger {
+  color: var(--red);
+  border-color: rgba(239, 68, 68, 0.35);
+  background: var(--red-bg);
+}
+.btn-wal.btn-danger:hover:not(:disabled) {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+.btn-wal.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.btn-wal.btn-ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-active);
+}
+
 /* ── Shared card-header + chain-chip + overlay (Compliance + future stubs) ───
    Duplicated from styles/intelligence.css + styles/connections.css rather
    than imported wholesale — Compliance only needs these four classes and
