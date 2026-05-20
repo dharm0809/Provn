@@ -17,10 +17,18 @@ from gateway.control.discovery import discover_provider_models
 
 logger = logging.getLogger(__name__)
 
-# ── 60-second in-memory cache ─────────────────────────────────────────────────
+# ── 5-minute in-memory cache ─────────────────────────────────────────────────
+#
+# OpenWebUI polls /v1/models every ~5-10s to refresh its model picker. The
+# pre-fix 60s TTL meant every ~60s users hit a cold miss that takes ~6s on
+# prod (control_store lookup + auto-discovery fallback under CPU contention
+# from background workers). Bumping to 5min cuts cold misses by 5×, and the
+# cache invalidates IMMEDIATELY on any attestation mutation via
+# `_invalidate_models_cache()` — so operators don't see stale state after
+# attesting/revoking a model.
 _models_cache: list[dict] = []
 _models_cache_at: float = 0.0
-_MODELS_CACHE_TTL = 60.0
+_MODELS_CACHE_TTL = 300.0
 
 
 def _invalidate_models_cache() -> None:

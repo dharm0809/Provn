@@ -875,20 +875,45 @@ async def _safe_build(tile_id: str, ctx: Any) -> dict:
 
 
 async def build_snapshot(ctx: Any) -> dict:
-    tiles: list[dict] = []
-    for tile_id in TILE_ORDER:
-        tile = await _safe_build(tile_id, ctx)
-        tiles.append(tile)
+    # Build all 10 tiles concurrently. Pre-fix this loop awaited each
+    # builder in sequence, so the cold-load wall-clock was the SUM of
+    # every tile's cost — observed at ~8-10s on prod under contention
+    # from the precompute worker + chain worker. asyncio.gather drops
+    # that to ~max(tile_costs), typically <1s.
+    #
+    # `_safe_build` already try/except-wraps each tile (returns an
+    # `unknown` tile on failure), so we don't strictly need
+    # return_exceptions=True. We pass it anyway as belt-and-braces
+    # against a future regression in `_safe_build` that lets an
+    # exception escape — that would otherwise cancel sibling tiles
+    # under default gather() semantics. asyncio.gather preserves
+    # input order, so the dashboard sees tiles in TILE_ORDER.
+    tile_coros = [_safe_build(tile_id, ctx) for tile_id in TILE_ORDER]
+    events_coro = build_events(ctx)
+    *tile_results, events_result = await asyncio.gather(
+        *tile_coros, events_coro, return_exceptions=True,
+    )
 
-    try:
-        events = await build_events(ctx)
-    except Exception as exc:
-        logger.warning("connections: events merger failed: %s", exc)
+    tiles: list[dict] = []
+    for tile_id, result in zip(TILE_ORDER, tile_results):
+        if isinstance(result, BaseException):
+            logger.warning("connections: tile %s raised %s", tile_id, result)
+            tiles.append(_unknown_tile(tile_id, f"build raised: {type(result).__name__}"))
+        else:
+            tiles.append(result)
+
+    if isinstance(events_result, BaseException):
+        logger.warning("connections: events merger failed: %s", events_result)
         events = []
+    else:
+        events = events_result
 
     return {
         "generated_at": iso8601_utc(time.time()),
-        "ttl_seconds": 3,
+        # Matches the server-side cache TTL in connections/api.py:_TTL_S.
+        # Clients can use this as a hint for client-side polling cadence
+        # (no point polling faster than the cache refreshes).
+        "ttl_seconds": 45,
         "overall_status": compute_rollup(tiles),
         "tiles": tiles,
         "events": events,
