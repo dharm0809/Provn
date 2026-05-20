@@ -12,6 +12,24 @@ def anyio_backend(request):
     return request.param
 
 
+@pytest.fixture(autouse=True)
+def _clear_compliance_cache():
+    """Reset the module-level singleflight cache between tests.
+
+    Without this, the first test populates _REPORT_CACHE for
+    (start, end)=(2026-03-01, 2026-03-10), and every subsequent test
+    that uses the same window picks up the stale reader's data instead
+    of its own mocked one. The cache exists for real prod traffic
+    where multiple frameworks share a window; in tests it's noise.
+    """
+    from gateway.compliance import api as compliance_api
+    compliance_api._REPORT_CACHE.clear()
+    compliance_api._REPORT_INFLIGHT.clear()
+    yield
+    compliance_api._REPORT_CACHE.clear()
+    compliance_api._REPORT_INFLIGHT.clear()
+
+
 def _mock_reader():
     """Create a mock LineageReader with compliance methods."""
     reader = MagicMock()
@@ -158,3 +176,64 @@ async def test_export_no_lineage_reader_returns_503():
         response = await compliance_export(request)
 
     assert response.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_concurrent_framework_requests_coalesce_to_single_reader_call():
+    """Singleflight cache: 4 simultaneous requests with the same window
+    should trigger the reader ONCE, not four times.
+
+    The dashboard fires four parallel /v1/compliance/export calls (one
+    per framework) on every page load. Pre-fix, each request independently
+    awaited the four reader queries serially → 16 sequential Walacor
+    queries per page load → 60s+ timeouts on prod. The cache + coalescing
+    in api._load_shared_report fixes this; this test pins it.
+    """
+    import asyncio
+    from gateway.compliance.api import compliance_export
+    from starlette.requests import Request
+
+    reader = _mock_reader()
+    # Counter-wrap each reader method so we can assert it ran exactly
+    # once across all four concurrent requests.
+    call_counts = {"summary": 0, "executions": 0, "attestations": 0, "chain": 0}
+
+    def _counted(name, payload):
+        def _f(*args, **kw):
+            call_counts[name] += 1
+            return payload
+        return _f
+
+    reader.get_compliance_summary = _counted("summary", reader.get_compliance_summary.return_value)
+    reader.get_execution_export = _counted("executions", reader.get_execution_export.return_value)
+    reader.get_attestation_summary = _counted("attestations", reader.get_attestation_summary.return_value)
+    reader.get_chain_verification_report = _counted("chain", reader.get_chain_verification_report.return_value)
+
+    async def _one(framework: str):
+        with patch("gateway.compliance.api.get_pipeline_context") as mock_ctx:
+            mock_ctx.return_value.lineage_reader = reader
+            mock_ctx.return_value.content_analyzers = []
+            mock_ctx.return_value.session_chain = None
+            mock_ctx.return_value.wal_writer = None
+            mock_ctx.return_value.walacor_client = None
+            scope = {
+                "type": "http", "method": "GET",
+                "path": "/v1/compliance/export",
+                "query_string": f"format=json&start=2026-03-01&end=2026-03-10&framework={framework}".encode(),
+                "headers": [],
+            }
+            return await compliance_export(Request(scope))
+
+    # Four frameworks in parallel — what the dashboard does.
+    responses = await asyncio.gather(
+        _one("eu_ai_act"),
+        _one("nist"),
+        _one("soc2"),
+        _one("iso42001"),
+    )
+    assert all(r.status_code == 200 for r in responses)
+    # Each underlying reader query should have run EXACTLY ONCE across
+    # all four requests — that's the whole point of the singleflight.
+    assert call_counts == {"summary": 1, "executions": 1, "attestations": 1, "chain": 1}, (
+        f"expected each reader query to fire once total, got {call_counts}"
+    )
