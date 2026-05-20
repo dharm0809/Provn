@@ -86,8 +86,28 @@ def _normalize_safety_category(category: Any) -> str | None:
 class SafetyHarvester(Harvester):
     target_model = "safety"
 
-    def __init__(self, db: IntelligenceDB) -> None:
+    def __init__(self, db: IntelligenceDB, *, llama_guard_loaded: bool = True) -> None:
         self._db = db
+        # The safety teacher pipeline requires the LlamaGuard analyzer to
+        # be in the content_analyzer chain (it provides the teacher labels
+        # the harvester compares against the SafetyClassifier's
+        # student labels). Deployments without LlamaGuard (no Ollama,
+        # no llama-guard model loaded) can still register this harvester
+        # — it will silently do nothing — but FEA-09 should report
+        # "no teacher" instead of "low coverage."
+        self._llama_guard_loaded = bool(llama_guard_loaded)
+
+    def is_teacher_active(self) -> bool:
+        """True iff LlamaGuard was loaded into ``ctx.content_analyzers``.
+
+        Without LlamaGuard, every safety verdict row processed here will
+        early-return at the `_find_decision(decisions, _LLAMA_GUARD_ANALYZER_ID)`
+        check — no teacher label, no divergence_signal, no learning loop.
+        FEA-09 sees this and excludes safety from the unhealthy list,
+        rather than red-lighting a model that's structurally inference-only
+        on this deployment.
+        """
+        return self._llama_guard_loaded
 
     async def process(self, signal: HarvesterSignal) -> None:
         import asyncio

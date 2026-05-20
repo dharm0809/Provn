@@ -95,6 +95,27 @@ class Harvester(abc.ABC):
     async def process(self, signal: HarvesterSignal) -> None:
         """Consume a signal. Exceptions are logged by the runner, not by the caller."""
 
+    def is_teacher_active(self) -> bool:
+        """True iff this harvester can realistically produce divergence signals.
+
+        Read by readiness check ``FEA-09`` (intelligence signal coverage) so
+        it can distinguish two operationally different situations:
+
+        * **No teacher configured / no teacher source feasible** — the model
+          runs inference-only on this deployment. FEA-09 should treat the
+          model as out-of-scope, not "low coverage."
+        * **Teacher configured but coverage low** — a real problem worth
+          flagging red.
+
+        Default ``True`` keeps the previous behavior for harvesters that
+        always produce signals (e.g. ``SchemaMapperHarvester``'s
+        heuristic teacher fires on every per-field verdict). Subclasses
+        with conditional teacher sources (``IntentHarvester`` needs a
+        teacher URL; ``SafetyHarvester`` needs the LlamaGuard analyzer)
+        override.
+        """
+        return True
+
 
 class HarvesterRunner:
     """Queue-backed dispatcher.
@@ -138,6 +159,16 @@ class HarvesterRunner:
     def register(self, harvester: Harvester) -> None:
         """Register a harvester. Safe to call before or after `start()`."""
         self._harvesters.append(harvester)
+
+    @property
+    def harvesters(self) -> list[Harvester]:
+        """Read-only view of registered harvesters.
+
+        Used by FEA-09 to ask each harvester whether its teacher pipeline
+        is active. Returns a shallow copy so callers can't mutate the
+        internal list.
+        """
+        return list(self._harvesters)
 
     def submit(self, signal: HarvesterSignal) -> bool:
         """Non-blocking enqueue. Returns False if the queue is full (dropped)."""
