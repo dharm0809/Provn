@@ -1056,6 +1056,34 @@ def _init_lineage(settings, ctx) -> None:
     )
 
 
+def _init_compliance_precompute(settings, ctx) -> None:
+    """Pre-warm the compliance singleflight cache for the dashboard's default windows.
+
+    The Compliance dashboard's RangePicker defaults to {today, 7d, 30d, 90d}.
+    Each window's shared report (summary/executions/attestations/chain
+    sample) takes ~5s on prod cold; warming the cache every 60s keeps
+    dashboard navigations on cache hits (~50ms) instead of cold computes.
+
+    No-op when there's no lineage_reader (transparent-proxy deployments,
+    or lineage disabled). Fail-open: a worker that can't start logs a
+    warning and leaves the dashboard on cold-load latency, but the
+    request path itself remains fully functional.
+    """
+    if not getattr(ctx, "lineage_reader", None):
+        return
+    try:
+        from gateway.compliance.precompute import CompliancePrecomputeWorker
+        worker = CompliancePrecomputeWorker(ctx.lineage_reader)
+        worker.start()
+        ctx.compliance_precompute_worker = worker
+        logger.info(
+            "Compliance precompute worker started (windows=today/7d/30d/90d, tick=60s)"
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open per docstring
+        logger.warning("Compliance precompute init failed (non-fatal): %s", exc)
+        ctx.compliance_precompute_worker = None
+
+
 def _init_otel(settings, ctx) -> None:
     """Phase 17: OpenTelemetry tracer (optional; fail-open if SDK not installed)."""
     from gateway.telemetry.otel import init_tracer
@@ -1771,6 +1799,11 @@ async def on_startup() -> None:
             await _init_batch_writer(settings, ctx)
         _init_storage(settings, ctx)
         _init_lineage(settings, ctx)
+        # Pre-warm the compliance report cache once the reader is up.
+        # The worker calls _load_shared_report on a 60s interval for the
+        # default RangePicker windows, so dashboard cold-loads drop from
+        # ~5s to ~50ms after the first tick.
+        _init_compliance_precompute(settings, ctx)
         ctx.redis_client = await _init_redis(settings)
         # Intelligence verdict capture must init BEFORE any ONNX client
         # (SafetyClassifier, SchemaMapper) so the buffer is available for wiring.
@@ -2260,6 +2293,17 @@ async def on_shutdown() -> None:
             errors.append(f"intelligence_retention_task: {e}")
     ctx.intelligence_retention_task = None
     ctx.intelligence_retention_sweeper = None
+
+    # Stop the compliance precompute worker. Idempotent — safe to call
+    # even if the worker never started (e.g. lineage disabled).
+    if getattr(ctx, "compliance_precompute_worker", None) is not None:
+        try:
+            await asyncio.wait_for(ctx.compliance_precompute_worker.stop(), timeout=2.0)
+        except asyncio.TimeoutError:
+            errors.append("compliance_precompute_worker: stop timed out")
+        except Exception as e:
+            errors.append(f"compliance_precompute_worker: {e}")
+        ctx.compliance_precompute_worker = None
 
     # drain the harvester runner. stop() injects a
     # sentinel so the background task wakes from its queue-get and exits;

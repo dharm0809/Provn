@@ -23,15 +23,14 @@ logger = logging.getLogger(__name__)
 # surface "report is slow" instead of an infinite spinner.
 _REPORT_TIMEOUT_S = 45.0
 
-# Singleflight cache. The dashboard fires four parallel /v1/compliance/export
-# requests (one per framework) with the same (start, end) window. Without
-# coalescing, each request independently triggers the full four-reader-call
-# waterfall (16 Walacor queries total). With this cache, the first request
-# computes once and the other three reuse the result — only the per-framework
-# `framework_mapping` is re-derived (it's pure-function over already-fetched
-# data, ~microseconds). 30 s TTL is long enough to absorb the dashboard burst
-# and short enough that a manual refresh sees fresh data.
-_REPORT_TTL_S = 30.0
+# Singleflight cache. The dashboard fires /v1/compliance/export requests
+# (the frontend dedups to one shared fetch; this cache still matters when
+# multiple operators or background pre-warms hit the same window). 120 s
+# TTL keeps a freshly computed report warm across dashboard navigations
+# while still bounding staleness — combined with the precompute worker
+# (gateway.compliance.precompute) which refreshes every 60 s, the cache
+# is effectively always warm for the default RangePicker windows.
+_REPORT_TTL_S = 120.0
 _REPORT_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _REPORT_INFLIGHT: dict[tuple[str, str], asyncio.Future] = {}
 _REPORT_LOCK = asyncio.Lock()
@@ -148,9 +147,16 @@ async def compliance_export(request: Request) -> Response:
     except Exception as e:
         logger.warning("Audit readiness assessment failed: %s", e)
 
+    # Distinguish "computed_at" (when the shared report's underlying
+    # reader queries actually ran — may be up to ~2 minutes ago if served
+    # from the precompute cache) from "generated_at" (when THIS specific
+    # response was assembled, always now). The dashboard can show both:
+    # "rendered at … · data as of …".
+    computed_at = shared.get("computed_at")
     report = {
         "report": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "computed_at": computed_at,
             "period": {"start": start, "end": end},
             "framework": framework,
         },
@@ -253,6 +259,13 @@ async def _compute_shared_report(reader, start: str, end: str) -> dict:
         "attestations": attestations,
         "chain_report": chain_report,
         "chain_integrity": chain_integrity,
+        # Wall-clock timestamp of when this shared report was actually
+        # computed (vs. the cache-monotonic timestamp). Surfaced to the
+        # API response so the dashboard can render a "data as of HH:MM:SS"
+        # badge and operators know whether they're looking at a fresh
+        # report or a pre-warmed cache hit (refreshed every ~60s by the
+        # CompliancePrecomputeWorker).
+        "computed_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
