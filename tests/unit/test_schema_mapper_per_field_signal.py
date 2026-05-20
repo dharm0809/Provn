@@ -196,6 +196,50 @@ def test_per_field_input_hashes_are_unique_within_response():
     assert len(set(hashes)) == len(hashes)
 
 
+def test_labels_binary_drift_warns_at_boot(caplog):
+    """Loading a mapper whose labels.json lists a label the ONNX binary
+    can't predict must log a WARNING naming the unpredictable label(s).
+
+    Operators rely on this signal to know a retrain is needed BEFORE the
+    accuracy metric quietly degrades (the prod failure mode PR #50 fixed).
+    """
+    import logging
+
+    from gateway.schema.canonical import ENVELOPE_LABEL
+
+    # Construct a mapper, then trigger a fresh _validate_labels run with
+    # a synthetic extra label that the binary can't possibly emit. We
+    # capture WARNINGs emitted during that re-run.
+    mapper = SchemaMapper(verdict_buffer=None)
+    if mapper._session is None:
+        pytest.skip("ONNX session unavailable")
+    if ENVELOPE_LABEL in mapper._model_class_labels:
+        pytest.skip("ONNX binary now predicts envelope; drift signal would be vacuous.")
+
+    # Add envelope to labels.json's in-memory snapshot — simulates the
+    # prod pre-#50 state. _validate_labels recomputes _model_class_labels
+    # against the (unchanged) ONNX binary and should detect the drift.
+    mapper._labels.append(ENVELOPE_LABEL)
+    mapper._label_to_idx[ENVELOPE_LABEL] = len(mapper._labels) - 1
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="gateway.schema.mapper"):
+        mapper._validate_labels()
+
+    drift_msgs = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "label/binary drift" in r.getMessage()
+    ]
+    assert drift_msgs, (
+        "expected a WARNING when labels.json lists a label the ONNX binary "
+        "cannot predict; got no drift warning"
+    )
+    assert any(ENVELOPE_LABEL in r.getMessage() for r in drift_msgs), (
+        f"drift warning must name the unpredictable label(s); "
+        f"messages={[r.getMessage() for r in drift_msgs]}"
+    )
+
+
 def test_envelope_gate_trusts_model_output_not_labels_json():
     """Regression for the production 0.2% accuracy bug fixed by PR #50.
 

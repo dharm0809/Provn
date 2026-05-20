@@ -467,12 +467,35 @@ class SchemaMapper:
             )
             logger.error(msg)
             raise LabelsMismatchError(msg)
-        if n_classes < len(self._labels):
+        # Identify labels.json entries the loaded ONNX binary CANNOT
+        # predict. PR #50/#51 fixed the specific case where `envelope`
+        # slipped into labels.json without a matching retrain and
+        # collapsed the rolling accuracy metric to 0.2%. The per-field
+        # gate (mapper.py:772) is now labels.json-independent — it reads
+        # `_model_class_labels`. But any code path that still consults
+        # `_label_to_idx` as "what the model can emit" will misbehave.
+        # This warning makes that drift self-announce at boot.
+        unpredictable = sorted(set(self._labels) - self._model_class_labels)
+        if unpredictable:
+            logger.warning(
+                "SchemaMapper label/binary drift: labels.json lists %d label(s) "
+                "the loaded ONNX binary cannot predict: %s. The per-field verdict "
+                "gate ignores labels.json (reads ONNX output classes directly), "
+                "so accuracy metrics stay honest — but any consumer treating "
+                "labels.json as 'what the model can emit' will misbehave. "
+                "Retrain the binary against the current labels.json, or remove "
+                "the unpredictable labels until a retrain ships.",
+                len(unpredictable), unpredictable,
+            )
+        elif n_classes < len(self._labels):
+            # Count-mismatch with no name-mismatch: every model class is
+            # listed in labels.json AND every label is predictable. The
+            # remaining "extra" labels are an artifact of how the set is
+            # represented (no string in labels.json is unaccounted for).
+            # Genuinely unreachable in current code paths, but harmless.
             logger.info(
-                "SchemaMapper: ONNX model emits %d classes vs %d labels — "
-                "candidate trained on a subset of the production label set. "
-                "Indices remain safe; unused labels are reserved for future "
-                "retrains.", n_classes, len(self._labels),
+                "SchemaMapper: ONNX model emits %d classes vs %d labels; no "
+                "name-level drift detected.", n_classes, len(self._labels),
             )
 
     def _record_timeout(self) -> None:
