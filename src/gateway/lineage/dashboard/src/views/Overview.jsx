@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { getSessions, getAttempts, getThroughputHistory, getTokenLatency } from '../api';
 import { timeAgo, formatNumber, formatUptime, displayModel, formatSessionId, isTabVisible } from '../utils';
 import { ThroughputChart, TokenChart, LatencyChart } from '../components/SvgCharts';
+import { useSWR } from '../lib/useSWR';
 import '../styles/overview-v2.css';
 
 const POLL_MS = 3000;
@@ -225,48 +226,55 @@ export default function Overview({ navigate, health }) {
   const prevSessionIdsRef = useRef(new Set());
   const prevActivityIdsRef = useRef(new Set());
 
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async (isFirst) => {
-      try {
-        const [sessData, attData] = await Promise.all([getSessions(6, 0), getAttempts(8, 0)]);
-        if (cancelled) return;
-        const ss = sessData.sessions || [];
-        const aa = attData.attempts || attData.items || [];
-
-        if (!isFirst) {
-          const prevSess = prevSessionIdsRef.current;
-          const freshSess = new Set(ss.map(s => s.session_id).filter(id => !prevSess.has(id)));
-          if (freshSess.size > 0) {
-            setNewSessionIds(freshSess);
-            setTimeout(() => setNewSessionIds(new Set()), 800);
-          }
-          const prevAct = prevActivityIdsRef.current;
-          const freshAct = new Set(aa.map((a, i) => a.execution_id || `r${i}`).filter(id => !prevAct.has(id)));
-          if (freshAct.size > 0) {
-            setNewActivityIds(freshAct);
-            setTimeout(() => setNewActivityIds(new Set()), 800);
-          }
-        }
-        prevSessionIdsRef.current  = new Set(ss.map(s => s.session_id));
-        prevActivityIdsRef.current = new Set(aa.map((a, i) => a.execution_id || `r${i}`));
-
-        setSessions(ss);
-        setSessTotal(typeof sessData.total === "number" ? sessData.total : ss.length);
-        setAttempts(aa);
-        setAttStats(attData.stats || {});
-        setAttTotal(attData.total || 0);
-        setError(null);
-      } catch (e) {
-        if (!cancelled && isFirst) setError(e.message);
-      } finally {
-        if (!cancelled && isFirst) setLoading(false);
-      }
-    };
-    refresh(true);
-    const id = setInterval(() => { if (isTabVisible()) refresh(false); }, POLL_MS);
-    return () => { cancelled = true; clearInterval(id); };
+  // Combined sessions+attempts fetch. Routed through useSWR so the cached
+  // value paints instantly on remount (e.g. when switching back from another
+  // view); new-row animation detection lives in onSuccess because it depends
+  // on the previous-render refs, which SWR itself doesn't track.
+  const isFirstFetchRef = useRef(true);
+  const overviewFetcher = useCallback(async () => {
+    const [sessData, attData] = await Promise.all([getSessions(6, 0), getAttempts(8, 0)]);
+    return { sessData, attData };
   }, []);
+  const handleOverviewSuccess = useCallback(({ sessData, attData }) => {
+    const ss = sessData.sessions || [];
+    const aa = attData.attempts || attData.items || [];
+
+    if (!isFirstFetchRef.current) {
+      const prevSess = prevSessionIdsRef.current;
+      const freshSess = new Set(ss.map(s => s.session_id).filter(id => !prevSess.has(id)));
+      if (freshSess.size > 0) {
+        setNewSessionIds(freshSess);
+        setTimeout(() => setNewSessionIds(new Set()), 800);
+      }
+      const prevAct = prevActivityIdsRef.current;
+      const freshAct = new Set(aa.map((a, i) => a.execution_id || `r${i}`).filter(id => !prevAct.has(id)));
+      if (freshAct.size > 0) {
+        setNewActivityIds(freshAct);
+        setTimeout(() => setNewActivityIds(new Set()), 800);
+      }
+    }
+    prevSessionIdsRef.current  = new Set(ss.map(s => s.session_id));
+    prevActivityIdsRef.current = new Set(aa.map((a, i) => a.execution_id || `r${i}`));
+
+    setSessions(ss);
+    setSessTotal(typeof sessData.total === "number" ? sessData.total : ss.length);
+    setAttempts(aa);
+    setAttStats(attData.stats || {});
+    setAttTotal(attData.total || 0);
+    setError(null);
+    setLoading(false);
+    isFirstFetchRef.current = false;
+  }, []);
+  const { error: overviewErr } = useSWR('overview:sessions+attempts', overviewFetcher, {
+    intervalMs: POLL_MS,
+    onSuccess: handleOverviewSuccess,
+  });
+  useEffect(() => {
+    if (overviewErr && isFirstFetchRef.current) {
+      setError(overviewErr.message || String(overviewErr));
+      setLoading(false);
+    }
+  }, [overviewErr]);
 
   // Charts
   const applySummary = useCallback((tpRows, tkRows, rng) => {
