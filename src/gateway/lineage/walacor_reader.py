@@ -425,7 +425,26 @@ class WalacorLineageReader:
             "as": "env",
         }})
         rows = await self._client.query_complex(self._exec_etid, pipeline)
+
+        # Dedupe by record_id. The delivery worker is at-least-once
+        # (retries on transient sink failure), so a network blip on the
+        # ack path can cause the same record to land in Walacor's
+        # executions store twice. Two rows with identical `record_id`
+        # are the same logical record by definition — keeping both
+        # poisons chain verification because the verifier walks
+        # positions 0..N-1 expecting sequence_number == position, and a
+        # duplicate at position k shifts every record after it by one.
+        # That's a storage-layer artifact, not a chain anomaly.
+        #
+        # Long-term-right fix is idempotent ingest at the Walacor side
+        # (uniqueness on record_id) or pre-write existence check in the
+        # delivery worker. Until that lands, read-time dedup keeps the
+        # chain reads honest while still leaving the duplicate visible
+        # in any per-execution_id query (so operators auditing storage
+        # can find them).
         results = []
+        seen_record_ids: set[str] = set()
+        duplicates_dropped = 0
         for r in rows:
             # Capture EId BEFORE deserialization — _deserialize_record now
             # strips it from the top-level record (C9) so the dashboard sees
@@ -435,7 +454,21 @@ class WalacorLineageReader:
             _deserialize_record(r)
             r["_walacor_eid"] = eid
             _normalize_record(r)
+            rid = r.get("record_id")
+            if rid is not None and rid in seen_record_ids:
+                duplicates_dropped += 1
+                continue
+            if rid is not None:
+                seen_record_ids.add(rid)
             results.append(r)
+        if duplicates_dropped:
+            logger.warning(
+                "Session %s timeline had %d duplicate record_id row(s) — "
+                "deduped at read. Likely cause: delivery_worker retry after "
+                "lost ack; investigate write-time idempotency at the "
+                "Walacor sink.",
+                session_id, duplicates_dropped,
+            )
         return results
 
     # ── Execution detail ──────────────────────────────────────────────────

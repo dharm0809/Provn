@@ -144,3 +144,39 @@ async def test_get_execution_trace_handles_malformed_timings() -> None:
     reader._client.query_complex.side_effect = _query
     result = await reader.get_execution_trace("exec-3")
     assert result["timings"] == {}
+
+
+# ── get_session_timeline: dedupes duplicate record_id rows ────────────────────
+
+@pytest.mark.anyio
+async def test_get_session_timeline_dedupes_duplicate_record_ids() -> None:
+    """A duplicate record_id from at-least-once delivery is collapsed at read.
+
+    The delivery_worker retries on transient sink failure. If Walacor
+    received the write but the ack was lost on the return path, the
+    same record_id can land in Walacor's executions store twice. Two
+    rows with identical record_id are the same logical record;
+    keeping both poisons chain verification (the verifier walks
+    positions 0..N-1 and expects sequence_number == position, so a
+    duplicate at position k shifts every subsequent record by one).
+
+    This regression test reproduces the prod finding from session
+    `sess-bob-8e738c7f` and asserts the reader drops the duplicate.
+    """
+    reader = _make_reader()
+    # Two rows with identical record_id — the delivery-retry shape.
+    rid = "019e427d-2842-7000-ba71-4b30e8d5a136"
+    reader._client.query_complex.return_value = [
+        {"session_id": "sess-x", "record_id": rid, "sequence_number": 5,
+         "execution_id": "exec-dup", "env": []},
+        {"session_id": "sess-x", "record_id": rid, "sequence_number": 5,
+         "execution_id": "exec-dup", "env": []},  # exact duplicate
+        {"session_id": "sess-x", "record_id": "019e427d-3b5a-7000-a4a2-453a17832b1c",
+         "sequence_number": 6, "execution_id": "exec-next", "env": []},
+    ]
+    result = await reader.get_session_timeline("sess-x")
+    # Three input rows → two output rows (the duplicate is dropped).
+    assert len(result) == 2, f"expected 2 rows after dedup, got {len(result)}: {result}"
+    assert [r["record_id"] for r in result] == [rid, "019e427d-3b5a-7000-a4a2-453a17832b1c"]
+    # And the sequence_number sequence is contiguous from 5 → 6 (no shift).
+    assert [r["sequence_number"] for r in result] == [5, 6]
