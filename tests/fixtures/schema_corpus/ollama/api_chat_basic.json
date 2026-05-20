@@ -1,0 +1,20 @@
+{
+  "target": "ollama",
+  "variant": "api_chat_basic",
+  "raw": {
+    "model": "llama3.1:8b",
+    "message": {
+      "content": "Paris."
+    },
+    "done_reason": "stop",
+    "prompt_eval_count": 18,
+    "eval_count": 3
+  },
+  "expected": {
+    "content": true,
+    "finish_reason": true,
+    "model": true,
+    "usage.prompt_tokens": true,
+    "usage.completion_tokens": true
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "target": "openai",
+  "variant": "nonstream_basic",
+  "raw": {
+    "id": "chatcmpl-9abc123def456",
+    "model": "gpt-4o-mini",
+    "choices": [
+      {
+        "message": {
+          "content": "The capital of France is Paris."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 14,
+      "completion_tokens": 8,
+      "total_tokens": 22
+    }
+  },
+  "expected": {
+    "content": true,
+    "finish_reason": true,
+    "response_id": true,
+    "model": true,
+    "usage.prompt_tokens": true,
+    "usage.completion_tokens": true,
+    "usage.total_tokens": true
+  }
+}
