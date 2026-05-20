@@ -289,7 +289,25 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
 
     Supports auth_mode: 'api_key' (default), 'jwt', or 'both'.
     """
-    _always_open = ("/", "/health", "/metrics", "/v1/models")
+    # /health stays public even when observability_auth_required=True so load
+    # balancers can probe without an API key. The health handler itself strips debug
+    # fields when the caller is unauthenticated (see gateway/health.py).
+    # /metrics is in always-open by default but moves under observability auth when
+    # WALACOR_OBSERVABILITY_AUTH_REQUIRED=true.
+    _settings_for_paths = get_settings()
+    _observability_required = getattr(
+        _settings_for_paths, "observability_auth_required", False
+    )
+    _observability_paths = ("/v1/readiness", "/v1/connections", "/metrics")
+    _is_observability = request.url.path in _observability_paths
+
+    # When the flag is OFF, preserve historical behavior: /metrics is always open;
+    # /v1/readiness and /v1/connections fall through to standard API-key middleware
+    # (which only requires a key if WALACOR_GATEWAY_API_KEYS is configured).
+    _always_open = ("/", "/health", "/v1/models")
+    if not _observability_required and request.url.path == "/metrics":
+        _always_open = _always_open + ("/metrics",)
+
     # /lineage/ serves the static dashboard — must load so users can reach the AuthGate.
     # /v1/lineage/* and /v1/compliance expose JSON data; gated when lineage_auth_required=True.
     # /v1/openwebui/* and /api/* are the OpenWebUI plugin + native Ollama proxy routes;
@@ -297,7 +315,6 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
     _static_ui = _is_lineage_dashboard_path(request.url.path)
     _plugin_paths = ("/v1/openwebui/", "/api/")
     _lineage_data_paths = ("/v1/lineage/", "/v1/compliance")
-    _settings_for_paths = get_settings()
     _lineage_data_open = not _settings_for_paths.lineage_auth_required
     _plugin_paths_open = not getattr(_settings_for_paths, "plugin_auth_required", False)
     if (
@@ -306,6 +323,29 @@ async def api_key_middleware(request: Request, call_next):  # noqa: C901
         or (_plugin_paths_open and request.url.path.startswith(_plugin_paths))
         or (_lineage_data_open and request.url.path.startswith(_lineage_data_paths))
     ):
+        return await call_next(request)
+
+    # Observability paths (when WALACOR_OBSERVABILITY_AUTH_REQUIRED=true) use a
+    # dedicated key check that distinguishes 401 (missing key) from 403 (wrong
+    # key). We do not run JWT/tenant binding because these endpoints are
+    # operator-scoped, not tenant-scoped.
+    if _is_observability and _observability_required:
+        settings = get_settings()
+        if not settings.api_keys_list:
+            # Flag on but no keys configured — fail closed (operator misconfig).
+            return JSONResponse(
+                {"error": "Observability auth required but no API keys configured"},
+                status_code=503,
+            )
+        from gateway.auth.api_key import (
+            _constant_time_key_check,
+            get_api_key_from_request,
+        )
+        key = get_api_key_from_request(request)
+        if not key:
+            return JSONResponse({"error": "Missing API key"}, status_code=401)
+        if not _constant_time_key_check(key, settings.api_keys_list):
+            return JSONResponse({"error": "Invalid API key"}, status_code=403)
         return await call_next(request)
 
     # Pre-auth per-IP rate limiting (before any auth check).
