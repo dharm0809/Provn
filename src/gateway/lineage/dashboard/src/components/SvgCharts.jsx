@@ -62,6 +62,10 @@ function areaPath(line, padding, height) {
   return `${smoothPath(line)} L ${last[0].toFixed(2)} ${y0} L ${first[0].toFixed(2)} ${y0} Z`;
 }
 
+function fmt(n) {
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : Math.round(n);
+}
+
 export function chartPalette(isLight) {
   if (isLight) return {
     gold: '#9a6700', green: '#15803d', red: '#dc2626', blue: '#2563eb',
@@ -76,23 +80,26 @@ export function chartPalette(isLight) {
 }
 
 /* ── Throughput Chart ─────────────────────────────────────────────────────── */
-export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
-  // Design: align with LatencyChart aesthetic (clean, proportionate)
-  // and use STACKED areas so allowed+blocked add up to total requests
-  // per bucket. Previously the chart was 1000×220 (out of proportion
-  // with the other 600×170 charts) and drew allowed/blocked as two
-  // overlapping zero-anchored areas PLUS a separate gold rps line on
-  // top — three series competing visually. Now: allowed is the base
-  // band, blocked is stacked on top, and a thin top-of-stack line
-  // marks total requests per bucket. The y-axis is total per bucket.
-  const P = chartPalette(isLight);
-  const W = 600, H = 200;  // taller than the small cards (170) — it's the headline chart
-  const padding = { left: 44, right: 10, top: 12, bottom: 24 };
-  const id = isLight ? 'light' : 'dark';
+/* Bars design. Discrete vertical bar per bucket; allowed is the gold base,
+   blocked stacks red on top. Reads as a trading-terminal histogram and
+   commits to the design system's brutalist edge (no rounded corners
+   anywhere in the system).
 
-  // Empty-state detection: when every bucket has zero allowed AND zero
-  // blocked, the stacked areas collapse to a flat baseline (visually
-  // identical to a blank card). Show a clear placeholder instead.
+   Annotations preserved from the LatencyChart aesthetic:
+     • Peak-total spike with dashed riser and "↑ N rps" label
+     • Live-tick pulse on the rightmost bar (SVG <animate>, not CSS)
+     • Hovered bar highlights; non-hovered bars dim to 0.55 opacity
+     • Tooltip still breaks out total / allowed / blocked
+
+   Re-render safety: no CSS animations triggered on mount or data updates.
+*/
+export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
+  const P = chartPalette(isLight);
+  const W = 600, H = 200;
+  const padding = { left: 44, right: 10, top: 22, bottom: 26 };
+
+  // Empty-state — every bucket is zero (e.g. right after a worker restart).
+  // Without this the bars vanish and the card looks broken.
   const isFlat = !data.length || data.every(d => !d.allowed && !d.blocked);
   if (isFlat) {
     return (
@@ -102,79 +109,72 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
     );
   }
 
-  const { allowedAreaP, blockedBandP, totalLineP, xLabels, yTicks, hoverLine, allowedLine, totalLine } = useMemo(() => {
-    if (!data.length) return {};
+  const memo = useMemo(() => {
+    if (!data.length) return null;
     const allowed = data.map(d => d.allowed || 0);
     const blocked = data.map(d => d.blocked || 0);
     const total = allowed.map((a, i) => a + blocked[i]);
     const yMax = Math.max(...total) * 1.15 || 1;
 
-    const allowedLine = scalePoints(allowed, W, H, padding, yMax);
-    const totalLine = scalePoints(total, W, H, padding, yMax);
+    const innerW = W - padding.left - padding.right;
+    const innerH = H - padding.top - padding.bottom;
+    const n = data.length;
+    const slot = innerW / n;
+    const barW = Math.max(2, slot - 1.5);
 
-    // Blocked band: between allowedLine (below) and totalLine (above).
-    const blockedBand = (() => {
-      if (!totalLine.length) return '';
-      const fwd = totalLine.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
-      const back = [...allowedLine].reverse().map(([x, y]) => `L${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
-      return `${fwd} ${back} Z`;
-    })();
+    const bars = data.map((d, i) => {
+      const x = padding.left + i * slot + (slot - barW) / 2;
+      const totalH = (total[i] / yMax) * innerH;
+      const blockedH = (blocked[i] / yMax) * innerH;
+      const allowedH = Math.max(0, totalH - blockedH);
+      const yTop = padding.top + innerH - totalH;
+      const yAllowedTop = padding.top + innerH - allowedH;
+      return { x, w: barW, yTop, yAllowedTop, allowedH, blockedH,
+               total: total[i], allowed: allowed[i], blocked: blocked[i] };
+    });
 
     const yTicks = [];
     for (let i = 0; i <= 3; i++) {
       const v = (yMax / 3) * i;
-      const y = H - padding.bottom - ((v / yMax) * (H - padding.top - padding.bottom));
-      yTicks.push({ y, label: v >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v) });
+      const y = H - padding.bottom - ((v / yMax) * innerH);
+      yTicks.push({ y, label: fmt(v) });
     }
 
-    const n = data.length;
     const xLabels = [];
     for (let i = 0; i <= 5; i++) {
       const idx = Math.round((i / 5) * (n - 1));
       xLabels.push({
-        x: padding.left + (idx / (n - 1)) * (W - padding.left - padding.right),
+        x: padding.left + (idx / (n - 1)) * innerW,
         text: data[idx]?.t || '',
       });
     }
 
-    let hoverLine = null;
-    if (hoverIdx != null && data[hoverIdx]) {
-      const x = padding.left + (hoverIdx / (n - 1)) * (W - padding.left - padding.right);
-      hoverLine = {
-        x, d: data[hoverIdx],
-        allowedY: allowedLine[hoverIdx][1],
-        totalY: totalLine[hoverIdx][1],
-      };
-    }
+    let spikeIdx = 0;
+    total.forEach((v, i) => { if (v > total[spikeIdx]) spikeIdx = i; });
+
+    const lastBar = bars[bars.length - 1];
+    const hover = hoverIdx != null && data[hoverIdx]
+      ? { bar: bars[hoverIdx], d: data[hoverIdx], idx: hoverIdx }
+      : null;
 
     return {
-      allowedAreaP: areaPath(allowedLine, padding, H),
-      blockedBandP: blockedBand,
-      totalLineP: smoothPath(totalLine),
-      xLabels, yTicks, hoverLine, allowedLine, totalLine,
+      bars, yTicks, xLabels, spikeIdx, spikeBar: bars[spikeIdx],
+      spikeTotal: total[spikeIdx], lastBar, hover,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, hoverIdx, isLight]);
 
   const onMove = useRafHover(setHoverIdx, W, padding, data.length);
+  if (!memo) return null;
+  const { bars, yTicks, xLabels, spikeIdx, spikeBar, spikeTotal, lastBar, hover } = memo;
 
   return (
     <div className="throughput-chart-wrap" style={{ position: 'relative' }}>
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
            style={{ width: '100%', height: '100%', display: 'block', overflow: 'visible' }}
            onMouseMove={onMove} onMouseLeave={() => setHoverIdx(null)}>
-        <defs>
-          <linearGradient id={`tg-allowed-${id}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={P.green} stopOpacity={P.greenA1} />
-            <stop offset="100%" stopColor={P.green} stopOpacity="0" />
-          </linearGradient>
-          <linearGradient id={`tg-blocked-${id}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={P.red} stopOpacity={P.redA1} />
-            <stop offset="100%" stopColor={P.red} stopOpacity="0" />
-          </linearGradient>
-        </defs>
 
-        {(yTicks || []).map((t, i) => (
+        {yTicks.map((t, i) => (
           <g key={i}>
             <line x1={padding.left} y1={t.y} x2={W - padding.right} y2={t.y}
                   stroke={P.grid} strokeDasharray="2 4" />
@@ -182,47 +182,68 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
                   fontFamily="var(--mono)" fontSize="9" fill={P.axis}>{t.label}</text>
           </g>
         ))}
-        {(xLabels || []).map((l, i) => (
+        {xLabels.map((l, i) => (
           <text key={i} x={l.x} y={H - 8} textAnchor="middle"
                 fontFamily="var(--mono)" fontSize="9" fill={P.axis}>{l.text}</text>
         ))}
 
-        {/* Stacked: allowed at the base, blocked band on top, total-line outlines the stack top. */}
-        {allowedAreaP && <path d={allowedAreaP} fill={`url(#tg-allowed-${id})`} />}
-        {blockedBandP && <path d={blockedBandP} fill={`url(#tg-blocked-${id})`} />}
-        {totalLineP && <path d={totalLineP} fill="none" stroke={P.gold} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
-
-        {/* Live-tick: a pulsing dot at the rightmost data point. Tells
-            you at a glance that the chart is updating in near-real-time. */}
-        {totalLine && totalLine.length > 0 && (() => {
-          const [lx, ly] = totalLine[totalLine.length - 1];
-          return (
-            <g>
-              <circle cx={lx} cy={ly} r="3" fill={P.gold}>
-                <animate attributeName="r" values="3;6;3" dur="2s" repeatCount="indefinite" />
-                <animate attributeName="fill-opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
-              </circle>
-              <circle cx={lx} cy={ly} r="2" fill={P.gold} />
-            </g>
-          );
-        })()}
-
-        {hoverLine && (
-          <g>
-            <line x1={hoverLine.x} y1={padding.top} x2={hoverLine.x} y2={H - padding.bottom}
-                  stroke={P.gold} strokeOpacity="0.5" strokeDasharray="3 3" />
-            <circle cx={hoverLine.x} cy={hoverLine.totalY} r="3.5" fill={P.gold} stroke={P.bg} strokeWidth="1.5" />
-            <circle cx={hoverLine.x} cy={hoverLine.allowedY} r="2.5" fill={P.green} stroke={P.bg} strokeWidth="1" />
+        {bars.map((b, i) => (
+          <g key={i} opacity={hover && i !== hover.idx ? 0.55 : 1}>
+            {b.allowedH > 0 && (
+              <rect x={b.x} y={b.yAllowedTop} width={b.w} height={b.allowedH}
+                    fill={P.gold} fillOpacity={0.85} />
+            )}
+            {b.blockedH > 0 && (
+              <rect x={b.x} y={b.yTop} width={b.w} height={b.blockedH}
+                    fill={P.red} fillOpacity={0.95} />
+            )}
           </g>
+        ))}
+
+        {/* Peak-total spike annotation */}
+        {spikeBar && data[spikeIdx] && (
+          <g>
+            <line x1={spikeBar.x + spikeBar.w / 2} y1={spikeBar.yTop - 4}
+                  x2={spikeBar.x + spikeBar.w / 2} y2={padding.top + 2}
+                  stroke={P.gold} strokeOpacity="0.5" strokeDasharray="2 2" />
+            <text x={spikeBar.x + spikeBar.w / 2} y={padding.top - 4} textAnchor="middle"
+                  fontFamily="var(--mono)" fontSize="9" fill={P.gold}>
+              ↑ {fmt(spikeTotal)} rps
+            </text>
+          </g>
+        )}
+
+        {/* Last bar — gold outline frame to mark "now"; live-tick dot above.
+            SVG <animate> is continuous and not bound to React reconciliation. */}
+        {lastBar && (
+          <g>
+            <rect x={lastBar.x - 1} y={lastBar.yTop - 1} width={lastBar.w + 2}
+                  height={(H - padding.bottom) - (lastBar.yTop - 1)}
+                  fill="none" stroke={P.gold} strokeOpacity="0.6" strokeWidth="0.8" />
+            <circle cx={lastBar.x + lastBar.w / 2} cy={lastBar.yTop - 6} r="2.5" fill={P.gold}>
+              <animate attributeName="r" values="2.5;5;2.5" dur="2s" repeatCount="indefinite" />
+              <animate attributeName="fill-opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
+            </circle>
+          </g>
+        )}
+
+        {/* Hover highlight ring */}
+        {hover && (
+          <rect x={hover.bar.x - 0.5} y={hover.bar.yTop - 0.5}
+                width={hover.bar.w + 1}
+                height={(H - padding.bottom) - (hover.bar.yTop - 0.5)}
+                fill="none" stroke={P.gold} strokeWidth="1" />
         )}
       </svg>
 
-      {hoverLine && (
+      {hover && (
         <div style={{
           position: 'absolute',
-          left: `${(hoverLine.x / W) * 100}%`,
+          left: `${((hover.bar.x + hover.bar.w / 2) / W) * 100}%`,
           top: 10,
-          transform: (hoverLine.x / W) > 0.75 ? 'translateX(calc(-100% - 12px))' : 'translateX(12px)',
+          transform: ((hover.bar.x + hover.bar.w / 2) / W) > 0.75
+            ? 'translateX(calc(-100% - 12px))'
+            : 'translateX(12px)',
           background: 'var(--bg-elevated)',
           border: '1px solid var(--gold-dim)',
           padding: '8px 10px',
@@ -235,18 +256,18 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
           color: 'var(--text-primary)',
           zIndex: 10,
         }}>
-          <div style={{ color: 'var(--text-muted)', marginBottom: 4, letterSpacing: '0.08em' }}>{hoverLine.d.t}</div>
+          <div style={{ color: 'var(--text-muted)', marginBottom: 4, letterSpacing: '0.08em' }}>{hover.d.t}</div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
             <span style={{ color: P.gold }}>● total</span>
-            <span style={{ fontWeight: 600 }}>{(hoverLine.d.allowed || 0) + (hoverLine.d.blocked || 0)}</span>
+            <span style={{ fontWeight: 600 }}>{(hover.d.allowed || 0) + (hover.d.blocked || 0)}</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-            <span style={{ color: P.green }}>● allowed</span>
-            <span style={{ fontWeight: 600 }}>{hoverLine.d.allowed}</span>
+            <span style={{ color: P.gold, opacity: 0.85 }}>● allowed</span>
+            <span style={{ fontWeight: 600 }}>{hover.d.allowed}</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
             <span style={{ color: P.red }}>● blocked</span>
-            <span style={{ fontWeight: 600 }}>{hoverLine.d.blocked}</span>
+            <span style={{ fontWeight: 600 }}>{hover.d.blocked}</span>
           </div>
         </div>
       )}
@@ -255,22 +276,15 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
 }
 
 /* ── Token Usage Chart ────────────────────────────────────────────────────── */
+/* Bars design — same vocabulary as ThroughputChart. The prompt/completion
+   split lives in the twin-summary stats below the card, so the chart
+   itself stays single-color (gold bars for total per bucket).
+*/
 export function TokenChart({ data, isLight }) {
-  // Design: match the LatencyChart aesthetic (clean single-axis, one
-  // stacked story). Previously prompt and completion were drawn as TWO
-  // overlapping zero-anchored areas — they competed visually and you
-  // couldn't tell the contribution of each. Now prompt is the base
-  // (blue) and completion is STACKED on top (gold). The y-axis is the
-  // TOTAL tokens per bucket; the two-color stack makes the prompt vs
-  // completion split readable at a glance.
   const P = chartPalette(isLight);
   const W = 600, H = 170;
-  const padding = { left: 44, right: 10, top: 10, bottom: 22 };
-  const id = isLight ? 'light' : 'dark';
+  const padding = { left: 44, right: 10, top: 20, bottom: 22 };
 
-  // Empty-state detection: when every bucket has zero prompt AND zero
-  // completion, the stacked areas and lines all collapse to a flat
-  // baseline — visually invisible. Show a clear placeholder instead.
   const isFlat = !data.length || data.every(d => !d.prompt && !d.completion);
   if (isFlat) {
     return (
@@ -280,91 +294,97 @@ export function TokenChart({ data, isLight }) {
     );
   }
 
-  const { promptLineP, totalLineP, promptStackArea, completionStackArea, xLabels, yTicks, lastPt } = useMemo(() => {
-    if (!data.length) return {};
-    const prompt = data.map(d => d.prompt || 0);
-    const completion = data.map(d => d.completion || 0);
-    const total = prompt.map((p, i) => p + completion[i]);
+  const memo = useMemo(() => {
+    if (!data.length) return null;
+    const total = data.map(d => (d.prompt || 0) + (d.completion || 0));
     const yMax = Math.max(...total) * 1.15 || 1;
 
-    const promptLine = scalePoints(prompt, W, H, padding, yMax);
-    const totalLine = scalePoints(total, W, H, padding, yMax);
-    const lastPt = totalLine[totalLine.length - 1] || null;
+    const innerW = W - padding.left - padding.right;
+    const innerH = H - padding.top - padding.bottom;
+    const n = data.length;
+    const slot = innerW / n;
+    const barW = Math.max(2, slot - 1.5);
 
-    // Completion area is the band between promptLine (below) and
-    // totalLine (above) — i.e. the stacked completion contribution.
-    const baseY = H - padding.bottom;
-    const promptAreaPath = areaPath(promptLine, padding, H);
-    // Build the completion stack-band path explicitly: forward along
-    // totalLine, back along promptLine.
-    const completionBand = (() => {
-      if (!totalLine.length) return '';
-      const fwd = totalLine.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
-      const back = [...promptLine].reverse().map(([x, y]) => `L${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
-      return `${fwd} ${back} Z`;
-    })();
+    const bars = data.map((d, i) => {
+      const x = padding.left + i * slot + (slot - barW) / 2;
+      const h = (total[i] / yMax) * innerH;
+      const yTop = padding.top + innerH - h;
+      return { x, w: barW, yTop, h, total: total[i] };
+    });
 
     const yTicks = [];
     for (let i = 0; i <= 2; i++) {
       const v = (yMax / 2) * i;
-      const y = H - padding.bottom - ((v / yMax) * (H - padding.top - padding.bottom));
-      yTicks.push({ y, label: v >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v) });
+      const y = H - padding.bottom - ((v / yMax) * innerH);
+      yTicks.push({ y, label: fmt(v) });
     }
 
-    const n = data.length;
     const xLabels = [];
     for (let i = 0; i <= 4; i++) {
       const idx = Math.round((i / 4) * (n - 1));
       xLabels.push({
-        x: padding.left + (idx / (n - 1)) * (W - padding.left - padding.right),
+        x: padding.left + (idx / (n - 1)) * innerW,
         text: data[idx]?.t || '',
       });
     }
 
+    let spikeIdx = 0;
+    total.forEach((v, i) => { if (v > total[spikeIdx]) spikeIdx = i; });
+
     return {
-      promptLineP: smoothPath(promptLine),
-      totalLineP: smoothPath(totalLine),
-      promptStackArea: promptAreaPath,
-      completionStackArea: completionBand,
-      xLabels, yTicks, lastPt,
+      bars, yTicks, xLabels, spikeIdx,
+      spikeBar: bars[spikeIdx], spikeTotal: total[spikeIdx],
+      lastBar: bars[bars.length - 1],
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, isLight]);
 
+  if (!memo) return null;
+  const { bars, yTicks, xLabels, spikeIdx, spikeBar, spikeTotal, lastBar } = memo;
+
   return (
     <div className="chart-wrap">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height: '100%', display: 'block' }}>
-        <defs>
-          <linearGradient id={`tk-prompt-${id}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={P.blue} stopOpacity={P.blueA1} />
-            <stop offset="100%" stopColor={P.blue} stopOpacity="0" />
-          </linearGradient>
-          <linearGradient id={`tk-completion-${id}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={P.gold} stopOpacity={P.goldA1} />
-            <stop offset="100%" stopColor={P.gold} stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        {(yTicks || []).map((t, i) => (
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+           style={{ width: '100%', height: '100%', display: 'block' }}>
+        {yTicks.map((t, i) => (
           <g key={i}>
-            <line x1={padding.left} y1={t.y} x2={W - padding.right} y2={t.y} stroke={P.grid} strokeDasharray="2 4" />
-            <text x={padding.left - 6} y={t.y + 3} textAnchor="end" fontFamily="var(--mono)" fontSize="9" fill={P.axis}>{t.label}</text>
+            <line x1={padding.left} y1={t.y} x2={W - padding.right} y2={t.y}
+                  stroke={P.grid} strokeDasharray="2 4" />
+            <text x={padding.left - 6} y={t.y + 3} textAnchor="end"
+                  fontFamily="var(--mono)" fontSize="9" fill={P.axis}>{t.label}</text>
           </g>
         ))}
-        {(xLabels || []).map((l, i) => (
-          <text key={i} x={l.x} y={H - 6} textAnchor="middle" fontFamily="var(--mono)" fontSize="9" fill={P.axis}>{l.text}</text>
+        {xLabels.map((l, i) => (
+          <text key={i} x={l.x} y={H - 6} textAnchor="middle"
+                fontFamily="var(--mono)" fontSize="9" fill={P.axis}>{l.text}</text>
         ))}
-        {/* Stacked areas — prompt at the bottom, completion stacked above. */}
-        {promptStackArea && <path d={promptStackArea} fill={`url(#tk-prompt-${id})`} />}
-        {completionStackArea && <path d={completionStackArea} fill={`url(#tk-completion-${id})`} />}
-        {promptLineP && <path d={promptLineP} fill="none" stroke={P.blue} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />}
-        {totalLineP && <path d={totalLineP} fill="none" stroke={P.gold} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
-        {lastPt && (
+
+        {bars.map((b, i) => (
+          <rect key={i} x={b.x} y={b.yTop} width={b.w} height={b.h}
+                fill={P.gold} fillOpacity={0.82} />
+        ))}
+
+        {spikeBar && data[spikeIdx] && (
           <g>
-            <circle cx={lastPt[0]} cy={lastPt[1]} r="3" fill={P.gold}>
-              <animate attributeName="r" values="3;6;3" dur="2s" repeatCount="indefinite" />
+            <line x1={spikeBar.x + spikeBar.w / 2} y1={spikeBar.yTop - 4}
+                  x2={spikeBar.x + spikeBar.w / 2} y2={padding.top + 2}
+                  stroke={P.gold} strokeOpacity="0.5" strokeDasharray="2 2" />
+            <text x={spikeBar.x + spikeBar.w / 2} y={padding.top - 4} textAnchor="middle"
+                  fontFamily="var(--mono)" fontSize="9" fill={P.gold}>
+              ↑ {fmt(spikeTotal)} tok
+            </text>
+          </g>
+        )}
+
+        {lastBar && (
+          <g>
+            <rect x={lastBar.x - 1} y={lastBar.yTop - 1} width={lastBar.w + 2}
+                  height={(H - padding.bottom) - (lastBar.yTop - 1)}
+                  fill="none" stroke={P.gold} strokeOpacity="0.6" strokeWidth="0.8" />
+            <circle cx={lastBar.x + lastBar.w / 2} cy={lastBar.yTop - 6} r="2.5" fill={P.gold}>
+              <animate attributeName="r" values="2.5;5;2.5" dur="2s" repeatCount="indefinite" />
               <animate attributeName="fill-opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
             </circle>
-            <circle cx={lastPt[0]} cy={lastPt[1]} r="2" fill={P.gold} />
           </g>
         )}
       </svg>
@@ -373,6 +393,7 @@ export function TokenChart({ data, isLight }) {
 }
 
 /* ── Latency Chart ────────────────────────────────────────────────────────── */
+/* Unchanged — this is the approved reference design. */
 export function LatencyChart({ data, isLight }) {
   const P = chartPalette(isLight);
   const W = 600, H = 170;
