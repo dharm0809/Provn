@@ -93,6 +93,7 @@ from gateway.compliance.api import compliance_export
 from gateway.openwebui.status_api import openwebui_status
 from gateway.openwebui.events_api import openwebui_events_receive, openwebui_events_list
 from gateway.ollama_proxy import ollama_api_tags, ollama_api_ps, ollama_api_version, ollama_api_show
+from gateway.ollama_chat_bridge import ollama_api_chat, ollama_api_generate
 
 try:
     import uvloop
@@ -2580,6 +2581,11 @@ def create_app() -> Starlette:
         Route("/api/ps", ollama_api_ps, methods=["GET"]),
         Route("/api/version", ollama_api_version, methods=["GET"]),
         Route("/api/show", ollama_api_show, methods=["POST"]),
+        # /api/chat + /api/generate translate Ollama-shape bodies into
+        # OpenAI-shape and re-enter the orchestrator, so OWUI's Ollama
+        # connection can drive Anthropic/OpenAI models without 404'ing.
+        Route("/api/chat", ollama_api_chat, methods=["POST"]),
+        Route("/api/generate", ollama_api_generate, methods=["POST"]),
         # Models API (OpenAI-compatible)
         Route("/v1/models", list_models, methods=["GET"]),
         # Compliance export
