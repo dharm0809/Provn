@@ -148,6 +148,13 @@ class ObservabilityPrecomputeWorker:
             from gateway.connections import api as conn_api
             from gateway.connections.builder import build_snapshot
             snapshot = await build_snapshot(self._ctx)
+            # Warm the shared Redis cache when available so every worker
+            # benefits from the leader's tick — not just this process.
+            redis_client = getattr(self._ctx, "redis_client", None)
+            if redis_client is not None:
+                await conn_api._redis_set(redis_client, snapshot)
+            # Always warm the in-process cache too: covers single-worker
+            # deployments and serves as a Redis-outage fallback.
             conn_api._CACHE["snapshot"] = snapshot
             conn_api._CACHE["ts"] = time.time()
             return True
