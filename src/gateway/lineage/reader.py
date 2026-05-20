@@ -975,15 +975,16 @@ class LineageReader:
     def get_chain_verification_report(
         self, start: str, end: str, sample_limit: int = 50,
     ) -> list[dict]:
-        """Verify chain integrity for a bounded SAMPLE of sessions in [start, end).
+        """Verify chain integrity for a bounded sample of sessions in [start, end).
 
-        Mirrors ``WalacorLineageReader.get_chain_verification_report``: prior
-        behaviour ran ``verify_chain`` for EVERY session in the window, which
-        for a prod gateway accumulating thousands of sessions made the
-        compliance endpoint quadratic in session count.  We now sample the
-        most-recent ``sample_limit`` sessions (default 50) and surface the
-        ``sampled`` / ``total_sessions_in_window`` signal via the caller
-        (`compliance.api._compute_shared_report`).
+        Still works for ad-hoc one-offs (CLI debugging, custom scripts,
+        the background ``ChainIntegrityWorker`` which calls this with a
+        very large ``sample_limit`` to get a census). The dashboard's
+        ``/v1/compliance/export`` endpoint NO LONGER calls this directly
+        — it reads precomputed results from
+        ``gateway.compliance.chain_store.ChainVerificationStore``,
+        populated by the background worker. See
+        ``gateway.compliance.chain_worker`` for the worker contract.
         """
         # Multi-PID: per-worker LIMITs miss top-N globally. Pull each
         # worker's top-sample_limit, union, re-sort by latest_ts, take

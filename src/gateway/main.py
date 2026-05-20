@@ -1124,6 +1124,63 @@ def _init_compliance_precompute(settings, ctx) -> None:
         ctx.compliance_precompute_worker = None
 
 
+def _init_chain_integrity_worker(settings, ctx) -> None:
+    """Start the background chain integrity census worker.
+
+    Replaces the on-demand 50-session sampler that the compliance
+    dashboard used to call on every page load. The worker:
+      - enumerates every session in a configurable rolling window
+        (``WALACOR_CHAIN_VERIFICATION_WINDOW_DAYS``, default 7 days),
+      - calls ``reader.verify_chain`` for each (bounded by Semaphore(8)),
+      - writes results to ``{wal_path}/chain_verification.db``,
+      - prunes rows that age out of the window so storage stays bounded.
+
+    The compliance API now reads from that store instead of recomputing
+    on the request path. Across uvicorn workers the worker uses a
+    filesystem lock to elect a single leader per tick — followers no-op,
+    so we don't pay N× the Walacor cost for N workers.
+
+    Fail-open: a worker that can't start logs a warning and leaves the
+    compliance API on ``pending=True`` until the next deploy.
+    """
+    if not getattr(ctx, "lineage_reader", None):
+        return
+    try:
+        from gateway.compliance.chain_store import ChainVerificationStore
+        from gateway.compliance.chain_worker import ChainIntegrityWorker
+
+        db_path = str(Path(settings.wal_path) / "chain_verification.db")
+        store = ChainVerificationStore(db_path)
+        # Stash the store on ctx so the compliance API read path can
+        # see it without going through the worker (which may be a no-op
+        # follower in this uvicorn process).
+        ctx.chain_verification_store = store
+
+        # Env-var overrides for operators who need a tighter or wider
+        # census than the defaults (5 min tick, 7-day window). Read
+        # directly from os.environ to avoid needing new fields on the
+        # Settings model (the worker is conservative by design — most
+        # deployments should be on defaults).
+        tick_s = float(os.environ.get("WALACOR_CHAIN_VERIFICATION_TICK_S", "300"))
+        window_days = int(os.environ.get("WALACOR_CHAIN_VERIFICATION_WINDOW_DAYS", "7"))
+
+        worker = ChainIntegrityWorker(
+            ctx.lineage_reader,
+            store,
+            tick_interval_s=tick_s,
+            window_days=window_days,
+        )
+        worker.start()
+        ctx.chain_integrity_worker = worker
+        logger.info(
+            "Chain integrity worker started (window=%dd, tick=%.0fs, store=%s)",
+            window_days, tick_s, db_path,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open per docstring
+        logger.warning("Chain integrity worker init failed (non-fatal): %s", exc)
+        ctx.chain_integrity_worker = None
+
+
 def _init_observability_precompute(settings, ctx) -> None:
     """Pre-warm the readiness + connections caches.
 
@@ -1869,6 +1926,9 @@ async def on_startup() -> None:
         # default RangePicker windows, so dashboard cold-loads drop from
         # ~5s to ~50ms after the first tick.
         _init_compliance_precompute(settings, ctx)
+        # Background chain integrity census — replaces the on-demand
+        # 50-session sampler the compliance dashboard used to invoke.
+        _init_chain_integrity_worker(settings, ctx)
         # Pre-warm readiness + connections so dashboard ops views always
         # land on a cache hit instead of a cold compute.
         _init_observability_precompute(settings, ctx)
@@ -2375,6 +2435,17 @@ async def on_shutdown() -> None:
         except Exception as e:
             errors.append(f"compliance_precompute_worker: {e}")
         ctx.compliance_precompute_worker = None
+
+    # Stop the chain integrity worker. Idempotent — safe to call even
+    # if the worker never started (lineage disabled, or no reader).
+    if getattr(ctx, "chain_integrity_worker", None) is not None:
+        try:
+            await asyncio.wait_for(ctx.chain_integrity_worker.stop(), timeout=2.0)
+        except asyncio.TimeoutError:
+            errors.append("chain_integrity_worker: stop timed out")
+        except Exception as e:
+            errors.append(f"chain_integrity_worker: {e}")
+        ctx.chain_integrity_worker = None
 
     # Stop the observability precompute worker. Idempotent — safe to
     # call even if the worker never started.
