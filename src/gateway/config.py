@@ -241,6 +241,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Observability-path auth (/v1/readiness, /v1/connections, /metrics + /health debug fields)
+    observability_auth_required: bool = Field(
+        default=False,
+        description=(
+            "When True, /v1/readiness, /v1/connections, and /metrics require a valid "
+            "X-API-Key (matching WALACOR_GATEWAY_API_KEYS). /health stays public for "
+            "load balancers but its debug fields (storage, attestation_cache, wal, "
+            "policy_cache, etc.) are stripped unless the caller presents a valid key. "
+            "Default False for backwards compatibility; enable in production to avoid "
+            "leaking operational state (provider error rates, per-tenant token usage, "
+            "WAL backlog, anchoring lag) to anonymous callers."
+        ),
+    )
+
     # Reject requests with Transfer-Encoding: chunked (no Content-Length cap possible)
     reject_chunked_transfer: bool = Field(
         default=True,

@@ -8,10 +8,38 @@ from datetime import datetime, timezone
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from gateway.auth.api_key import _constant_time_key_check, get_api_key_from_request
 from gateway.config import get_settings
 from gateway.pipeline.context import get_pipeline_context
 
 _start_time = time.time()
+
+# Fields stripped from /health when observability_auth_required=True and the
+# caller did not present a valid API key. These leak operational capacity
+# (WAL backlog, anchoring lag, storage backend identity, cache sizes, etc.).
+_HEALTH_DEBUG_FIELDS = (
+    "storage",
+    "attestation_cache",
+    "policy_cache",
+    "wal",
+    "token_budget",
+    "session_chain",
+    "model_capabilities",
+    "resource_monitor",
+    "startup_probes",
+    "intelligence",
+    "content_analyzers",
+)
+
+
+def _caller_has_valid_key(request: Request, settings) -> bool:
+    """True if the request carries an API key matching the configured allowlist."""
+    if not settings.api_keys_list:
+        return False
+    key = get_api_key_from_request(request)
+    if not key:
+        return False
+    return _constant_time_key_check(key, settings.api_keys_list)
 
 
 async def health_response(request: Request) -> JSONResponse:
@@ -125,6 +153,15 @@ async def health_response(request: Request) -> JSONResponse:
         intel = _build_intelligence_status(ctx)
         if intel is not None:
             payload["intelligence"] = intel
+
+    # When observability auth is required and the caller did NOT present a valid
+    # API key, strip debug fields. The minimal payload (status, gateway_id,
+    # tenant_id, enforcement_mode, uptime_seconds) is still enough for load
+    # balancers to make a routing decision without leaking operational capacity.
+    if getattr(settings, "observability_auth_required", False):
+        if not _caller_has_valid_key(request, settings):
+            for field in _HEALTH_DEBUG_FIELDS:
+                payload.pop(field, None)
 
     return JSONResponse(payload)
 
