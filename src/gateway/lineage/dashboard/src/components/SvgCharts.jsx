@@ -90,6 +90,18 @@ export function ThroughputChart({ data, hoverIdx, setHoverIdx, isLight }) {
   const padding = { left: 44, right: 10, top: 12, bottom: 24 };
   const id = isLight ? 'light' : 'dark';
 
+  // Empty-state detection: when every bucket has zero allowed AND zero
+  // blocked, the stacked areas collapse to a flat baseline (visually
+  // identical to a blank card). Show a clear placeholder instead.
+  const isFlat = !data.length || data.every(d => !d.allowed && !d.blocked);
+  if (isFlat) {
+    return (
+      <div className="throughput-chart-wrap chart-wrap-empty">
+        <div className="chart-empty-text">Waiting for traffic in this window</div>
+      </div>
+    );
+  }
+
   const { allowedAreaP, blockedBandP, totalLineP, xLabels, yTicks, hoverLine, allowedLine, totalLine } = useMemo(() => {
     if (!data.length) return {};
     const allowed = data.map(d => d.allowed || 0);
@@ -255,6 +267,18 @@ export function TokenChart({ data, isLight }) {
   const W = 600, H = 170;
   const padding = { left: 44, right: 10, top: 10, bottom: 22 };
   const id = isLight ? 'light' : 'dark';
+
+  // Empty-state detection: when every bucket has zero prompt AND zero
+  // completion, the stacked areas and lines all collapse to a flat
+  // baseline — visually invisible. Show a clear placeholder instead.
+  const isFlat = !data.length || data.every(d => !d.prompt && !d.completion);
+  if (isFlat) {
+    return (
+      <div className="chart-wrap chart-wrap-empty">
+        <div className="chart-empty-text">Waiting for token activity in this window</div>
+      </div>
+    );
+  }
 
   const { promptLineP, totalLineP, promptStackArea, completionStackArea, xLabels, yTicks, lastPt } = useMemo(() => {
     if (!data.length) return {};
