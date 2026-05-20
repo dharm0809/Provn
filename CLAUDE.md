@@ -128,6 +128,7 @@ These guards exist because the exact bug shipped to production. Each is a *by-co
 - **Debugging blank dashboard**: minified errors don't name the component. Use Playwright MCP (`browser_navigate` → `browser_console_messages level=error`) to pull line/column in `index-*.js`, then grep the source tree.
 
 ## Operations (EC2 gateway_dharm @ 35.165.21.8)
+- Before exposing the gateway to real traffic, walk through `docs/PRODUCTION_CHECKLIST.md` (TLS, secrets out of disk, per-tenant keys, observability lockdown, smoke tests).
 - Gateway runs natively on port 8100 (not Docker). Start/restart via `~/start_gateway_dharm.sh`; logs `/tmp/gateway_dharm.log`; WAL `/tmp/walacor-wal-dharm/`.
 - OpenWebUI runs in Docker on port 3100 (`gateway-dharm-openwebui`). Volume `gateway_dharm_webui-data` mounts at `/app/backend/data` → `/var/lib/docker/volumes/gateway_dharm_webui-data/_data/`.
 - **OpenWebUI secret key must be persisted to the volume**, not via env var. Without `.webui_secret_key` on disk, OpenWebUI regenerates it on every restart → all sessions invalidated. Fix: write 32-byte `secrets.token_urlsafe` to `<volume>/.webui_secret_key` (chmod 600, root-owned), restart container.

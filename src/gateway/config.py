@@ -133,9 +133,12 @@ class Settings(BaseSettings):
     )
 
     # Phase 17: Llama Guard safety classifier
+    # Default OFF: most deployments don't run Ollama. Enabling-by-default makes
+    # DEP-03 (Ollama reachability) and FEA-01 (Llama Guard) readiness checks red
+    # on every fresh install. Operators opt in explicitly when Ollama is deployed.
     llama_guard_enabled: bool = Field(
-        default=True,
-        description="Enable Llama Guard 3 content analyzer (requires ollama pull llama-guard3:1b).",
+        default=False,
+        description="Enable Llama Guard 3 content analyzer (requires ollama pull llama-guard3:1b). Default off — set true only when Ollama + llama-guard3:1b are reachable.",
     )
     llama_guard_model: str = Field(
         default="llama-guard3:1b",
