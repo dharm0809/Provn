@@ -160,3 +160,52 @@ async def test_discover_without_live_check_does_not_probe():
 
     assert http.post.await_count == 0
     assert all("callable" not in m for m in models)
+
+
+# ── _is_non_chat_model: short-circuit probe to skip embeddings/whisper/etc. ──
+
+def test_is_non_chat_model_skips_embeddings():
+    from gateway.control.discovery import _is_non_chat_model
+    assert _is_non_chat_model("text-embedding-3-large") is True
+    assert _is_non_chat_model("text-embedding-ada-002") is True
+
+
+def test_is_non_chat_model_skips_audio_family():
+    from gateway.control.discovery import _is_non_chat_model
+    assert _is_non_chat_model("whisper-1") is True
+    assert _is_non_chat_model("gpt-4o-transcribe") is True
+    assert _is_non_chat_model("tts-1-hd") is True
+    assert _is_non_chat_model("gpt-4o-audio-preview") is True
+    assert _is_non_chat_model("gpt-realtime-mini") is True
+
+
+def test_is_non_chat_model_skips_image_video():
+    from gateway.control.discovery import _is_non_chat_model
+    assert _is_non_chat_model("dall-e-3") is True
+    assert _is_non_chat_model("gpt-image-1") is True
+    assert _is_non_chat_model("sora-2") is True
+
+
+def test_is_non_chat_model_skips_legacy_completions():
+    from gateway.control.discovery import _is_non_chat_model
+    assert _is_non_chat_model("davinci-002") is True
+    assert _is_non_chat_model("gpt-3.5-turbo-instruct") is True
+    assert _is_non_chat_model("babbage-002") is True
+
+
+def test_is_non_chat_model_keeps_real_chat_models():
+    """The 3 attested-on-prod chat models must NOT be flagged as non-chat."""
+    from gateway.control.discovery import _is_non_chat_model
+    assert _is_non_chat_model("gpt-4o-mini") is False
+    assert _is_non_chat_model("gpt-4o") is False
+    assert _is_non_chat_model("claude-haiku-4-5-20251001") is False
+    assert _is_non_chat_model("claude-sonnet-4-6") is False
+    assert _is_non_chat_model("claude-opus-4-7") is False
+    assert _is_non_chat_model("o1") is False
+    assert _is_non_chat_model("o3-mini") is False
+
+
+def test_is_non_chat_model_handles_non_string():
+    from gateway.control.discovery import _is_non_chat_model
+    assert _is_non_chat_model(None) is False
+    assert _is_non_chat_model(42) is False

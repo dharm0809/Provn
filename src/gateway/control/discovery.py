@@ -16,6 +16,49 @@ _PROBE_BODY_MAX_CHARS = 200
 # Models used internally (e.g. content safety analyzers) — excluded from discovery
 _INTERNAL_MODEL_PREFIXES = ("llama-guard", "llama_guard")
 
+# OpenAI returns 130+ models from /v1/models — most aren't chat-completions
+# models and probing them with a chat request just produces "not a chat
+# model" 404s that waste 1-2 s of probe time each. Prefix/substring match
+# against the model_id to skip these before the probe runs.
+#
+# (We still LIST them in /v1/control/discover output so an admin can see
+# what's available; we just don't probe their chat-callability — the
+# `callable` field reads `False` with `non_chat_model_skipped` as the
+# reason.)
+_NON_CHAT_MODEL_TOKENS = (
+    "whisper",           # speech-to-text
+    "transcribe",        # gpt-4o-transcribe family
+    "tts",               # text-to-speech
+    "audio",             # gpt-4o-audio-preview etc.
+    "embedding",         # text-embedding-3-* / ada-002
+    "dall-e",            # image gen
+    "sora",              # video gen
+    "moderation",        # omni-moderation-*
+    "image",             # gpt-image-*
+    "realtime",          # gpt-realtime-* (WebRTC, not chat)
+    "search-api",        # gpt-5-search-api (search tool, not chat)
+    "deep-research",     # o4-mini-deep-research (research API)
+    "codex",             # gpt-5-codex (code completions, not chat-shape)
+)
+_NON_CHAT_EXACT = {
+    "davinci-002", "babbage-002",
+    "gpt-3.5-turbo-instruct", "gpt-3.5-turbo-instruct-0914",
+}
+
+
+def _is_non_chat_model(model_id: str) -> bool:
+    """Return True when this model ID won't accept a chat-completions probe.
+
+    Cheap substring + exact-match check. The list grows by provider release;
+    test with a fixture corpus when extending.
+    """
+    if not isinstance(model_id, str):
+        return False
+    if model_id in _NON_CHAT_EXACT:
+        return True
+    lower = model_id.lower()
+    return any(tok in lower for tok in _NON_CHAT_MODEL_TOKENS)
+
 
 async def discover_provider_models(
     settings: Any,
@@ -131,10 +174,21 @@ async def _probe_models(
     settings: Any,
     http_client: Any,
 ) -> None:
-    """Probe every model in `models` and annotate each entry in place."""
+    """Probe every chat-compatible model and annotate each entry in place.
+
+    Non-chat models (embeddings, whisper, tts, dall-e, …) are short-circuited
+    to ``callable=False`` with ``non_chat_model_skipped`` as the reason —
+    sending them a chat-completions probe just produces noise + costs ~1-2s
+    of round-trip per model. With 130+ OpenAI models listed, this was the
+    primary cause of the providers tab's 11.5s page-load on prod.
+    """
     sem = asyncio.Semaphore(_PROBE_MAX_CONCURRENCY)
 
     async def _one(entry: dict) -> None:
+        if _is_non_chat_model(entry.get("model_id", "")):
+            entry["callable"] = False
+            entry["unavailable_reason"] = "non_chat_model_skipped"
+            return
         async with sem:
             callable_, reason = await probe_model_callable(
                 entry["model_id"], entry["provider"], settings, http_client
@@ -144,9 +198,12 @@ async def _probe_models(
                 entry["unavailable_reason"] = reason
 
     await asyncio.gather(*(_one(m) for m in models), return_exceptions=False)
+    probed = sum(1 for m in models if m.get("unavailable_reason") != "non_chat_model_skipped")
     callable_count = sum(1 for m in models if m.get("callable"))
+    skipped = len(models) - probed
     logger.info(
-        "Model callability probe: %d/%d callable", callable_count, len(models)
+        "Model callability probe: %d/%d callable (probed=%d, skipped_non_chat=%d)",
+        callable_count, len(models), probed, skipped,
     )
 
 

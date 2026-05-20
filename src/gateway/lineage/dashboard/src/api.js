@@ -295,8 +295,15 @@ export async function removeAttestation(id) {
   return controlFetch(`${CTRL_API}/attestations/${id}`, { method: 'DELETE' });
 }
 
-export async function discoverModels() {
-  return fetchControlJSON(`${CTRL_API}/discover`);
+export async function discoverModels({ liveCheck = false } = {}) {
+  // live_check defaults to FALSE for the dashboard: probing every
+  // upstream model with a real chat-completions request adds ~5-10s
+  // on prod (130+ OpenAI models behind the API key), which made the
+  // providers tab appear stuck. Callability info still arrives if
+  // the caller explicitly asks for it ({liveCheck: true}), e.g. for
+  // a manual 'Re-sync with callability' action.
+  const qs = liveCheck ? '?live_check=true' : '?live_check=false';
+  return fetchControlJSON(`${CTRL_API}/discover${qs}`);
 }
 
 export async function getPolicies() {
