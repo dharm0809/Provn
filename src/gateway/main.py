@@ -1999,11 +1999,14 @@ async def on_startup() -> None:
                 except Exception as e:
                     logger.warning("Failed to load custom validator %s: %s", paths[0], e)
         # Phase 23: Capability registry + resource monitor
-        from gateway.adaptive.capability_registry import CapabilityRegistry
+        from gateway.adaptive.capability_registry import make_capability_registry
         from gateway.adaptive.resource_monitor import DefaultResourceMonitor
-        ctx.capability_registry = CapabilityRegistry(
-            ttl_seconds=settings.capability_probe_ttl_seconds,
-            control_store=ctx.control_store)
+        # Multi-worker safe: Redis-backed when ctx.redis_client is set (see
+        # CLAUDE.md "Multi-worker shared state"). Falls back to the in-memory
+        # CapabilityRegistry for single-worker deployments.
+        ctx.capability_registry = make_capability_registry(
+            ctx.redis_client, settings, control_store=ctx.control_store,
+        )
         if settings.disk_monitor_enabled:
             ctx.resource_monitor = DefaultResourceMonitor(
                 wal_path=settings.wal_path,
