@@ -394,11 +394,16 @@ function AttestationsPanel({ rows, canWrite, onUnlock, onRefresh, onMutate, tena
           <h2>Attestations <span className="cp-panel-head-count">{rows.length}</span></h2>
           <p>Signed bindings of (model × purpose). Requests without a matching active attestation are denied.</p>
         </div>
+        {/* Click is allowed even when locked: in that branch onUnlock
+            opens the API-key prompt. The pre-fix `disabled={!canWrite}`
+            blocked the click entirely, so the locked-state branch
+            (`!canWrite ? onUnlock`) was unreachable — clicking the
+            button in the locked state appeared to do nothing. */}
         <button
           type="button"
           className="cp-btn cp-btn-primary"
-          disabled={!canWrite}
           onClick={!canWrite ? onUnlock : () => setCreateOpen(true)}
+          title={!canWrite ? 'Unlock the control plane to create an attestation' : undefined}
         >◆ new attestation</button>
       </div>
 
